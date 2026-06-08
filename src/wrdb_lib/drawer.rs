@@ -19,7 +19,7 @@ pub struct Drawer {
 
     primary_memory_index: HashMap<String, u64>,
     secondary_memory_index: HashMap<String, HashMap<String, Vec<u64>>>,
-    index_file_offsets: HashMap<String, u64>,
+    index_file_offsets: HashMap<String, (u64, usize)>,
 }
 
 impl Drawer {
@@ -45,8 +45,9 @@ impl Drawer {
         let mut primary_memory_index = HashMap::new();
         let mut secondary_memory_index = HashMap::new();
         let mut index_file_offsets = HashMap::new();
+        let mut inferred_unique_constraints = unique_constraints;
 
-        for field in &unique_constraints {
+        for field in &inferred_unique_constraints {
             secondary_memory_index.insert(field.clone(), HashMap::new());
         }
 
@@ -93,22 +94,33 @@ impl Drawer {
                     index_entry.get("o"),
                 ) {
                     let map_key = format!("{}:{}", field, key);
-                    index_file_offsets.insert(map_key, current_offset);
+                    index_file_offsets.insert(map_key, (current_offset, actual_slot_size));
 
                     if field == primary_key {
                         if let Some(data_offset) = data_offset_val.as_u64() {
                             primary_memory_index.insert(key.to_string(), data_offset);
                         }
-                    } else if let Some(field_map) = secondary_memory_index.get_mut(field) {
+                    } else {
+                        if !inferred_unique_constraints.contains(&field.to_string()) {
+                            inferred_unique_constraints.push(field.to_string());
+                        }
+                        
+                        let field_map = secondary_memory_index
+                            .entry(field.to_string())
+                            .or_insert_with(HashMap::new);
+
                         if let Some(data_offset) = data_offset_val.as_u64() {
-                            field_map
-                                .entry(key.to_string())
-                                .or_insert_with(Vec::new)
-                                .push(data_offset);
+                            field_map.insert(key.to_string(), vec![data_offset]);
                         } else if let Some(offset_array) = data_offset_val.as_array() {
-                            let offsets: Vec<u64> =
-                                offset_array.iter().filter_map(|v| v.as_u64()).collect();
-                            field_map.insert(key.to_string(), offsets);
+                            if offset_array.is_empty() {
+                                field_map.remove(key);
+                            } else {
+                                let offsets: Vec<u64> = offset_array
+                                    .iter()
+                                    .filter_map(|v| v.as_u64())
+                                    .collect();
+                                field_map.insert(key.to_string(), offsets);
+                            }
                         }
                     }
                 }
@@ -118,7 +130,7 @@ impl Drawer {
         Ok(Self {
             name: name.to_string(),
             primary_key: primary_key.to_string(),
-            unique_constraints,
+            unique_constraints: inferred_unique_constraints,
             data_writer,
             data_reader,
             index_writer,
@@ -142,6 +154,11 @@ impl Drawer {
         };
 
         let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
+        let old_record = if let Some(existing_offset) = old_data_offset {
+            self.data_reader.read_record_at_offset(existing_offset)?
+        } else {
+            None
+        };
 
         let mut historical_tombstone_meta: Option<(u64, usize)> = None;
         if let Some(stale_offset) = old_data_offset {
@@ -171,7 +188,7 @@ impl Drawer {
 
         for unique_field in &self.unique_constraints {
             if let Some(field_value) = record.get(unique_field).and_then(|v| v.as_str()) {
-                if let Some(field_map) = self.secondary_memory_index.get(field_value) {
+                if let Some(field_map) = self.secondary_memory_index.get(unique_field) {
                     if let Some(offsets) = field_map.get(field_value) {
                         if offsets.iter().any(|&o| Some(o) != old_data_offset) {
                             return Ok(Err(format!(
@@ -213,10 +230,37 @@ impl Drawer {
 
         let fields_to_index = self.unique_constraints.clone();
         for unique_field in fields_to_index {
+            let old_field_value = old_record
+                .as_ref()
+                .and_then(|value| value.get(&unique_field))
+                .and_then(|value| value.as_str());
+
+            if let (Some(previous_value), Some(previous_offset)) = (old_field_value, old_data_offset) {
+                if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
+                    if let Some(offsets) = field_map.get_mut(previous_value) {
+                        offsets.retain(|offset| *offset != previous_offset);
+                        if offsets.is_empty() {
+                            field_map.remove(previous_value);
+                        }
+                    }
+                }
+
+                if record
+                    .get(&unique_field)
+                    .and_then(|value| value.as_str())
+                    != Some(previous_value)
+                {
+                    self.write_index_log(&unique_field, previous_value, Value::Array(Vec::new()))?;
+                }
+            }
+
             if let Some(field_value) = record.get(&unique_field).and_then(|v| v.as_str()) {
                 self.write_index_log(&unique_field, field_value, Value::from(data_offset))?;
                 if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
-                    field_map.insert(field_value.to_string(), vec![data_offset]);
+                    let offsets = field_map.entry(field_value.to_string()).or_default();
+                    if !offsets.contains(&data_offset) {
+                        offsets.push(data_offset);
+                    }
                 }
             }
         }
@@ -286,24 +330,21 @@ impl Drawer {
                 .append_aligned_index(&serialized_index, target_size_class)?
         };
 
-        if let Some(old_index_offset) = self.index_file_offsets.get(&map_key).copied() {
+        if let Some((old_index_offset, old_size_class)) = self.index_file_offsets.get(&map_key).copied() {
             if old_index_offset != new_index_offset {
                 self.index_writer
-                    .write_tombstone_at_offset(old_index_offset, target_size_class)?;
+                    .write_tombstone_at_offset(old_index_offset, old_size_class)?;
                 self.index_recycler
-                    .register_free_slot(target_size_class, old_index_offset);
+                    .register_free_slot(old_size_class, old_index_offset);
             }
         }
 
-        self.index_file_offsets.insert(map_key, new_index_offset);
+        self.index_file_offsets.insert(map_key, (new_index_offset, target_size_class));
         Ok(())
     }
 
-    pub fn find_all_records(
-        &mut self,
-        drawer_registry: &HashMap<String, &mut Drawer>,
-    ) -> std::io::Result<Vec<Value>> {
-        let mut fully_hydrated_records = Vec::new();
+    pub fn find_all_records(&mut self) -> std::io::Result<Vec<Value>> {
+        let mut live_records = Vec::new();
         let mut raw_lines = Vec::new();
 
         self.data_reader
@@ -315,75 +356,11 @@ impl Drawer {
             })?;
 
         for line in raw_lines {
-            if let Ok(mut record_value) = serde_json::from_str::<Value>(&line) {
-                self.hydrate_value(&mut record_value, drawer_registry)?;
-                fully_hydrated_records.push(record_value);
+            if let Ok(record_value) = serde_json::from_str::<Value>(&line) {
+                live_records.push(record_value);
             }
         }
 
-        Ok(fully_hydrated_records)
-    }
-
-    fn hydrate_value(
-        &mut self,
-        current_value: &mut Value,
-        drawer_registry: &HashMap<String, &mut Drawer>,
-    ) -> std::io::Result<()> {
-        match current_value {
-            Value::Object(map) => {
-                let mut updates = Vec::new();
-
-                for (field_name, field_value) in map.iter() {
-                    if field_name == "_id" {
-                        continue;
-                    }
-
-                    if let Some(id_str) = field_value.as_str() {
-                        if id_str.starts_with('@') && id_str.contains(":lnk_") {
-                            if let Some(colon_index) = id_str.find(':') {
-                                let drawer_prefix = id_str[1..colon_index].to_string();
-                                if drawer_registry.contains_key(&drawer_prefix) {
-                                    updates.push((
-                                        field_name.clone(),
-                                        id_str.to_string(),
-                                        drawer_prefix,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for (field_name, id_str, drawer_prefix) in updates {
-                    if let Some(target_drawer) = drawer_registry.get(&drawer_prefix) {
-                        let drawer_ptr = *target_drawer as *const Drawer as *mut Drawer;
-                        unsafe {
-                            if let Ok(Some(mut fetched_foreign_record)) =
-                                (*drawer_ptr).find_by_primary_key(&id_str)
-                            {
-                                let _ = (*drawer_ptr)
-                                    .hydrate_value(&mut fetched_foreign_record, drawer_registry);
-                                if let Some(value_ref) = map.get_mut(&field_name) {
-                                    *value_ref = fetched_foreign_record;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for (field_name, field_value) in map.iter_mut() {
-                    if field_name != "_id" && !field_value.is_string() {
-                        self.hydrate_value(field_value, drawer_registry)?;
-                    }
-                }
-            }
-            Value::Array(vec) => {
-                for item in vec.iter_mut() {
-                    self.hydrate_value(item, drawer_registry)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
+        Ok(live_records)
     }
 }

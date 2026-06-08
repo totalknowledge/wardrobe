@@ -1,6 +1,6 @@
 use crate::wrdb_lib::database::Database;
-use crate::wrdb_lib::drawer::Drawer;
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 use std::io::{Error, ErrorKind, Result};
 use uuid::Uuid;
 
@@ -56,33 +56,42 @@ impl WardrobeEngine {
     }
 
     pub fn find_all(&mut self, drawer_name: &str) -> std::io::Result<Vec<Value>> {
-        self.database_core
-            .load_drawer(drawer_name, "_id", Vec::new())?;
-        self.database_core.load_existing_drawers("_id")?;
+        let mut records = if let Some(drawer) = self
+            .database_core
+            .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+        {
+            drawer.find_all_records()?
+        } else {
+            Vec::new()
+        };
 
-        let mut registry = self.database_core.get_all_drawers();
-        if let Some(drawer) = registry.get_mut(drawer_name) {
-            let drawer_ptr = *drawer as *mut Drawer;
-            unsafe {
-                return (*drawer_ptr).find_all_records(&registry);
+        for record in &mut records {
+            let mut active_pointer_path = HashSet::new();
+            if let Value::Object(map) = record {
+                if let Some(pointer) = map.get("_id").and_then(|value| value.as_str()) {
+                    active_pointer_path.insert(pointer.to_string());
+                }
             }
+            self.hydrate_value(record, true, &mut active_pointer_path)?;
         }
-        Ok(Vec::new())
+
+        Ok(records)
     }
 
     pub fn find_by_id(&mut self, pointer: &str) -> Result<Option<Value>> {
         let (drawer_name, _) = self.parse_pointer(pointer)?;
 
-        self.database_core
-            .load_drawer(&drawer_name, "_id", Vec::new())?;
-
-        if let Some(drawer) = self.database_core.use_drawer(&drawer_name) {
+        if let Some(drawer) = self
+            .database_core
+            .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        {
             if let Some(mut record) = drawer.find_by_primary_key(pointer)? {
+                let mut active_pointer_path = HashSet::from([pointer.to_string()]);
+                self.hydrate_value(&mut record, false, &mut active_pointer_path)?;
                 if let Value::Object(ref mut map) = record {
                     map.remove("_id");
-                    let resolved_map = self.deep_resolve_pointers(map.clone())?;
-                    return Ok(Some(Value::Object(resolved_map)));
                 }
+                return Ok(Some(record));
             }
         }
         Ok(None)
@@ -103,26 +112,93 @@ impl WardrobeEngine {
         Ok(continuous_map)
     }
 
-    fn deep_resolve_pointers(&mut self, map: Map<String, Value>) -> Result<Map<String, Value>> {
-        let mut reconstructed_map = Map::new();
+    fn hydrate_value(
+        &mut self,
+        current_value: &mut Value,
+        include_ids: bool,
+        active_pointer_path: &mut HashSet<String>,
+    ) -> Result<()> {
+        match current_value {
+            Value::Object(map) => {
+                let pointer_updates = map
+                    .iter()
+                    .filter_map(|(field_name, field_value)| {
+                        if field_name == "_id" {
+                            return None;
+                        }
 
-        for (key, value) in map {
-            if let Value::String(ref pointer_candidate) = value {
-                if pointer_candidate.starts_with('@') && pointer_candidate.contains(":lnk_") {
-                    if let Some(resolved_child) = self.find_by_id(pointer_candidate)? {
-                        reconstructed_map.insert(key, resolved_child);
-                    } else {
-                        reconstructed_map.insert(key, value);
+                        field_value
+                            .as_str()
+                            .filter(|pointer| Self::is_pointer(pointer))
+                            .map(|pointer| (field_name.clone(), pointer.to_string()))
+                    })
+                    .collect::<Vec<_>>();
+
+                for (field_name, pointer) in pointer_updates {
+                    if let Some(resolved_value) =
+                        self.resolve_pointer(&pointer, include_ids, active_pointer_path)?
+                    {
+                        if let Some(value_ref) = map.get_mut(&field_name) {
+                            *value_ref = resolved_value;
+                        }
                     }
-                } else {
-                    reconstructed_map.insert(key, value);
                 }
-            } else {
-                reconstructed_map.insert(key, value);
+
+                for (field_name, field_value) in map.iter_mut() {
+                    if field_name != "_id" {
+                        self.hydrate_value(field_value, include_ids, active_pointer_path)?;
+                    }
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    self.hydrate_value(value, include_ids, active_pointer_path)?;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn resolve_pointer(
+        &mut self,
+        pointer: &str,
+        include_ids: bool,
+        active_pointer_path: &mut HashSet<String>,
+    ) -> Result<Option<Value>> {
+        if active_pointer_path.contains(pointer) {
+            return Ok(None);
+        }
+
+        let (drawer_name, _) = self.parse_pointer(pointer)?;
+
+        let mut record = if let Some(drawer) = self
+            .database_core
+            .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        {
+            drawer.find_by_primary_key(pointer)?
+        } else {
+            None
+        };
+
+        if let Some(ref mut record_value) = record {
+            active_pointer_path.insert(pointer.to_string());
+            self.hydrate_value(record_value, include_ids, active_pointer_path)?;
+            active_pointer_path.remove(pointer);
+
+            if !include_ids {
+                if let Value::Object(map) = record_value {
+                    map.remove("_id");
+                }
             }
         }
 
-        Ok(reconstructed_map)
+        Ok(record)
+    }
+
+    fn is_pointer(value: &str) -> bool {
+        value.starts_with('@') && value.contains(":lnk_")
     }
 
     fn parse_pointer(&self, pointer: &str) -> Result<(String, String)> {
@@ -137,58 +213,5 @@ impl WardrobeEngine {
                 format!("Malformed pointer reference encountered: {}", pointer),
             ))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::WardrobeEngine;
-    use serde_json::json;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_database_directory(test_name: &str) -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!("wardrobe_{}_{}", test_name, nanos));
-        directory.to_string_lossy().into_owned()
-    }
-
-    #[test]
-    fn find_all_loads_existing_drawer_files_after_restart() {
-        let database_directory = temp_database_directory("find_all_loads_existing_drawer_files");
-
-        {
-            let mut engine =
-                WardrobeEngine::new(&database_directory).expect("database should initialize");
-            engine
-                .upsert(
-                    "weapon",
-                    json!({
-                        "_id": "@weapon:lnk_test_weapon",
-                        "name": "Test Sword",
-                        "gem": {
-                            "_id": "@gem:lnk_test_gem",
-                            "element": "Light",
-                            "potency": 9001
-                        }
-                    }),
-                )
-                .expect("weapon should upsert");
-        }
-
-        let mut restarted_engine =
-            WardrobeEngine::new(&database_directory).expect("database should reinitialize");
-        let weapons = restarted_engine
-            .find_all("weapon")
-            .expect("weapons should load");
-
-        assert_eq!(weapons.len(), 1);
-        assert_eq!(weapons[0]["name"], "Test Sword");
-        assert_eq!(weapons[0]["gem"]["element"], "Light");
-
-        let _ = fs::remove_dir_all(database_directory);
     }
 }

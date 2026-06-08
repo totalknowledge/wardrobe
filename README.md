@@ -64,10 +64,22 @@ Run the behavior suite with:
 cargo test
 ```
 
+`cargo test` does not produce file coverage by itself. To get a coverage summary, install `cargo-llvm-cov` and run the configured alias:
+
 A coverage-summary alias is configured in `.cargo/config.toml`:
 
 ```text
 cargo coverage-summary
 ```
 
-That alias expects `cargo-llvm-cov` to be installed locally.
+The alias runs:
+
+```text
+cargo llvm-cov --workspace --summary-only
+```
+
+Install the coverage tool with:
+
+```text
+cargo install cargo-llvm-cov
+```

@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 #[path = "wrdb_lib/mod.rs"]
 pub mod wrdb_lib;
 
