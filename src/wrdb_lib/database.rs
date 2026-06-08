@@ -69,9 +69,9 @@ impl Database {
     }
 
     pub fn load_existing_drawers(
-        &mut self, 
-        primary_key: &str, 
-        default_constraints: HashMap<String, Vec<String>>
+        &mut self,
+        primary_key: &str,
+        default_constraints: HashMap<String, Vec<String>>,
     ) -> std::io::Result<()> {
         let mut drawer_names = Vec::new();
 

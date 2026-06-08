@@ -11,7 +11,8 @@ fn find_all_loads_existing_drawer_files_after_restart() {
     let database_directory = database.path.to_string_lossy().into_owned();
 
     {
-        let mut engine = WardrobeEngine::new(&database_directory).expect("database should initialize");
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("database should initialize");
         engine
             .upsert(
                 "weapon",
@@ -28,8 +29,11 @@ fn find_all_loads_existing_drawer_files_after_restart() {
             .expect("weapon should upsert");
     }
 
-    let mut restarted_engine = WardrobeEngine::new(&database_directory).expect("database should reinitialize");
-    let weapons = restarted_engine.find_all("weapon").expect("weapons should load");
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("database should reinitialize");
+    let weapons = restarted_engine
+        .find_all("weapon")
+        .expect("weapons should load");
 
     assert_eq!(weapons.len(), 1);
     assert_eq!(weapons[0]["name"], "Test Sword");
@@ -61,7 +65,11 @@ fn find_by_id_returns_none_for_missing_drawer_and_does_not_create_files() {
 
     assert!(result.is_none());
     assert!(!Path::new(&database_directory).join("missing.drw").exists());
-    assert!(!Path::new(&database_directory).join("missing_index.drw").exists());
+    assert!(
+        !Path::new(&database_directory)
+            .join("missing_index.drw")
+            .exists()
+    );
 }
 
 #[test]
@@ -83,7 +91,8 @@ fn find_by_id_hydrates_without_id_fields() {
     let database_directory = database.path.to_string_lossy().into_owned();
 
     let weapon_pointer = {
-        let mut engine = WardrobeEngine::new(&database_directory).expect("database should initialize");
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("database should initialize");
         engine
             .upsert(
                 "weapon",
@@ -98,7 +107,8 @@ fn find_by_id_hydrates_without_id_fields() {
             .expect("weapon should upsert")
     };
 
-    let mut restarted_engine = WardrobeEngine::new(&database_directory).expect("database should reinitialize");
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("database should reinitialize");
     let found = restarted_engine
         .find_by_id(&weapon_pointer)
         .expect("lookup should succeed")
@@ -115,7 +125,8 @@ fn find_all_keeps_pointer_when_target_record_is_missing() {
     let database_directory = database.path.to_string_lossy().into_owned();
 
     {
-        let mut engine = WardrobeEngine::new(&database_directory).expect("database should initialize");
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("database should initialize");
         engine
             .upsert(
                 "weapon",
@@ -128,8 +139,11 @@ fn find_all_keeps_pointer_when_target_record_is_missing() {
             .expect("weapon should upsert");
     }
 
-    let mut restarted_engine = WardrobeEngine::new(&database_directory).expect("database should reinitialize");
-    let weapons = restarted_engine.find_all("weapon").expect("find_all should succeed");
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("database should reinitialize");
+    let weapons = restarted_engine
+        .find_all("weapon")
+        .expect("find_all should succeed");
 
     assert_eq!(weapons.len(), 1);
     assert_eq!(weapons[0]["gem"], "@gem:lnk_does_not_exist");
@@ -141,7 +155,8 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
     let database_directory = database.path.to_string_lossy().into_owned();
 
     {
-        let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "weapon",
@@ -159,7 +174,8 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
             .expect("weapon with nested gem should upsert");
     }
 
-    let mut restarted_engine = WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
     let weapons = restarted_engine
         .find_all("weapon")
         .expect("find_all should auto-load weapon drawer from disk");
@@ -196,7 +212,8 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
     let database_directory = database.path.to_string_lossy().into_owned();
 
     {
-        let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "character",
@@ -218,7 +235,8 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
             .expect("complex character should upsert");
     }
 
-    let mut restarted_engine = WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
     let characters = restarted_engine
         .find_all("character")
         .expect("characters should hydrate after restart");

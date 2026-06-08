@@ -104,7 +104,7 @@ impl Drawer {
                         if !inferred_unique_constraints.contains(&field.to_string()) {
                             inferred_unique_constraints.push(field.to_string());
                         }
-                        
+
                         let field_map = secondary_memory_index
                             .entry(field.to_string())
                             .or_insert_with(HashMap::new);
@@ -115,10 +115,8 @@ impl Drawer {
                             if offset_array.is_empty() {
                                 field_map.remove(key);
                             } else {
-                                let offsets: Vec<u64> = offset_array
-                                    .iter()
-                                    .filter_map(|v| v.as_u64())
-                                    .collect();
+                                let offsets: Vec<u64> =
+                                    offset_array.iter().filter_map(|v| v.as_u64()).collect();
                                 field_map.insert(key.to_string(), offsets);
                             }
                         }
@@ -235,7 +233,9 @@ impl Drawer {
                 .and_then(|value| value.get(&unique_field))
                 .and_then(|value| value.as_str());
 
-            if let (Some(previous_value), Some(previous_offset)) = (old_field_value, old_data_offset) {
+            if let (Some(previous_value), Some(previous_offset)) =
+                (old_field_value, old_data_offset)
+            {
                 if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
                     if let Some(offsets) = field_map.get_mut(previous_value) {
                         offsets.retain(|offset| *offset != previous_offset);
@@ -245,9 +245,7 @@ impl Drawer {
                     }
                 }
 
-                if record
-                    .get(&unique_field)
-                    .and_then(|value| value.as_str())
+                if record.get(&unique_field).and_then(|value| value.as_str())
                     != Some(previous_value)
                 {
                     self.write_index_log(&unique_field, previous_value, Value::Array(Vec::new()))?;
@@ -330,7 +328,9 @@ impl Drawer {
                 .append_aligned_index(&serialized_index, target_size_class)?
         };
 
-        if let Some((old_index_offset, old_size_class)) = self.index_file_offsets.get(&map_key).copied() {
+        if let Some((old_index_offset, old_size_class)) =
+            self.index_file_offsets.get(&map_key).copied()
+        {
             if old_index_offset != new_index_offset {
                 self.index_writer
                     .write_tombstone_at_offset(old_index_offset, old_size_class)?;
@@ -339,7 +339,8 @@ impl Drawer {
             }
         }
 
-        self.index_file_offsets.insert(map_key, (new_index_offset, target_size_class));
+        self.index_file_offsets
+            .insert(map_key, (new_index_offset, target_size_class));
         Ok(())
     }
 

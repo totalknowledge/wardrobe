@@ -56,9 +56,9 @@ impl WardrobeEngine {
     }
 
     pub fn find_all(&mut self, drawer_name: &str) -> std::io::Result<Vec<Value>> {
-        let mut records = if let Some(drawer) = self
-            .database_core
-            .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+        let mut records = if let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
         {
             drawer.find_all_records()?
         } else {
@@ -81,9 +81,9 @@ impl WardrobeEngine {
     pub fn find_by_id(&mut self, pointer: &str) -> Result<Option<Value>> {
         let (drawer_name, _) = self.parse_pointer(pointer)?;
 
-        if let Some(drawer) = self
-            .database_core
-            .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        if let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
         {
             if let Some(mut record) = drawer.find_by_primary_key(pointer)? {
                 let mut active_pointer_path = HashSet::from([pointer.to_string()]);
@@ -173,9 +173,9 @@ impl WardrobeEngine {
 
         let (drawer_name, _) = self.parse_pointer(pointer)?;
 
-        let mut record = if let Some(drawer) = self
-            .database_core
-            .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        let mut record = if let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
         {
             drawer.find_by_primary_key(pointer)?
         } else {

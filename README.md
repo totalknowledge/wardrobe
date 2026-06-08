@@ -28,7 +28,7 @@ At a high level, Wardrobe is intended to become a fast, single-process NoSQL doc
 - Aligned record writes using size classes.
 - A `Recycler` for reusing tombstoned slots.
 - Basic nested object decomposition during upsert.
-- Basic pointer hydration during reads.
+- Safe engine-level pointer hydration during reads without raw pointer casting.
 - Demo drawers for gems, weapons, and characters.
 
 ## Current Shape
@@ -49,7 +49,6 @@ Each drawer has a data file and an index file. The data file stores serialized r
 
 ## Next Design Areas
 
-- Replace unsafe pointer-based hydration with a safer relationship traversal design.
 - Make drawer discovery and loading more explicit so reads work from existing files on disk.
 - Formalize secondary indexes and unique constraints.
 - Add support for one-to-many relationships through arrays of pointers.

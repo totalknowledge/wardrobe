@@ -49,16 +49,24 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
     let data_file = database_directory.path.join("weapon.drw");
     let index_file = database_directory.path.join("weapon_index.drw");
 
-    fs::write(&data_file, "{\"_id\":\"@weapon:lnk_a\",\"serial\":\"SER-1\"}\n")
-        .expect("data file should write");
+    fs::write(
+        &data_file,
+        "{\"_id\":\"@weapon:lnk_a\",\"serial\":\"SER-1\"}\n",
+    )
+    .expect("data file should write");
     fs::write(
         &index_file,
         "{\"f\":\"_id\",\"k\":\"@weapon:lnk_a\",\"o\":0}\n{\"f\":\"serial\",\"k\":\"SER-1\",\"o\":[0]}\n",
     )
     .expect("index file should write");
 
-    let mut drawer = Drawer::open(&database_directory.path, "weapon", "_id", vec!["serial".to_string()])
-        .expect("drawer should open");
+    let mut drawer = Drawer::open(
+        &database_directory.path,
+        "weapon",
+        "_id",
+        vec!["serial".to_string()],
+    )
+    .expect("drawer should open");
 
     let matches = drawer
         .find_by_secondary_key("serial", "SER-1")
@@ -98,11 +106,13 @@ fn unique_constraints_are_enforced_and_tombstones_are_recycled() {
         .expect("upsert should not fail at io level");
 
     assert!(duplicate.is_err());
-    assert!(drawer
-        .find_by_secondary_key("element", "Fire")
-        .expect("lookup should succeed")
-        .len()
-        >= 1);
+    assert!(
+        drawer
+            .find_by_secondary_key("element", "Fire")
+            .expect("lookup should succeed")
+            .len()
+            >= 1
+    );
 }
 
 #[test]
@@ -194,8 +204,13 @@ fn missing_secondary_lookups_return_empty_results() {
     let database_directory = TempDatabase::new("drawer_missing_secondary_lookup");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
-    let mut drawer = Drawer::open(&database_directory.path, "gem", "_id", vec!["element".to_string()])
-        .expect("drawer should open");
+    let mut drawer = Drawer::open(
+        &database_directory.path,
+        "gem",
+        "_id",
+        vec!["element".to_string()],
+    )
+    .expect("drawer should open");
 
     drawer
         .upsert_record(json!({
@@ -205,18 +220,24 @@ fn missing_secondary_lookups_return_empty_results() {
         .expect("upsert should succeed")
         .expect("record should validate");
 
-    assert!(drawer
-        .find_by_primary_key("@gem:lnk_missing")
-        .expect("lookup should succeed")
-        .is_none());
-    assert!(drawer
-        .find_by_secondary_key("element", "Water")
-        .expect("lookup should succeed")
-        .is_empty());
-    assert!(drawer
-        .find_by_secondary_key("missing_field", "anything")
-        .expect("lookup should succeed")
-        .is_empty());
+    assert!(
+        drawer
+            .find_by_primary_key("@gem:lnk_missing")
+            .expect("lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        drawer
+            .find_by_secondary_key("element", "Water")
+            .expect("lookup should succeed")
+            .is_empty()
+    );
+    assert!(
+        drawer
+            .find_by_secondary_key("missing_field", "anything")
+            .expect("lookup should succeed")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -249,10 +270,12 @@ fn updating_secondary_field_removes_stale_index_entries() {
             .expect("update should succeed")
             .expect("updated record should validate");
 
-        assert!(drawer
-            .find_by_secondary_key("element", "Fire")
-            .expect("lookup should succeed")
-            .is_empty());
+        assert!(
+            drawer
+                .find_by_secondary_key("element", "Fire")
+                .expect("lookup should succeed")
+                .is_empty()
+        );
 
         let water_matches = drawer
             .find_by_secondary_key("element", "Water")
@@ -268,10 +291,12 @@ fn updating_secondary_field_removes_stale_index_entries() {
     )
     .expect("drawer should reopen");
 
-    assert!(reopened
-        .find_by_secondary_key("element", "Fire")
-        .expect("lookup should succeed")
-        .is_empty());
+    assert!(
+        reopened
+            .find_by_secondary_key("element", "Fire")
+            .expect("lookup should succeed")
+            .is_empty()
+    );
     assert_eq!(
         reopened
             .find_by_secondary_key("element", "Water")

@@ -36,7 +36,8 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
     let record_id = "@gem:lnk_restart_gem";
 
     {
-        let mut engine = wardrobe::WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        let mut engine =
+            wardrobe::WardrobeEngine::new(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "gem",
@@ -80,7 +81,8 @@ fn active_drawer_or_load_from_disk_opens_existing_drawer_files() {
     let database_directory = TempDatabase::new("db_loads_existing_drawer");
 
     {
-        let mut setup_db = Database::initialize(&database_directory.path).expect("db should initialize");
+        let mut setup_db =
+            Database::initialize(&database_directory.path).expect("db should initialize");
         setup_db
             .load_drawer("gem", "_id", Vec::new())
             .expect("drawer should load");
@@ -96,7 +98,8 @@ fn active_drawer_or_load_from_disk_opens_existing_drawer_files() {
             .expect("record should validate");
     }
 
-    let mut restarted_db = Database::initialize(&database_directory.path).expect("db should reinitialize");
+    let mut restarted_db =
+        Database::initialize(&database_directory.path).expect("db should reinitialize");
     let drawer = restarted_db
         .active_drawer_or_load_from_disk("gem", "_id", Vec::new())
         .expect("read load should succeed")
@@ -112,7 +115,8 @@ fn active_drawer_or_load_from_disk_opens_existing_drawer_files() {
 #[test]
 fn load_existing_drawers_registers_all_non_index_drawers() {
     let database_directory = TempDatabase::new("db_load_existing_drawers");
-    let mut database = Database::initialize(&database_directory.path).expect("db should initialize");
+    let mut database =
+        Database::initialize(&database_directory.path).expect("db should initialize");
 
     database
         .load_drawer("weapon", "_id", Vec::new())
@@ -134,7 +138,8 @@ fn load_existing_drawers_registers_all_non_index_drawers() {
 #[test]
 fn get_all_drawers_reflects_loaded_and_closed_drawers() {
     let database_directory = TempDatabase::new("db_get_all_drawers");
-    let mut database = Database::initialize(&database_directory.path).expect("db should initialize");
+    let mut database =
+        Database::initialize(&database_directory.path).expect("db should initialize");
 
     database
         .load_drawer("weapon", "_id", Vec::new())
