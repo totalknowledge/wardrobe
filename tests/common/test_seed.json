@@ -1,0 +1,56 @@
+{
+  "character": [
+    {
+      "name": "Gorthor",
+      "weapon": {
+        "damage": 50,
+        "gem": {
+          "element": "Air",
+          "potency": 9700
+        },
+        "name": "Axe"
+      }
+    },
+{
+      "name": "Bob",
+      "weapon": {
+        "damage": 42,
+        "gem": {
+          "element": "Water",
+          "potency": 7300
+        },
+        "name": "Bow",
+        "range": 300
+      }
+    },
+{
+      "name": "Janet",
+      "weapon": {
+        "damage": 25,
+        "gem": {
+          "element": "Earth",
+          "potency": 6400
+        },
+        "name": "Dagger"
+      }
+    },
+{
+      "name": "Juan",
+      "weapon": {
+        "damage": 75,
+        "gem": {
+          "element": "Fire",
+          "potency": 7200
+        },
+        "name": "Club"
+      }
+    },
+{
+      "name": "Tony",
+      "weapon": {
+        "damage": 5,
+        "name": "Rusty Pole"
+      }
+    }
+  ]
+}

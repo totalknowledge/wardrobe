@@ -10,4 +10,5 @@ pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::Drawer;
 pub use wrdb_lib::reader::DatabaseReader;
 pub use wrdb_lib::recycler::Recycler;
+pub use wrdb_lib::storage_format::{PlainTextJsonFormat, StorageFormat};
 pub use wrdb_lib::writer::DatabaseWriter;

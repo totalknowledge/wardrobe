@@ -1,6 +1,6 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe::DatabaseWriter;
+use wardrobe::{DatabaseWriter, PlainTextJsonFormat, StorageFormat};
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -16,14 +16,18 @@ fn temp_file_path(test_name: &str) -> std::path::PathBuf {
 fn append_overwrite_and_tombstone_work() {
     let file_path = temp_file_path("writer_append_overwrite_tombstone");
     let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
+    let first_payload =
+        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
 
     let first_offset = writer
-        .append_record(r#"{"a":1}"#, 8)
+        .append_record(&first_payload, 8)
         .expect("append should succeed");
     assert_eq!(first_offset, 0);
 
+    let replacement_payload =
+        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 2})).expect("serialize");
     writer
-        .overwrite_at_offset(first_offset, r#"{"a":2}"#, 8)
+        .overwrite_at_offset(first_offset, &replacement_payload, 8)
         .expect("overwrite should succeed");
 
     writer
@@ -43,8 +47,11 @@ fn append_aligned_index_writes_data_and_reports_length() {
     assert_eq!(len, 0);
 
     let mut writer = writer;
+    let index_payload =
+        PlainTextJsonFormat::serialize_record(&serde_json::json!({"f": "_id", "k": "@x", "o": 0}))
+            .expect("serialize");
     let offset = writer
-        .append_aligned_index(r#"{"f":"_id","k":"@x","o":0}"#, 16)
+        .append_aligned_index(&index_payload, 16)
         .expect("append should succeed");
     assert_eq!(offset, 0);
 

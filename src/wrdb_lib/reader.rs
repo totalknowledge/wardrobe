@@ -1,3 +1,4 @@
+use super::storage_format::{PlainTextJsonFormat, StorageFormat};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -13,25 +14,8 @@ impl DatabaseReader {
     }
 
     pub fn read_record_at_offset(&mut self, byte_offset: u64) -> std::io::Result<Option<Value>> {
-        let file_len = self.drawer_file.metadata()?.len();
-        if byte_offset >= file_len {
-            return Ok(None);
-        }
-
-        self.drawer_file.seek(SeekFrom::Start(byte_offset))?;
-        let reader = BufReader::new(&mut self.drawer_file);
-
-        if let Some(line_result) = reader.lines().next() {
-            let clear_line = line_result?;
-            let normalized_line = clear_line.trim_end();
-
-            if normalized_line.starts_with("!!DEAD!!") || normalized_line.is_empty() {
-                return Ok(None);
-            }
-
-            if let Ok(parsed_json) = serde_json::from_str::<Value>(normalized_line) {
-                return Ok(Some(parsed_json));
-            }
+        if let Some(record_bytes) = self.read_raw_bytes_at_offset(byte_offset)? {
+            return PlainTextJsonFormat::deserialize_record(&record_bytes);
         }
 
         Ok(None)

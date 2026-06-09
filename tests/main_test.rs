@@ -34,6 +34,8 @@ fn main_creates_demo_storage_in_current_directory() {
     assert!(output.status.success());
     assert!(working_directory.join("wardrobe").is_dir());
     assert!(working_directory.join("wardrobe/gem.drw").is_file());
+    assert!(working_directory.join("wardrobe/weapon.drw").is_file());
+    assert!(working_directory.join("wardrobe/character.drw").is_file());
 }
 
 #[test]
@@ -75,7 +77,9 @@ fn main_prints_existing_weapon_and_character_drawers() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
+    assert!(stdout.contains("Axe"));
     assert!(stdout.contains("Halberd"));
+    assert!(stdout.contains("Gorthor"));
     assert!(stdout.contains("Mira"));
 }
 

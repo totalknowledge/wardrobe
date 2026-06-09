@@ -2,6 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
+use super::storage_format::{PlainTextJsonFormat, StorageFormat};
+
 pub struct DatabaseWriter {
     file_handle: File,
 }
@@ -23,48 +25,24 @@ impl DatabaseWriter {
 
     pub fn append_record(
         &mut self,
-        serialized_record: &str,
+        record_payload: &[u8],
         alignment_chunk_size: usize,
     ) -> std::io::Result<u64> {
         let starting_offset = self.file_handle.seek(SeekFrom::End(0))?;
 
-        let raw_bytes = serialized_record.trim_end().as_bytes();
-        let current_length = raw_bytes.len() + 1;
-
-        let padding_needed = if current_length % alignment_chunk_size == 0 {
-            0
-        } else {
-            alignment_chunk_size - (current_length % alignment_chunk_size)
-        };
-
-        self.file_handle.write_all(raw_bytes)?;
-        self.file_handle.write_all(&vec![b' '; padding_needed])?;
-        self.file_handle.write_all(b"\n")?;
-        self.file_handle.flush()?;
+        self.write_aligned_payload(record_payload, alignment_chunk_size)?;
 
         Ok(starting_offset)
     }
 
     pub fn append_aligned_index(
         &mut self,
-        serialized_index: &str,
+        index_payload: &[u8],
         alignment_chunk_size: usize,
     ) -> std::io::Result<u64> {
         let starting_offset = self.file_handle.seek(SeekFrom::End(0))?;
 
-        let raw_bytes = serialized_index.trim_end().as_bytes();
-        let current_length = raw_bytes.len() + 1;
-
-        let padding_needed = if current_length % alignment_chunk_size == 0 {
-            0
-        } else {
-            alignment_chunk_size - (current_length % alignment_chunk_size)
-        };
-
-        self.file_handle.write_all(raw_bytes)?;
-        self.file_handle.write_all(&vec![b' '; padding_needed])?;
-        self.file_handle.write_all(b"\n")?;
-        self.file_handle.flush()?;
+        self.write_aligned_payload(index_payload, alignment_chunk_size)?;
 
         Ok(starting_offset)
     }
@@ -72,26 +50,12 @@ impl DatabaseWriter {
     pub fn overwrite_at_offset(
         &mut self,
         byte_offset: u64,
-        replacement_payload: &str,
+        replacement_payload: &[u8],
         alignment_chunk_size: usize,
     ) -> std::io::Result<()> {
         self.file_handle.seek(SeekFrom::Start(byte_offset))?;
 
-        let raw_bytes = replacement_payload.trim_end().as_bytes();
-        let current_length = raw_bytes.len() + 1;
-
-        let padding_needed = if current_length % alignment_chunk_size == 0 {
-            0
-        } else {
-            alignment_chunk_size - (current_length % alignment_chunk_size)
-        };
-
-        self.file_handle.write_all(raw_bytes)?;
-        self.file_handle.write_all(&vec![b' '; padding_needed])?;
-        self.file_handle.write_all(b"\n")?;
-        self.file_handle.flush()?;
-
-        Ok(())
+        self.write_aligned_payload(replacement_payload, alignment_chunk_size)
     }
 
     pub fn write_tombstone_at_offset(
@@ -101,11 +65,32 @@ impl DatabaseWriter {
     ) -> std::io::Result<()> {
         self.file_handle.seek(SeekFrom::Start(byte_offset))?;
 
-        let tombstone_prefix = "!!DEAD!!";
+        let tombstone_prefix = PlainTextJsonFormat::tombstone_marker();
         let remaining_padding = alignment_chunk_size - 1 - tombstone_prefix.len();
 
-        self.file_handle.write_all(tombstone_prefix.as_bytes())?;
+        self.file_handle.write_all(tombstone_prefix)?;
         self.file_handle.write_all(&vec![b' '; remaining_padding])?;
+        self.file_handle.write_all(b"\n")?;
+        self.file_handle.flush()?;
+
+        Ok(())
+    }
+
+    fn write_aligned_payload(
+        &mut self,
+        payload: &[u8],
+        alignment_chunk_size: usize,
+    ) -> std::io::Result<()> {
+        let current_length = payload.len() + 1;
+
+        let padding_needed = if current_length % alignment_chunk_size == 0 {
+            0
+        } else {
+            alignment_chunk_size - (current_length % alignment_chunk_size)
+        };
+
+        self.file_handle.write_all(payload)?;
+        self.file_handle.write_all(&vec![b' '; padding_needed])?;
         self.file_handle.write_all(b"\n")?;
         self.file_handle.flush()?;
 

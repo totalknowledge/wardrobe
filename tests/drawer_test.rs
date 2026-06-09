@@ -14,6 +14,34 @@ fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_
     serde_json::from_str(&metadata_contents).expect("metadata sidecar should be valid json")
 }
 
+fn metadata_path(database_directory: &TempDatabase, drawer_name: &str) -> std::path::PathBuf {
+    database_directory
+        .path
+        .join(format!("{}_meta.drw", drawer_name))
+}
+
+fn load_index_records(
+    database_directory: &TempDatabase,
+    drawer_name: &str,
+) -> Vec<serde_json::Value> {
+    let index_path = database_directory
+        .path
+        .join(format!("{}_index.drw", drawer_name));
+    let index_contents = fs::read_to_string(index_path).expect("index file should be readable");
+
+    index_contents
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("!!DEAD!!") {
+                None
+            } else {
+                serde_json::from_str(trimmed).ok()
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn open_rebuilds_secondary_indexes_from_disk() {
     let database_directory = TempDatabase::new("drawer_rebuilds_secondary_indexes");
@@ -167,19 +195,25 @@ fn us_017_open_creates_metadata_sidecar_file_for_drawer() {
     let metadata = load_metadata(&database_directory, "socks");
     assert_eq!(metadata["format_version"], 1);
     assert_eq!(metadata["primary_key"], "_id");
-    assert!(metadata["record_status_map"].is_object());
-    assert!(metadata["payload_lengths"].is_object());
-    assert!(metadata["allocated_size_classes"].is_object());
-    assert!(metadata["integrity_checksums"].is_object());
+    assert!(metadata["relationship_constraints"].is_object());
+    assert!(metadata["delete_rules"].is_object());
+    assert!(metadata.get("blocks").is_none());
+    assert!(metadata.get("free_slots").is_none());
+    assert!(metadata.get("record_status_map").is_none());
+    assert!(metadata.get("payload_lengths").is_none());
+    assert!(metadata.get("allocated_size_classes").is_none());
+    assert!(metadata.get("integrity_checksums").is_none());
 }
 
 #[test]
-fn us_017_metadata_sidecar_tracks_live_and_tombstoned_entries() {
-    let database_directory = TempDatabase::new("drawer_metadata_sidecar_updates");
+fn us_017_metadata_sidecar_stays_static_during_standard_upserts() {
+    let database_directory = TempDatabase::new("drawer_metadata_sidecar_static");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
     let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
         .expect("drawer should open");
+    let initial_metadata =
+        fs::read_to_string(metadata_path(&database_directory, "socks")).expect("metadata readable");
 
     drawer
         .upsert_record(json!({
@@ -197,26 +231,81 @@ fn us_017_metadata_sidecar_tracks_live_and_tombstoned_entries() {
         .expect("second upsert should succeed")
         .expect("record should validate");
 
+    let updated_metadata =
+        fs::read_to_string(metadata_path(&database_directory, "socks")).expect("metadata readable");
     let metadata = load_metadata(&database_directory, "socks");
-    let statuses = metadata["record_status_map"]
-        .as_object()
-        .expect("status map should be an object");
-    let payload_lengths = metadata["payload_lengths"]
-        .as_object()
-        .expect("payload lengths should be an object");
-    let size_classes = metadata["allocated_size_classes"]
-        .as_object()
-        .expect("size classes should be an object");
-    let checksums = metadata["integrity_checksums"]
-        .as_object()
-        .expect("checksums should be an object");
 
-    assert!(statuses.keys().any(|key| key.starts_with("data:")));
-    assert!(statuses.values().any(|value| value == "live"));
-    assert!(statuses.values().any(|value| value == "dead"));
-    assert!(!payload_lengths.is_empty());
-    assert!(!size_classes.is_empty());
-    assert!(!checksums.is_empty());
+    assert_eq!(updated_metadata, initial_metadata);
+    assert!(metadata.get("blocks").is_none());
+    assert!(metadata.get("free_slots").is_none());
+}
+
+#[test]
+fn us_015_index_journal_tracks_blocks_and_rebuilds_recycler_on_open() {
+    let database_directory = TempDatabase::new("drawer_index_block_journal_recycler");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    {
+        let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+            .expect("drawer should open");
+
+        drawer
+            .upsert_record(json!({
+                "_id": "@socks:lnk_a",
+                "color": "Blue"
+            }))
+            .expect("first upsert should succeed")
+            .expect("record should validate");
+
+        drawer
+            .upsert_record(json!({
+                "_id": "@socks:lnk_a",
+                "color": "Ruby"
+            }))
+            .expect("second upsert should succeed")
+            .expect("record should validate");
+    }
+
+    let index_records = load_index_records(&database_directory, "socks");
+    assert!(index_records.iter().any(|record| {
+        record["status"] == 1
+            && record.get("len").is_some()
+            && record.get("class").is_some()
+            && record.get("crc").is_some()
+    }));
+    assert!(index_records.iter().any(|record| record["status"] == 0));
+
+    let data_path = database_directory.path.join("socks.drw");
+    let len_after_update = fs::metadata(&data_path)
+        .expect("data file metadata should read")
+        .len();
+
+    {
+        let mut reopened = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+            .expect("drawer should reopen");
+
+        reopened
+            .upsert_record(json!({
+                "_id": "@socks:lnk_b",
+                "color": "Gold"
+            }))
+            .expect("third upsert should succeed")
+            .expect("record should validate");
+    }
+
+    let len_after_reuse = fs::metadata(&data_path)
+        .expect("data file metadata should read")
+        .len();
+    let data_contents = fs::read_to_string(&data_path).expect("data file should be readable");
+
+    assert_eq!(len_after_reuse, len_after_update);
+    assert!(
+        data_contents
+            .lines()
+            .next()
+            .expect("first data line should exist")
+            .contains("@socks:lnk_b")
+    );
 }
 
 #[test]

@@ -1,9 +1,10 @@
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::recycler::Recycler;
+use crate::wrdb_lib::storage_format::{PlainTextJsonFormat, StorageFormat};
 use crate::wrdb_lib::writer::DatabaseWriter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
@@ -27,13 +28,16 @@ fn crc32(bytes: &[u8]) -> u32 {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct DrawerMetadata {
+    #[serde(default)]
     format_version: u8,
+    #[serde(default)]
     primary_key: String,
+    #[serde(default)]
     unique_constraints: Vec<String>,
-    record_status_map: HashMap<String, String>,
-    payload_lengths: HashMap<String, usize>,
-    allocated_size_classes: HashMap<String, usize>,
-    integrity_checksums: HashMap<String, u32>,
+    #[serde(default)]
+    relationship_constraints: BTreeMap<String, Value>,
+    #[serde(default)]
+    delete_rules: BTreeMap<String, Value>,
 }
 
 impl DrawerMetadata {
@@ -53,75 +57,19 @@ impl DrawerMetadata {
         }
     }
 
-    fn rebuild_from_files(
-        data_file_path: &Path,
-        index_file_path: &Path,
+    fn from_configuration(
         primary_key: &str,
         unique_constraints: &[String],
-    ) -> std::io::Result<Self> {
-        let mut metadata = Self {
+        relationship_constraints: BTreeMap<String, Value>,
+        delete_rules: BTreeMap<String, Value>,
+    ) -> Self {
+        Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
             primary_key: primary_key.to_string(),
             unique_constraints: unique_constraints.to_vec(),
-            ..Self::default()
-        };
-
-        let mut data_reader = DatabaseReader::open_drawer(data_file_path)?;
-        let mut data_entries = Vec::new();
-        data_reader.stream_with_offsets(|offset, line| {
-            data_entries.push((offset, line.starts_with("!!DEAD!!"), line.to_string()));
-        })?;
-
-        let data_len = std::fs::metadata(data_file_path)?.len();
-        for (index, (offset, is_dead, line)) in data_entries.iter().enumerate() {
-            let next_offset = data_entries
-                .get(index + 1)
-                .map(|entry| entry.0)
-                .unwrap_or(data_len);
-            let allocated_size_class = (next_offset - *offset) as usize;
-            metadata.register_entry("data", *offset, allocated_size_class, line, *is_dead);
+            relationship_constraints,
+            delete_rules,
         }
-
-        let mut index_reader = DatabaseReader::open_drawer(index_file_path)?;
-        let mut index_entries = Vec::new();
-        index_reader.stream_with_offsets(|offset, line| {
-            index_entries.push((offset, line.starts_with("!!DEAD!!"), line.to_string()));
-        })?;
-
-        let index_len = std::fs::metadata(index_file_path)?.len();
-        for (index, (offset, is_dead, line)) in index_entries.iter().enumerate() {
-            let next_offset = index_entries
-                .get(index + 1)
-                .map(|entry| entry.0)
-                .unwrap_or(index_len);
-            let allocated_size_class = (next_offset - *offset) as usize;
-            metadata.register_entry("index", *offset, allocated_size_class, line, *is_dead);
-        }
-
-        Ok(metadata)
-    }
-
-    fn register_entry(
-        &mut self,
-        entry_kind: &str,
-        offset: u64,
-        allocated_size_class: usize,
-        line: &str,
-        is_dead: bool,
-    ) {
-        let metadata_key = format!("{}:{}", entry_kind, offset);
-        let normalized_payload = line.trim_end().to_string();
-
-        self.record_status_map.insert(
-            metadata_key.clone(),
-            if is_dead { "dead" } else { "live" }.to_string(),
-        );
-        self.payload_lengths
-            .insert(metadata_key.clone(), normalized_payload.len());
-        self.allocated_size_classes
-            .insert(metadata_key.clone(), allocated_size_class);
-        self.integrity_checksums
-            .insert(metadata_key, crc32(normalized_payload.as_bytes()));
     }
 
     fn persist(&self, path: &Path) -> std::io::Result<()> {
@@ -135,6 +83,53 @@ impl DrawerMetadata {
 
         std::fs::rename(temporary_path, path)?;
         Ok(())
+    }
+}
+
+const DATA_BLOCK_STATUS_DEAD: u8 = 0;
+const DATA_BLOCK_STATUS_LIVE: u8 = 1;
+
+#[derive(Clone, Copy, Debug)]
+struct DataBlockIndexEntry {
+    payload_len: usize,
+    size_class: usize,
+    crc: u32,
+    status: u8,
+}
+
+impl DataBlockIndexEntry {
+    fn live(payload: &[u8], size_class: usize) -> Self {
+        Self {
+            payload_len: payload.len(),
+            size_class,
+            crc: crc32(payload),
+            status: DATA_BLOCK_STATUS_LIVE,
+        }
+    }
+
+    fn dead(self) -> Self {
+        Self {
+            status: DATA_BLOCK_STATUS_DEAD,
+            ..self
+        }
+    }
+
+    fn from_index_entry(index_entry: &Value) -> Option<(u64, Self)> {
+        let offset = index_entry.get("o").and_then(|value| value.as_u64())?;
+        let payload_len = index_entry.get("len").and_then(|value| value.as_u64())? as usize;
+        let size_class = index_entry.get("class").and_then(|value| value.as_u64())? as usize;
+        let crc = index_entry.get("crc").and_then(|value| value.as_u64())? as u32;
+        let status = index_entry.get("status").and_then(|value| value.as_u64())? as u8;
+
+        Some((
+            offset,
+            Self {
+                payload_len,
+                size_class,
+                crc,
+                status,
+            },
+        ))
     }
 }
 
@@ -153,8 +148,9 @@ pub struct Drawer {
     primary_memory_index: HashMap<String, u64>,
     secondary_memory_index: HashMap<String, HashMap<String, Vec<u64>>>,
     index_file_offsets: HashMap<String, (u64, usize)>,
-    data_file_path: PathBuf,
-    index_file_path: PathBuf,
+    data_block_index: HashMap<u64, DataBlockIndexEntry>,
+    relationship_constraints: BTreeMap<String, Value>,
+    delete_rules: BTreeMap<String, Value>,
     meta_file_path: PathBuf,
 }
 
@@ -172,7 +168,7 @@ impl Drawer {
         let meta_file_path = base_path.join(format!("{}_meta.drw", name));
 
         let data_writer = DatabaseWriter::open_drawer(&data_file_path)?;
-        let mut data_reader = DatabaseReader::open_drawer(&data_file_path)?;
+        let data_reader = DatabaseReader::open_drawer(&data_file_path)?;
         let index_writer = DatabaseWriter::open_drawer(&index_file_path)?;
         let mut index_reader = DatabaseReader::open_drawer(&index_file_path)?;
 
@@ -182,7 +178,16 @@ impl Drawer {
         let mut primary_memory_index = HashMap::new();
         let mut secondary_memory_index = HashMap::new();
         let mut index_file_offsets = HashMap::new();
+        let mut data_block_journal = HashMap::new();
         let existing_metadata = DrawerMetadata::load(&meta_file_path)?;
+        let relationship_constraints = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.relationship_constraints.clone())
+            .unwrap_or_default();
+        let delete_rules = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.delete_rules.clone())
+            .unwrap_or_default();
         let mut inferred_unique_constraints = if unique_constraints.is_empty() {
             existing_metadata
                 .as_ref()
@@ -196,28 +201,13 @@ impl Drawer {
             secondary_memory_index.insert(field.clone(), HashMap::new());
         }
 
-        let mut data_entries = Vec::new();
-        data_reader.stream_with_offsets(|offset, line| {
-            data_entries.push((offset, line.starts_with("!!DEAD!!")));
-        })?;
-
-        let total_data_file_len = data_writer.current_length()?;
-        for i in 0..data_entries.len() {
-            let (current_offset, is_dead) = data_entries[i];
-            if is_dead {
-                let next_offset = if i + 1 < data_entries.len() {
-                    data_entries[i + 1].0
-                } else {
-                    total_data_file_len
-                };
-                let actual_slot_size = (next_offset - current_offset) as usize;
-                data_recycler.register_free_slot(actual_slot_size, current_offset);
-            }
-        }
-
         let mut index_entries = Vec::new();
         index_reader.stream_with_offsets(|offset, line| {
-            index_entries.push((offset, line.starts_with("!!DEAD!!"), line.to_string()));
+            index_entries.push((
+                offset,
+                PlainTextJsonFormat::is_tombstone(line.as_bytes()),
+                line.to_string(),
+            ));
         })?;
 
         let total_index_file_len = index_writer.current_length()?;
@@ -232,7 +222,21 @@ impl Drawer {
 
             if is_dead {
                 index_recycler.register_free_slot(actual_slot_size, current_offset);
-            } else if let Ok(index_entry) = serde_json::from_str::<Value>(line_content) {
+            } else if let Some(index_entry) =
+                PlainTextJsonFormat::deserialize_record(line_content.as_bytes())?
+            {
+                if let Some((data_offset, block_entry)) =
+                    DataBlockIndexEntry::from_index_entry(&index_entry)
+                {
+                    data_block_journal.insert(data_offset, block_entry);
+                }
+
+                if index_entry.get("status").and_then(|value| value.as_u64())
+                    == Some(DATA_BLOCK_STATUS_DEAD as u64)
+                {
+                    continue;
+                }
+
                 if let (Some(field), Some(key), Some(data_offset_val)) = (
                     index_entry.get("f").and_then(|v| v.as_str()),
                     index_entry.get("k").and_then(|v| v.as_str()),
@@ -270,6 +274,15 @@ impl Drawer {
             }
         }
 
+        let mut data_block_index = HashMap::new();
+        for (data_offset, block_entry) in data_block_journal {
+            if block_entry.status == DATA_BLOCK_STATUS_DEAD {
+                data_recycler.register_free_slot(block_entry.size_class, data_offset);
+            } else {
+                data_block_index.insert(data_offset, block_entry);
+            }
+        }
+
         let drawer = Self {
             name: name.to_string(),
             primary_key: primary_key.to_string(),
@@ -282,8 +295,9 @@ impl Drawer {
             primary_memory_index,
             secondary_memory_index,
             index_file_offsets,
-            data_file_path,
-            index_file_path,
+            data_block_index,
+            relationship_constraints,
+            delete_rules,
             meta_file_path,
         };
 
@@ -310,30 +324,10 @@ impl Drawer {
             None
         };
 
-        let mut historical_tombstone_meta: Option<(u64, usize)> = None;
+        let mut historical_tombstone_block: Option<(u64, DataBlockIndexEntry)> = None;
         if let Some(stale_offset) = old_data_offset {
-            let current_file_len = self.data_writer.current_length()?;
-            if stale_offset < current_file_len {
-                let mut record_offsets: Vec<u64> =
-                    self.primary_memory_index.values().copied().collect();
-                record_offsets.sort_unstable();
-
-                let mut exact_disk_len = 0;
-                if let Some(current_pos) = record_offsets.iter().position(|&o| o == stale_offset) {
-                    if current_pos + 1 < record_offsets.len() {
-                        let next_offset = record_offsets[current_pos + 1];
-                        if next_offset > stale_offset && next_offset <= current_file_len {
-                            exact_disk_len = (next_offset - stale_offset) as usize;
-                        }
-                    }
-                }
-
-                if exact_disk_len == 0 {
-                    exact_disk_len = (current_file_len - stale_offset) as usize;
-                }
-
-                historical_tombstone_meta = Some((stale_offset, exact_disk_len));
-            }
+            historical_tombstone_block =
+                self.historical_block_entry(stale_offset, old_record.as_ref())?;
         }
 
         for unique_field in &self.unique_constraints {
@@ -351,9 +345,10 @@ impl Drawer {
             }
         }
 
-        let serialized_record = serde_json::to_string(&record)?;
+        let serialized_record = PlainTextJsonFormat::serialize_record(&record)?;
         let raw_len = serialized_record.len();
         let target_size_class = self.data_recycler.calculate_aligned_size(raw_len);
+        let live_block = DataBlockIndexEntry::live(&serialized_record, target_size_class);
 
         let data_offset = if let Some(recycled_offset) =
             self.data_recycler.pop_available_slot(target_size_class)
@@ -374,9 +369,11 @@ impl Drawer {
             &primary_key_field_name,
             &primary_key_value,
             Value::from(data_offset),
+            Some(live_block),
         )?;
         self.primary_memory_index
-            .insert(primary_key_value, data_offset);
+            .insert(primary_key_value.clone(), data_offset);
+        self.data_block_index.insert(data_offset, live_block);
 
         let fields_to_index = self.unique_constraints.clone();
         for unique_field in fields_to_index {
@@ -400,12 +397,17 @@ impl Drawer {
                 if record.get(&unique_field).and_then(|value| value.as_str())
                     != Some(previous_value)
                 {
-                    self.write_index_log(&unique_field, previous_value, Value::Array(Vec::new()))?;
+                    self.write_index_log(
+                        &unique_field,
+                        previous_value,
+                        Value::Array(Vec::new()),
+                        None,
+                    )?;
                 }
             }
 
             if let Some(field_value) = record.get(&unique_field).and_then(|v| v.as_str()) {
-                self.write_index_log(&unique_field, field_value, Value::from(data_offset))?;
+                self.write_index_log(&unique_field, field_value, Value::from(data_offset), None)?;
                 if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
                     let offsets = field_map.entry(field_value.to_string()).or_default();
                     if !offsets.contains(&data_offset) {
@@ -415,16 +417,20 @@ impl Drawer {
             }
         }
 
-        if let Some((stale_offset, old_size_class)) = historical_tombstone_meta {
+        if let Some((stale_offset, old_block)) = historical_tombstone_block {
             if stale_offset != data_offset {
                 self.data_writer
-                    .write_tombstone_at_offset(stale_offset, old_size_class)?;
+                    .write_tombstone_at_offset(stale_offset, old_block.size_class)?;
+                self.write_data_block_status_log(
+                    &primary_key_value,
+                    stale_offset,
+                    old_block.dead(),
+                )?;
+                self.data_block_index.remove(&stale_offset);
                 self.data_recycler
-                    .register_free_slot(old_size_class, stale_offset);
+                    .register_free_slot(old_block.size_class, stale_offset);
             }
         }
-
-        self.persist_metadata()?;
 
         Ok(Ok(()))
     }
@@ -450,36 +456,100 @@ impl Drawer {
         Ok(matching_records)
     }
 
+    fn historical_block_entry(
+        &self,
+        stale_offset: u64,
+        old_record: Option<&Value>,
+    ) -> std::io::Result<Option<(u64, DataBlockIndexEntry)>> {
+        if let Some(block_entry) = self.data_block_index.get(&stale_offset).copied() {
+            return Ok(Some((stale_offset, block_entry)));
+        }
+
+        let current_file_len = self.data_writer.current_length()?;
+        if stale_offset >= current_file_len {
+            return Ok(None);
+        }
+
+        let size_class = self.estimate_data_slot_size(stale_offset, current_file_len);
+        let (payload_len, crc) = if let Some(record) = old_record {
+            let serialized_record = PlainTextJsonFormat::serialize_record(record)?;
+            (serialized_record.len(), crc32(&serialized_record))
+        } else {
+            (size_class.saturating_sub(1), 0)
+        };
+
+        Ok(Some((
+            stale_offset,
+            DataBlockIndexEntry {
+                payload_len,
+                size_class,
+                crc,
+                status: DATA_BLOCK_STATUS_LIVE,
+            },
+        )))
+    }
+
+    fn estimate_data_slot_size(&self, stale_offset: u64, current_file_len: u64) -> usize {
+        let mut record_offsets: Vec<u64> = self.primary_memory_index.values().copied().collect();
+        record_offsets.sort_unstable();
+
+        if let Some(current_pos) = record_offsets
+            .iter()
+            .position(|&offset| offset == stale_offset)
+        {
+            if current_pos + 1 < record_offsets.len() {
+                let next_offset = record_offsets[current_pos + 1];
+                if next_offset > stale_offset && next_offset <= current_file_len {
+                    return (next_offset - stale_offset) as usize;
+                }
+            }
+        }
+
+        (current_file_len - stale_offset) as usize
+    }
+
     fn write_index_log(
         &mut self,
         field: &str,
         key: &str,
         offset_value: Value,
+        block_entry: Option<DataBlockIndexEntry>,
     ) -> std::io::Result<()> {
         let map_key = format!("{}:{}", field, key);
 
-        let index_entry = serde_json::json!({
+        let mut index_entry = serde_json::json!({
             "f": field,
             "k": key,
             "o": offset_value
         });
 
-        let serialized_index = serde_json::to_string(&index_entry)?;
+        if let Some(block_entry) = block_entry {
+            index_entry["len"] = Value::from(block_entry.payload_len as u64);
+            index_entry["class"] = Value::from(block_entry.size_class as u64);
+            index_entry["crc"] = Value::from(block_entry.crc as u64);
+            index_entry["status"] = Value::from(block_entry.status as u64);
+        }
+
+        let serialized_index = PlainTextJsonFormat::serialize_record(&index_entry)?;
         let entry_raw_len = serialized_index.len();
         let target_size_class = self.index_recycler.calculate_aligned_size(entry_raw_len);
 
-        let new_index_offset = if let Some(recycled_offset) =
-            self.index_recycler.pop_available_slot(target_size_class)
-        {
-            self.index_writer.overwrite_at_offset(
-                recycled_offset,
-                &serialized_index,
-                target_size_class,
-            )?;
-            recycled_offset
-        } else {
+        let new_index_offset = if block_entry.is_some() {
             self.index_writer
                 .append_aligned_index(&serialized_index, target_size_class)?
+        } else {
+            if let Some(recycled_offset) = self.index_recycler.pop_available_slot(target_size_class)
+            {
+                self.index_writer.overwrite_at_offset(
+                    recycled_offset,
+                    &serialized_index,
+                    target_size_class,
+                )?;
+                recycled_offset
+            } else {
+                self.index_writer
+                    .append_aligned_index(&serialized_index, target_size_class)?
+            }
         };
 
         if let Some((old_index_offset, old_size_class)) =
@@ -498,6 +568,30 @@ impl Drawer {
         Ok(())
     }
 
+    fn write_data_block_status_log(
+        &mut self,
+        key: &str,
+        data_offset: u64,
+        block_entry: DataBlockIndexEntry,
+    ) -> std::io::Result<()> {
+        let index_entry = serde_json::json!({
+            "f": self.primary_key,
+            "k": key,
+            "o": data_offset,
+            "len": block_entry.payload_len,
+            "class": block_entry.size_class,
+            "crc": block_entry.crc,
+            "status": block_entry.status
+        });
+        let serialized_index = PlainTextJsonFormat::serialize_record(&index_entry)?;
+        let entry_raw_len = serialized_index.len();
+        let target_size_class = self.index_recycler.calculate_aligned_size(entry_raw_len);
+
+        self.index_writer
+            .append_aligned_index(&serialized_index, target_size_class)?;
+        Ok(())
+    }
+
     pub fn find_all_records(&mut self) -> std::io::Result<Vec<Value>> {
         let mut live_records = Vec::new();
         let mut raw_lines = Vec::new();
@@ -505,13 +599,13 @@ impl Drawer {
         self.data_reader
             .stream_with_offsets(|_offset, line_content| {
                 let trimmed = line_content.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with("!!DEAD!!") {
+                if !trimmed.is_empty() && !PlainTextJsonFormat::is_tombstone(trimmed.as_bytes()) {
                     raw_lines.push(trimmed.to_string());
                 }
             })?;
 
         for line in raw_lines {
-            if let Ok(record_value) = serde_json::from_str::<Value>(&line) {
+            if let Some(record_value) = PlainTextJsonFormat::deserialize_record(line.as_bytes())? {
                 live_records.push(record_value);
             }
         }
@@ -520,12 +614,12 @@ impl Drawer {
     }
 
     fn persist_metadata(&self) -> std::io::Result<()> {
-        let metadata = DrawerMetadata::rebuild_from_files(
-            &self.data_file_path,
-            &self.index_file_path,
+        let metadata = DrawerMetadata::from_configuration(
             &self.primary_key,
             &self.unique_constraints,
-        )?;
+            self.relationship_constraints.clone(),
+            self.delete_rules.clone(),
+        );
         metadata.persist(&self.meta_file_path)
     }
 }

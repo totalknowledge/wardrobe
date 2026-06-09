@@ -10,28 +10,52 @@ pub use wrdb_lib::reader::DatabaseReader;
 pub use wrdb_lib::recycler::Recycler;
 pub use wrdb_lib::writer::DatabaseWriter;
 
-use serde_json::json;
+use serde_json::Value;
+use std::fs;
 use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+
+fn seed_file_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("common")
+        .join("test_seed.json")
+}
+
+fn seed_database(engine: &mut WardrobeEngine) -> io::Result<()> {
+    let seed_contents = fs::read_to_string(seed_file_path())?;
+    let seed_value: Value = serde_json::from_str(&seed_contents)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+    let seed_map = seed_value.as_object().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Seed file root must be a JSON object mapping drawer names to arrays",
+        )
+    })?;
+
+    for (drawer_name, records) in seed_map {
+        let record_array = records.as_array().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Seed drawer '{drawer_name}' must contain an array of records"),
+            )
+        })?;
+
+        for record in record_array {
+            engine.upsert(drawer_name, record.clone())?;
+        }
+    }
+
+    Ok(())
+}
 
 fn main() -> io::Result<()> {
     let database_directory = "./wardrobe";
     let mut engine = WardrobeEngine::new(database_directory)?;
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let random_potency = 5000 + (nanos % 5000) as u64;
-
-    let gem_payload = json!({
-        "_id": "@gem:lnk_ab7f2d90ad074e05987817bce6f941c3",
-        "element": "Fire",
-        "potency": random_potency
-    });
-
-    if let Err(error) = engine.upsert("gem", gem_payload) {
-        println!("Failed to run startup upsert: {}", error);
+    if let Err(error) = seed_database(&mut engine) {
+        println!("Failed to seed database from test_seed.json: {}", error);
     }
 
     println!("=========================================");
