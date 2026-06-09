@@ -97,6 +97,60 @@ impl WardrobeEngine {
         Ok(None)
     }
 
+    pub fn delete_by_id(&mut self, pointer: &str) -> Result<bool> {
+        let mut active_delete_path = HashSet::new();
+        self.delete_by_id_inner(pointer, &mut active_delete_path)
+    }
+
+    fn delete_by_id_inner(
+        &mut self,
+        pointer: &str,
+        active_delete_path: &mut HashSet<String>,
+    ) -> Result<bool> {
+        if active_delete_path.contains(pointer) {
+            return Ok(false);
+        }
+
+        let (drawer_name, _) = self.parse_pointer(pointer)?;
+        let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{}' could not be loaded for delete", drawer_name),
+            ));
+        };
+
+        let record = drawer.find_by_primary_key(pointer)?;
+        let cascade_fields = drawer.cascade_delete_fields();
+        let Some(record) = record else {
+            return Ok(false);
+        };
+
+        active_delete_path.insert(pointer.to_string());
+        let cascade_pointers = Self::collect_cascade_pointers(&record, &cascade_fields);
+        for cascade_pointer in cascade_pointers {
+            self.delete_by_id_inner(&cascade_pointer, active_delete_path)?;
+        }
+
+        let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        else {
+            active_delete_path.remove(pointer);
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{}' could not be loaded for delete", drawer_name),
+            ));
+        };
+
+        let deleted_record = drawer.delete_by_primary_key(pointer)?;
+        active_delete_path.remove(pointer);
+
+        Ok(deleted_record.is_some())
+    }
+
     fn decompose_nested_objects(&mut self, map: Map<String, Value>) -> Result<Map<String, Value>> {
         let mut continuous_map = Map::new();
 
@@ -165,6 +219,39 @@ impl WardrobeEngine {
         }
 
         field_name.to_string()
+    }
+
+    fn collect_cascade_pointers(record: &Value, cascade_fields: &[String]) -> Vec<String> {
+        let mut pointers = Vec::new();
+
+        if let Value::Object(map) = record {
+            for field in cascade_fields {
+                if let Some(value) = map.get(field) {
+                    Self::collect_pointer_strings(value, &mut pointers);
+                }
+            }
+        }
+
+        pointers
+    }
+
+    fn collect_pointer_strings(value: &Value, pointers: &mut Vec<String>) {
+        match value {
+            Value::String(pointer) if Self::is_pointer(pointer) => {
+                pointers.push(pointer.to_string());
+            }
+            Value::Array(values) => {
+                for value in values {
+                    Self::collect_pointer_strings(value, pointers);
+                }
+            }
+            Value::Object(map) => {
+                for value in map.values() {
+                    Self::collect_pointer_strings(value, pointers);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn hydrate_value(

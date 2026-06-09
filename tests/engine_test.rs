@@ -6,6 +6,28 @@ use std::fs;
 use std::path::Path;
 use wardrobe::WardrobeEngine;
 
+fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
+    let cascade_delete_rules = fields
+        .iter()
+        .map(|field| ((*field).to_string(), json!(true)))
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+
+    let metadata = json!({
+        "format_version": 1,
+        "primary_key": "_id",
+        "unique_constraints": [],
+        "relationship_constraints": {},
+        "delete_rules": {},
+        "cascade_delete_rules": cascade_delete_rules
+    });
+
+    fs::write(
+        database.path.join(format!("{}_meta.drw", drawer_name)),
+        serde_json::to_vec_pretty(&metadata).expect("metadata should serialize"),
+    )
+    .expect("metadata should write");
+}
+
 #[test]
 fn find_all_loads_existing_drawer_files_after_restart() {
     let database = TempDatabase::new("find_all_loads_existing_drawer_files");
@@ -581,6 +603,198 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
     assert_eq!(characters[0]["weapons"][0]["gems"][0]["element"], "Storm");
     assert_eq!(characters[0]["weapons"][1]["name"], "Shield");
     assert_eq!(characters[0]["weapons"][1]["gems"][0]["element"], "Earth");
+}
+
+#[test]
+fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
+    let database = TempDatabase::new("us_020_delete_by_id");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        engine
+            .upsert(
+                "gem",
+                json!({
+                    "_id": "@gem:lnk_delete_engine",
+                    "element": "Solar",
+                    "potency": 777
+                }),
+            )
+            .expect("gem should upsert");
+
+        let deleted = engine
+            .delete_by_id("@gem:lnk_delete_engine")
+            .expect("delete should succeed");
+        assert!(deleted);
+        assert!(
+            engine
+                .find_by_id("@gem:lnk_delete_engine")
+                .expect("lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            engine
+                .find_all("gem")
+                .expect("find all should succeed")
+                .is_empty()
+        );
+    }
+
+    let data_contents =
+        fs::read_to_string(database.path.join("gem.drw")).expect("gem drawer should be readable");
+    assert!(data_contents.contains("!!DEAD!!"));
+
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+    assert!(
+        restarted_engine
+            .find_by_id("@gem:lnk_delete_engine")
+            .expect("lookup should succeed after restart")
+            .is_none()
+    );
+}
+
+#[test]
+fn us_020_delete_by_id_returns_false_for_missing_record_in_existing_drawer() {
+    let database = TempDatabase::new("us_020_delete_missing_record");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_existing",
+                "element": "Solar"
+            }),
+        )
+        .expect("gem should upsert");
+
+    let deleted = engine
+        .delete_by_id("@gem:lnk_missing")
+        .expect("delete against existing drawer should succeed");
+
+    assert!(!deleted);
+}
+
+#[test]
+fn us_020_delete_by_id_errors_for_missing_drawer() {
+    let database = TempDatabase::new("us_020_delete_missing_drawer");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+
+    let error = engine
+        .delete_by_id("@missing:lnk_any")
+        .expect_err("missing drawer should error");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn us_030_cascade_delete_uses_metadata_rules_leaf_first() {
+    let database = TempDatabase::new("us_030_cascade_delete");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        engine
+            .upsert(
+                "character",
+                json!({
+                    "_id": "@character:lnk_cascade_owner",
+                    "name": "Grace",
+                    "weapons": [
+                        {
+                            "_id": "@weapon:lnk_cascade_spear",
+                            "name": "Spear",
+                            "gems": [
+                                {
+                                    "_id": "@gem:lnk_cascade_storm",
+                                    "element": "Storm",
+                                    "potency": 8080
+                                }
+                            ]
+                        }
+                    ]
+                }),
+            )
+            .expect("character graph should upsert");
+    }
+
+    write_cascade_delete_rules(&database, "character", &["weapons"]);
+    write_cascade_delete_rules(&database, "weapon", &["gems"]);
+
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+    let deleted = restarted_engine
+        .delete_by_id("@character:lnk_cascade_owner")
+        .expect("cascade delete should succeed");
+
+    assert!(deleted);
+    assert!(
+        restarted_engine
+            .find_by_id("@character:lnk_cascade_owner")
+            .expect("character lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        restarted_engine
+            .find_by_id("@weapon:lnk_cascade_spear")
+            .expect("weapon lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        restarted_engine
+            .find_by_id("@gem:lnk_cascade_storm")
+            .expect("gem lookup should succeed")
+            .is_none()
+    );
+}
+
+#[test]
+fn us_030_delete_preserves_links_not_configured_for_cascade() {
+    let database = TempDatabase::new("us_030_preserve_non_cascade_links");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let mut engine =
+            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        engine
+            .upsert(
+                "character",
+                json!({
+                    "_id": "@character:lnk_preserve_owner",
+                    "name": "Grace",
+                    "weapon": {
+                        "_id": "@weapon:lnk_preserved_weapon",
+                        "name": "Spear"
+                    }
+                }),
+            )
+            .expect("character graph should upsert");
+    }
+
+    let mut restarted_engine =
+        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+    restarted_engine
+        .delete_by_id("@character:lnk_preserve_owner")
+        .expect("delete should succeed");
+
+    assert!(
+        restarted_engine
+            .find_by_id("@character:lnk_preserve_owner")
+            .expect("character lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        restarted_engine
+            .find_by_id("@weapon:lnk_preserved_weapon")
+            .expect("weapon lookup should succeed")
+            .is_some()
+    );
 }
 
 #[test]

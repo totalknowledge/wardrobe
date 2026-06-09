@@ -153,6 +153,61 @@ fn unique_constraints_are_enforced_and_tombstones_are_recycled() {
 }
 
 #[test]
+fn delete_by_primary_key_tombstones_record_and_evicts_indexes() {
+    let database_directory = TempDatabase::new("drawer_delete_by_primary_key");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let mut drawer = Drawer::open(
+        &database_directory.path,
+        "gem",
+        "_id",
+        vec!["element".to_string()],
+    )
+    .expect("drawer should open");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@gem:lnk_delete_me",
+            "element": "Fire",
+            "potency": 10
+        }))
+        .expect("upsert should succeed")
+        .expect("record should validate");
+
+    let deleted = drawer
+        .delete_by_primary_key("@gem:lnk_delete_me")
+        .expect("delete should succeed")
+        .expect("deleted record should be returned");
+
+    assert_eq!(deleted["element"], "Fire");
+    assert!(
+        drawer
+            .find_by_primary_key("@gem:lnk_delete_me")
+            .expect("lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        drawer
+            .find_by_secondary_key("element", "Fire")
+            .expect("secondary lookup should succeed")
+            .is_empty()
+    );
+    assert!(
+        drawer
+            .find_all_records()
+            .expect("find all should succeed")
+            .is_empty()
+    );
+
+    let data_contents = fs::read_to_string(database_directory.path.join("gem.drw"))
+        .expect("data file should be readable");
+    assert!(data_contents.contains("!!DEAD!!"));
+
+    let index_records = load_index_records(&database_directory, "gem");
+    assert!(index_records.iter().any(|record| record["status"] == 0));
+}
+
+#[test]
 fn find_all_records_skips_tombstoned_lines() {
     let database_directory = TempDatabase::new("drawer_find_all_records");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");

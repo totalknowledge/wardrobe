@@ -38,6 +38,8 @@ struct DrawerMetadata {
     relationship_constraints: BTreeMap<String, Value>,
     #[serde(default)]
     delete_rules: BTreeMap<String, Value>,
+    #[serde(default)]
+    cascade_delete_rules: BTreeMap<String, bool>,
 }
 
 impl DrawerMetadata {
@@ -62,6 +64,7 @@ impl DrawerMetadata {
         unique_constraints: &[String],
         relationship_constraints: BTreeMap<String, Value>,
         delete_rules: BTreeMap<String, Value>,
+        cascade_delete_rules: BTreeMap<String, bool>,
     ) -> Self {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
@@ -69,6 +72,7 @@ impl DrawerMetadata {
             unique_constraints: unique_constraints.to_vec(),
             relationship_constraints,
             delete_rules,
+            cascade_delete_rules,
         }
     }
 
@@ -151,6 +155,7 @@ pub struct Drawer {
     data_block_index: HashMap<u64, DataBlockIndexEntry>,
     relationship_constraints: BTreeMap<String, Value>,
     delete_rules: BTreeMap<String, Value>,
+    cascade_delete_rules: BTreeMap<String, bool>,
     meta_file_path: PathBuf,
 }
 
@@ -187,6 +192,10 @@ impl Drawer {
         let delete_rules = existing_metadata
             .as_ref()
             .map(|metadata| metadata.delete_rules.clone())
+            .unwrap_or_default();
+        let cascade_delete_rules = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.cascade_delete_rules.clone())
             .unwrap_or_default();
         let mut inferred_unique_constraints = if unique_constraints.is_empty() {
             existing_metadata
@@ -234,6 +243,17 @@ impl Drawer {
                 if index_entry.get("status").and_then(|value| value.as_u64())
                     == Some(DATA_BLOCK_STATUS_DEAD as u64)
                 {
+                    if let (Some(field), Some(key), Some(data_offset)) = (
+                        index_entry.get("f").and_then(|value| value.as_str()),
+                        index_entry.get("k").and_then(|value| value.as_str()),
+                        index_entry.get("o").and_then(|value| value.as_u64()),
+                    ) {
+                        if field == primary_key
+                            && primary_memory_index.get(key).copied() == Some(data_offset)
+                        {
+                            primary_memory_index.remove(key);
+                        }
+                    }
                     continue;
                 }
 
@@ -298,6 +318,7 @@ impl Drawer {
             data_block_index,
             relationship_constraints,
             delete_rules,
+            cascade_delete_rules,
             meta_file_path,
         };
 
@@ -454,6 +475,86 @@ impl Drawer {
             }
         }
         Ok(matching_records)
+    }
+
+    pub fn delete_by_primary_key(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+        let Some(stale_offset) = self.primary_memory_index.get(key).copied() else {
+            return Ok(None);
+        };
+
+        let Some(deleted_record) = self.data_reader.read_record_at_offset(stale_offset)? else {
+            self.primary_memory_index.remove(key);
+            return Ok(None);
+        };
+
+        let Some((_stale_offset, old_block)) =
+            self.historical_block_entry(stale_offset, Some(&deleted_record))?
+        else {
+            self.primary_memory_index.remove(key);
+            return Ok(Some(deleted_record));
+        };
+
+        self.data_writer
+            .write_tombstone_at_offset(stale_offset, old_block.size_class)?;
+        self.write_data_block_status_log(key, stale_offset, old_block.dead())?;
+
+        self.primary_memory_index.remove(key);
+        self.data_block_index.remove(&stale_offset);
+        self.data_recycler
+            .register_free_slot(old_block.size_class, stale_offset);
+
+        let fields_to_clear = self.unique_constraints.clone();
+        for unique_field in fields_to_clear {
+            if let Some(field_value) = deleted_record
+                .get(&unique_field)
+                .and_then(|value| value.as_str())
+            {
+                if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
+                    if let Some(offsets) = field_map.get_mut(field_value) {
+                        offsets.retain(|offset| *offset != stale_offset);
+                        if offsets.is_empty() {
+                            field_map.remove(field_value);
+                        }
+                    }
+                }
+
+                self.write_index_log(&unique_field, field_value, Value::Array(Vec::new()), None)?;
+            }
+        }
+
+        Ok(Some(deleted_record))
+    }
+
+    pub fn cascade_delete_fields(&self) -> Vec<String> {
+        let mut fields = self
+            .cascade_delete_rules
+            .iter()
+            .filter_map(|(field, should_cascade)| {
+                if *should_cascade {
+                    Some(field.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (field, rule) in &self.delete_rules {
+            if Self::delete_rule_is_cascade(rule) && !fields.contains(field) {
+                fields.push(field.clone());
+            }
+        }
+
+        fields
+    }
+
+    fn delete_rule_is_cascade(rule: &Value) -> bool {
+        if rule.as_str().is_some_and(|action| action == "Cascade") {
+            return true;
+        }
+
+        rule.get("action")
+            .and_then(|action| action.as_str())
+            .is_some_and(|action| action == "Cascade")
     }
 
     fn historical_block_entry(
@@ -619,6 +720,7 @@ impl Drawer {
             &self.unique_constraints,
             self.relationship_constraints.clone(),
             self.delete_rules.clone(),
+            self.cascade_delete_rules.clone(),
         );
         metadata.persist(&self.meta_file_path)
     }
