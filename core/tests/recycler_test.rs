@@ -1,4 +1,4 @@
-use wardrobe::Recycler;
+use wardrobe_core::Recycler;
 
 #[test]
 fn calculate_aligned_size_rounds_up_to_the_next_bracket() {

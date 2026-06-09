@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe::{DatabaseReader, DatabaseWriter, PlainTextJsonFormat, StorageFormat};
+use wardrobe_core::{DatabaseReader, DatabaseWriter, PlainTextJsonFormat, StorageFormat};
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()

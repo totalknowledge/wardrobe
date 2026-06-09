@@ -3,7 +3,7 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::collections::HashMap;
-use wardrobe::Database;
+use wardrobe_core::Database;
 
 #[test]
 fn us_001_database_initialization_creates_storage_directory() {
@@ -36,8 +36,8 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
     let record_id = "@gem:lnk_restart_gem";
 
     {
-        let mut engine =
-            wardrobe::WardrobeEngine::new(&database_directory).expect("engine should initialize");
+        let mut engine = wardrobe_core::WardrobeEngine::new(&database_directory)
+            .expect("engine should initialize");
         engine
             .upsert(
                 "gem",
@@ -50,8 +50,8 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
             .expect("record should upsert");
     }
 
-    let mut restarted_engine =
-        wardrobe::WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+    let mut restarted_engine = wardrobe_core::WardrobeEngine::new(&database_directory)
+        .expect("engine should reinitialize");
     let found = restarted_engine
         .find_by_id(record_id)
         .expect("lookup should use rebuilt index")

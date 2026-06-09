@@ -3,7 +3,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe::WardrobeEngine;
+use wardrobe_core::WardrobeEngine;
 
 fn cwd_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

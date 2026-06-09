@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe::DatabaseReader;
+use wardrobe_core::DatabaseReader;
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()

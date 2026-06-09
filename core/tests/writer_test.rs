@@ -1,6 +1,6 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe::{DatabaseWriter, PlainTextJsonFormat, StorageFormat};
+use wardrobe_core::{DatabaseWriter, PlainTextJsonFormat, StorageFormat};
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()

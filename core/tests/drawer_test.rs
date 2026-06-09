@@ -3,7 +3,7 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::fs;
-use wardrobe::Drawer;
+use wardrobe_core::Drawer;
 
 fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_json::Value {
     let metadata_path = database_directory

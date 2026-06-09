@@ -4,7 +4,7 @@ use common::TempDatabase;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use wardrobe::WardrobeEngine;
+use wardrobe_core::WardrobeEngine;
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
     let cascade_delete_rules = fields
