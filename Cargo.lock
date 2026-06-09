@@ -336,6 +336,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wardrobe-cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wardrobe-core",
+]
+
+[[package]]
 name = "wardrobe-core"
 version = "0.1.0"
 dependencies = [
