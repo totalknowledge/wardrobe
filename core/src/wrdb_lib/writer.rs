@@ -4,6 +4,8 @@ use std::path::Path;
 
 use super::storage_format::{PlainTextJsonFormat, StorageFormat};
 
+const PADDING_BUFFER_SIZE: usize = 512;
+
 pub struct DatabaseWriter {
     file_handle: File,
 }
@@ -69,7 +71,7 @@ impl DatabaseWriter {
         let remaining_padding = alignment_chunk_size - 1 - tombstone_prefix.len();
 
         self.file_handle.write_all(tombstone_prefix)?;
-        self.file_handle.write_all(&vec![b' '; remaining_padding])?;
+        self.write_padding(remaining_padding)?;
         self.file_handle.write_all(b"\n")?;
         self.file_handle.flush()?;
 
@@ -90,9 +92,21 @@ impl DatabaseWriter {
         };
 
         self.file_handle.write_all(payload)?;
-        self.file_handle.write_all(&vec![b' '; padding_needed])?;
+        self.write_padding(padding_needed)?;
         self.file_handle.write_all(b"\n")?;
         self.file_handle.flush()?;
+
+        Ok(())
+    }
+
+    fn write_padding(&mut self, mut padding_needed: usize) -> std::io::Result<()> {
+        let padding_buffer = [b' '; PADDING_BUFFER_SIZE];
+
+        while padding_needed > 0 {
+            let chunk_size = padding_needed.min(padding_buffer.len());
+            self.file_handle.write_all(&padding_buffer[..chunk_size])?;
+            padding_needed -= chunk_size;
+        }
 
         Ok(())
     }

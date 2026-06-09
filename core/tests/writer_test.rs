@@ -58,3 +58,51 @@ fn append_aligned_index_writes_data_and_reports_length() {
     let contents = fs::read_to_string(&file_path).expect("file should be readable");
     assert!(contents.contains(r#""f":"_id""#));
 }
+
+#[test]
+fn append_record_pads_to_exact_alignment_with_large_padding_span() {
+    let file_path = temp_file_path("writer_append_exact_alignment");
+    let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
+    let payload =
+        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
+
+    writer
+        .append_record(&payload, 1024)
+        .expect("append should succeed");
+
+    let bytes = fs::read(&file_path).expect("file should be readable");
+    assert_eq!(bytes.len(), 1024);
+    assert_eq!(&bytes[..payload.len()], payload.as_slice());
+    assert!(bytes[payload.len()..1023].iter().all(|byte| *byte == b' '));
+    assert_eq!(bytes[1023], b'\n');
+
+    let _ = fs::remove_file(file_path);
+}
+
+#[test]
+fn tombstone_padding_preserves_exact_alignment_with_large_padding_span() {
+    let file_path = temp_file_path("writer_tombstone_exact_alignment");
+    let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
+    let payload =
+        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
+
+    let offset = writer
+        .append_record(&payload, 1024)
+        .expect("append should succeed");
+    writer
+        .write_tombstone_at_offset(offset, 1024)
+        .expect("tombstone should succeed");
+
+    let bytes = fs::read(&file_path).expect("file should be readable");
+    let tombstone = PlainTextJsonFormat::tombstone_marker();
+    assert_eq!(bytes.len(), 1024);
+    assert_eq!(&bytes[..tombstone.len()], tombstone);
+    assert!(
+        bytes[tombstone.len()..1023]
+            .iter()
+            .all(|byte| *byte == b' ')
+    );
+    assert_eq!(bytes[1023], b'\n');
+
+    let _ = fs::remove_file(file_path);
+}
