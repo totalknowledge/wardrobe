@@ -346,6 +346,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wardrobe-server"
+version = "0.1.0"
+dependencies = [
+ "wardrobe-core",
+]
+
+[[package]]
 name = "wasip2"
 version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
