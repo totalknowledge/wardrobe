@@ -36,7 +36,7 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
     let record_id = "@gem:lnk_restart_gem";
 
     {
-        let mut engine = wardrobe_core::WardrobeEngine::new(&database_directory)
+        let mut engine = wardrobe_core::WardrobeEngine::open(&database_directory)
             .expect("engine should initialize");
         engine
             .upsert(
@@ -50,7 +50,7 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
             .expect("record should upsert");
     }
 
-    let mut restarted_engine = wardrobe_core::WardrobeEngine::new(&database_directory)
+    let mut restarted_engine = wardrobe_core::WardrobeEngine::open(&database_directory)
         .expect("engine should reinitialize");
     let found = restarted_engine
         .find_by_id(record_id)

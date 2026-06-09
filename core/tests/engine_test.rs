@@ -35,7 +35,7 @@ fn find_all_loads_existing_drawer_files_after_restart() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("database should initialize");
+            WardrobeEngine::open(&database_directory).expect("database should initialize");
         engine
             .upsert(
                 "weapon",
@@ -53,7 +53,7 @@ fn find_all_loads_existing_drawer_files_after_restart() {
     }
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("database should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("database should reinitialize");
     let weapons = restarted_engine
         .find_all("weapon")
         .expect("weapons should load");
@@ -67,7 +67,7 @@ fn find_all_loads_existing_drawer_files_after_restart() {
 fn upsert_rejects_non_object_payload() {
     let database = TempDatabase::new("upsert_rejects_non_object_payload");
     let database_directory = database.path.to_string_lossy().into_owned();
-    let mut engine = WardrobeEngine::new(&database_directory).expect("database should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
 
     let error = engine
         .upsert("gem", json!(["not", "an", "object"]))
@@ -80,7 +80,7 @@ fn upsert_rejects_non_object_payload() {
 fn find_by_id_returns_none_for_missing_drawer_and_does_not_create_files() {
     let database = TempDatabase::new("find_by_id_missing_drawer");
     let database_directory = database.path.to_string_lossy().into_owned();
-    let mut engine = WardrobeEngine::new(&database_directory).expect("database should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
 
     let result = engine
         .find_by_id("@missing:lnk_any")
@@ -99,7 +99,7 @@ fn find_by_id_returns_none_for_missing_drawer_and_does_not_create_files() {
 fn find_by_id_rejects_malformed_pointer() {
     let database = TempDatabase::new("find_by_id_rejects_malformed_pointer");
     let database_directory = database.path.to_string_lossy().into_owned();
-    let mut engine = WardrobeEngine::new(&database_directory).expect("database should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
 
     let error = engine
         .find_by_id("not-a-pointer")
@@ -115,7 +115,7 @@ fn find_by_id_hydrates_without_id_fields() {
 
     let weapon_pointer = {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("database should initialize");
+            WardrobeEngine::open(&database_directory).expect("database should initialize");
         engine
             .upsert(
                 "weapon",
@@ -131,7 +131,7 @@ fn find_by_id_hydrates_without_id_fields() {
     };
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("database should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("database should reinitialize");
     let found = restarted_engine
         .find_by_id(&weapon_pointer)
         .expect("lookup should succeed")
@@ -149,7 +149,7 @@ fn find_all_keeps_pointer_when_target_record_is_missing() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("database should initialize");
+            WardrobeEngine::open(&database_directory).expect("database should initialize");
         engine
             .upsert(
                 "weapon",
@@ -163,7 +163,7 @@ fn find_all_keeps_pointer_when_target_record_is_missing() {
     }
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("database should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("database should reinitialize");
     let weapons = restarted_engine
         .find_all("weapon")
         .expect("find_all should succeed");
@@ -179,7 +179,7 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+            WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "weapon",
@@ -198,7 +198,7 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
     }
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     let weapons = restarted_engine
         .find_all("weapon")
         .expect("find_all should auto-load weapon drawer from disk");
@@ -213,7 +213,7 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
 fn us_013_reads_do_not_auto_create_missing_drawers() {
     let database = TempDatabase::new("us_013_missing_drawers");
     let database_directory = database.path.to_string_lossy().into_owned();
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     let records = engine
         .find_all("missing")
@@ -236,7 +236,7 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+            WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "character",
@@ -259,7 +259,7 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
     }
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     let characters = restarted_engine
         .find_all("character")
         .expect("characters should hydrate after restart");
@@ -283,7 +283,7 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
     let application_gem_id = "existing_gem";
     let wardrobe_gem_id = "@gem:lnk_existing_gem";
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "gem",
@@ -337,7 +337,7 @@ fn us_018_id_only_subobject_accepts_preformatted_pointers() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let gem_id = "@gem:lnk_existing_gem";
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "gem",
@@ -378,7 +378,7 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
     let database = TempDatabase::new("us_018_full_subobject");
     let database_directory = database.path.to_string_lossy().into_owned();
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "weapon",
@@ -415,7 +415,7 @@ fn us_019_scalar_arrays_are_preserved_on_upsert() {
     let database = TempDatabase::new("us_019_scalar_arrays");
     let database_directory = database.path.to_string_lossy().into_owned();
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "character",
@@ -448,7 +448,7 @@ fn us_019_pointer_arrays_are_hydrated_in_order() {
     let database = TempDatabase::new("us_019_pointer_arrays");
     let database_directory = database.path.to_string_lossy().into_owned();
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "gem",
@@ -493,7 +493,7 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
     let database = TempDatabase::new("us_019_id_only_object_arrays");
     let database_directory = database.path.to_string_lossy().into_owned();
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "gem",
@@ -549,7 +549,7 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
     let database = TempDatabase::new("us_019_full_nested_object_arrays");
     let database_directory = database.path.to_string_lossy().into_owned();
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "character",
@@ -612,7 +612,7 @@ fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+            WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "gem",
@@ -647,7 +647,7 @@ fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
     assert!(data_contents.contains("!!DEAD!!"));
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     assert!(
         restarted_engine
             .find_by_id("@gem:lnk_delete_engine")
@@ -660,7 +660,7 @@ fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
 fn us_020_delete_by_id_returns_false_for_missing_record_in_existing_drawer() {
     let database = TempDatabase::new("us_020_delete_missing_record");
     let database_directory = database.path.to_string_lossy().into_owned();
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     engine
         .upsert(
@@ -683,7 +683,7 @@ fn us_020_delete_by_id_returns_false_for_missing_record_in_existing_drawer() {
 fn us_020_delete_by_id_errors_for_missing_drawer() {
     let database = TempDatabase::new("us_020_delete_missing_drawer");
     let database_directory = database.path.to_string_lossy().into_owned();
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     let error = engine
         .delete_by_id("@missing:lnk_any")
@@ -699,7 +699,7 @@ fn us_030_cascade_delete_uses_metadata_rules_leaf_first() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+            WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "character",
@@ -728,7 +728,7 @@ fn us_030_cascade_delete_uses_metadata_rules_leaf_first() {
     write_cascade_delete_rules(&database, "weapon", &["gems"]);
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     let deleted = restarted_engine
         .delete_by_id("@character:lnk_cascade_owner")
         .expect("cascade delete should succeed");
@@ -761,7 +761,7 @@ fn us_030_delete_preserves_links_not_configured_for_cascade() {
 
     {
         let mut engine =
-            WardrobeEngine::new(&database_directory).expect("engine should initialize");
+            WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
                 "character",
@@ -778,7 +778,7 @@ fn us_030_delete_preserves_links_not_configured_for_cascade() {
     }
 
     let mut restarted_engine =
-        WardrobeEngine::new(&database_directory).expect("engine should reinitialize");
+        WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     restarted_engine
         .delete_by_id("@character:lnk_preserve_owner")
         .expect("delete should succeed");
@@ -802,7 +802,7 @@ fn find_by_id_handles_cyclic_links_without_recursive_overflow() {
     let database = TempDatabase::new("find_by_id_handles_cyclic_links");
     let database_directory = database.path.to_string_lossy().into_owned();
 
-    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
             "node",

@@ -41,7 +41,7 @@ fn seed_database(engine: &mut WardrobeEngine) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let database_directory = "./wardrobe";
-    let mut engine = WardrobeEngine::new(database_directory)?;
+    let mut engine = WardrobeEngine::open(database_directory)?;
 
     if let Err(error) = seed_database(&mut engine) {
         println!("Failed to seed database from test_seed.json: {}", error);

@@ -152,7 +152,7 @@ fn diagnose(data_dir: &Path) -> io::Result<()> {
 
 fn print_records(data_dir: &Path, drawer_name: &str) -> io::Result<()> {
     let data_dir = data_dir.to_string_lossy().to_string();
-    let mut engine = WardrobeEngine::new(&data_dir)?;
+    let mut engine = WardrobeEngine::open(&data_dir)?;
     let records = engine.find_all(drawer_name)?;
 
     println!(

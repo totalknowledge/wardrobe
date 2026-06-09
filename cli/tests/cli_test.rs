@@ -23,7 +23,7 @@ fn drawers_lists_known_drawers_without_internal_files() {
     let storage_directory = temp_storage_directory("drawers_lists_known_drawers");
     {
         let mut engine =
-            WardrobeEngine::new(&storage_directory.to_string_lossy()).expect("engine should open");
+            WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
             .expect("gem should insert");
@@ -56,7 +56,7 @@ fn inspect_reports_drawer_companion_files() {
     let storage_directory = temp_storage_directory("inspect_reports_drawer_files");
     {
         let mut engine =
-            WardrobeEngine::new(&storage_directory.to_string_lossy()).expect("engine should open");
+            WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
             .expect("gem should insert");
@@ -84,7 +84,7 @@ fn records_prints_hydrated_drawer_records() {
     let storage_directory = temp_storage_directory("records_prints_records");
     {
         let mut engine =
-            WardrobeEngine::new(&storage_directory.to_string_lossy()).expect("engine should open");
+            WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
             .expect("gem should insert");
@@ -117,7 +117,7 @@ fn diagnose_reports_ok_for_structurally_complete_drawers() {
     let storage_directory = temp_storage_directory("diagnose_reports_ok");
     {
         let mut engine =
-            WardrobeEngine::new(&storage_directory.to_string_lossy()).expect("engine should open");
+            WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
             .expect("gem should insert");

@@ -57,7 +57,7 @@ fn print_help() {
 
 fn main() -> io::Result<()> {
     let config = ServerConfig::from_args(std::env::args().skip(1))?;
-    let _engine = WardrobeEngine::new(&config.data_dir)?;
+    let _engine = WardrobeEngine::open(&config.data_dir)?;
 
     println!(
         "Wardrobe daemon initialized with storage directory: {}",

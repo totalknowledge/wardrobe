@@ -9,9 +9,14 @@ pub struct WardrobeEngine {
 }
 
 impl WardrobeEngine {
-    pub fn new(directory: &str) -> Result<Self> {
+    pub fn open(directory: &str) -> Result<Self> {
         let database_core = Database::initialize(directory)?;
         Ok(Self { database_core })
+    }
+
+    #[deprecated(note = "Use WardrobeEngine::open for filesystem-backed initialization")]
+    pub fn new(directory: &str) -> Result<Self> {
+        Self::open(directory)
     }
 
     pub fn upsert(&mut self, drawer_name: &str, payload: Value) -> Result<String> {
