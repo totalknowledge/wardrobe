@@ -101,20 +101,33 @@ impl WardrobeEngine {
         let mut continuous_map = Map::new();
 
         for (key, value) in map {
-            if let Value::Object(child_map) = value {
-                if let Some(reference_id) = Self::id_only_reference(&child_map) {
-                    let normalized_pointer = Self::normalize_reference_pointer(&key, reference_id);
-                    continuous_map.insert(key, Value::String(normalized_pointer));
-                } else {
-                    let child_pointer = self.upsert(&key, Value::Object(child_map))?;
-                    continuous_map.insert(key, Value::String(child_pointer));
-                }
-            } else {
-                continuous_map.insert(key, value);
-            }
+            let drawer_name = Self::relationship_drawer_name(&key);
+            let processed_value = self.decompose_relationship_value(&drawer_name, value)?;
+            continuous_map.insert(key, processed_value);
         }
 
         Ok(continuous_map)
+    }
+
+    fn decompose_relationship_value(&mut self, drawer_name: &str, value: Value) -> Result<Value> {
+        match value {
+            Value::Object(child_map) => {
+                if let Some(reference_id) = Self::id_only_reference(&child_map) {
+                    let normalized_pointer =
+                        Self::normalize_reference_pointer(drawer_name, reference_id);
+                    Ok(Value::String(normalized_pointer))
+                } else {
+                    let child_pointer = self.upsert(drawer_name, Value::Object(child_map))?;
+                    Ok(Value::String(child_pointer))
+                }
+            }
+            Value::Array(values) => values
+                .into_iter()
+                .map(|item| self.decompose_relationship_value(drawer_name, item))
+                .collect::<Result<Vec<_>>>()
+                .map(Value::Array),
+            other => Ok(other),
+        }
     }
 
     fn id_only_reference(map: &Map<String, Value>) -> Option<&str> {
@@ -136,6 +149,22 @@ impl WardrobeEngine {
         } else {
             format!("@{}:lnk_{}", drawer_name, clean_id)
         }
+    }
+
+    fn relationship_drawer_name(field_name: &str) -> String {
+        if let Some(stem) = field_name.strip_suffix("ies") {
+            return format!("{}y", stem);
+        }
+
+        if field_name.ends_with('s')
+            && !field_name.ends_with("ss")
+            && !field_name.ends_with("us")
+            && field_name.len() > 1
+        {
+            return field_name[..field_name.len() - 1].to_string();
+        }
+
+        field_name.to_string()
     }
 
     fn hydrate_value(
@@ -178,6 +207,19 @@ impl WardrobeEngine {
             }
             Value::Array(values) => {
                 for value in values {
+                    if let Some(pointer) = value
+                        .as_str()
+                        .filter(|pointer| Self::is_pointer(pointer))
+                        .map(|pointer| pointer.to_string())
+                    {
+                        if let Some(resolved_value) =
+                            self.resolve_pointer(&pointer, include_ids, active_pointer_path)?
+                        {
+                            *value = resolved_value;
+                            continue;
+                        }
+                    }
+
                     self.hydrate_value(value, include_ids, active_pointer_path)?;
                 }
             }

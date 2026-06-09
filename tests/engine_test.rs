@@ -389,6 +389,201 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
 }
 
 #[test]
+fn us_019_scalar_arrays_are_preserved_on_upsert() {
+    let database = TempDatabase::new("us_019_scalar_arrays");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_array_scalars",
+                "name": "Array Keeper",
+                "tags": ["tank", "support", "night-watch"],
+                "scores": [10, 20, 30]
+            }),
+        )
+        .expect("character should upsert with scalar arrays");
+
+    let character_file = fs::read_to_string(database.path.join("character.drw"))
+        .expect("character drawer should be readable");
+    assert!(character_file.contains("\"tags\":[\"tank\",\"support\",\"night-watch\"]"));
+    assert!(character_file.contains("\"scores\":[10,20,30]"));
+
+    let characters = engine
+        .find_all("character")
+        .expect("character lookup should succeed");
+    assert_eq!(
+        characters[0]["tags"],
+        json!(["tank", "support", "night-watch"])
+    );
+    assert_eq!(characters[0]["scores"], json!([10, 20, 30]));
+}
+
+#[test]
+fn us_019_pointer_arrays_are_hydrated_in_order() {
+    let database = TempDatabase::new("us_019_pointer_arrays");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_array_fire",
+                "element": "Fire",
+                "potency": 10
+            }),
+        )
+        .expect("fire gem should upsert");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_array_water",
+                "element": "Water",
+                "potency": 20
+            }),
+        )
+        .expect("water gem should upsert");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_pointer_array",
+                "name": "Twin Wand",
+                "gems": ["@gem:lnk_array_fire", "@gem:lnk_array_water"]
+            }),
+        )
+        .expect("weapon should upsert with pointer array");
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("weapon lookup should succeed");
+    assert_eq!(weapons[0]["gems"][0]["element"], "Fire");
+    assert_eq!(weapons[0]["gems"][1]["element"], "Water");
+}
+
+#[test]
+fn us_019_id_only_object_arrays_are_normalized_to_references() {
+    let database = TempDatabase::new("us_019_id_only_object_arrays");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_array_existing_fire",
+                "element": "Fire",
+                "potency": 111
+            }),
+        )
+        .expect("fire gem should upsert");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_array_existing_air",
+                "element": "Air",
+                "potency": 222
+            }),
+        )
+        .expect("air gem should upsert");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_id_only_array",
+                "name": "Reference Bow",
+                "gems": [
+                    { "_id": "array_existing_fire" },
+                    { "_id": "@gem:lnk_array_existing_air" }
+                ]
+            }),
+        )
+        .expect("weapon should upsert with id-only array references");
+
+    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(
+        weapon_file.contains(
+            "\"gems\":[\"@gem:lnk_array_existing_fire\",\"@gem:lnk_array_existing_air\"]"
+        )
+    );
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("weapon lookup should succeed");
+    assert_eq!(weapons[0]["gems"][0]["element"], "Fire");
+    assert_eq!(weapons[0]["gems"][1]["element"], "Air");
+}
+
+#[test]
+fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
+    let database = TempDatabase::new("us_019_full_nested_object_arrays");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_nested_array_owner",
+                "name": "Grace",
+                "weapons": [
+                    {
+                        "_id": "@weapon:lnk_array_spear",
+                        "name": "Spear",
+                        "gems": [
+                            {
+                                "_id": "@gem:lnk_array_storm",
+                                "element": "Storm",
+                                "potency": 8080
+                            }
+                        ]
+                    },
+                    {
+                        "_id": "@weapon:lnk_array_shield",
+                        "name": "Shield",
+                        "gems": [
+                            {
+                                "_id": "@gem:lnk_array_earth",
+                                "element": "Earth",
+                                "potency": 4040
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .expect("character should upsert with nested object arrays");
+
+    let character_file = fs::read_to_string(database.path.join("character.drw"))
+        .expect("character drawer should be readable");
+    assert!(
+        character_file
+            .contains("\"weapons\":[\"@weapon:lnk_array_spear\",\"@weapon:lnk_array_shield\"]")
+    );
+
+    let weapon_file =
+        fs::read_to_string(database.path.join("weapon.drw")).expect("weapon drawer readable");
+    assert!(weapon_file.contains("\"gems\":[\"@gem:lnk_array_storm\"]"));
+    assert!(weapon_file.contains("\"gems\":[\"@gem:lnk_array_earth\"]"));
+
+    let characters = engine
+        .find_all("character")
+        .expect("character lookup should succeed");
+    assert_eq!(characters[0]["weapons"][0]["name"], "Spear");
+    assert_eq!(characters[0]["weapons"][0]["gems"][0]["element"], "Storm");
+    assert_eq!(characters[0]["weapons"][1]["name"], "Shield");
+    assert_eq!(characters[0]["weapons"][1]["gems"][0]["element"], "Earth");
+}
+
+#[test]
 fn find_by_id_handles_cyclic_links_without_recursive_overflow() {
     let database = TempDatabase::new("find_by_id_handles_cyclic_links");
     let database_directory = database.path.to_string_lossy().into_owned();
