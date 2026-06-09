@@ -102,14 +102,40 @@ impl WardrobeEngine {
 
         for (key, value) in map {
             if let Value::Object(child_map) = value {
-                let child_pointer = self.upsert(&key, Value::Object(child_map))?;
-                continuous_map.insert(key, Value::String(child_pointer));
+                if let Some(reference_id) = Self::id_only_reference(&child_map) {
+                    let normalized_pointer = Self::normalize_reference_pointer(&key, reference_id);
+                    continuous_map.insert(key, Value::String(normalized_pointer));
+                } else {
+                    let child_pointer = self.upsert(&key, Value::Object(child_map))?;
+                    continuous_map.insert(key, Value::String(child_pointer));
+                }
             } else {
                 continuous_map.insert(key, value);
             }
         }
 
         Ok(continuous_map)
+    }
+
+    fn id_only_reference(map: &Map<String, Value>) -> Option<&str> {
+        if map.len() == 1 {
+            map.get("_id").and_then(|value| value.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn normalize_reference_pointer(drawer_name: &str, reference_id: &str) -> String {
+        if Self::is_pointer(reference_id) {
+            return reference_id.to_string();
+        }
+
+        let clean_id = reference_id.trim_start_matches('@');
+        if clean_id.contains(":lnk_") {
+            format!("@{}", clean_id)
+        } else {
+            format!("@{}:lnk_{}", drawer_name, clean_id)
+        }
     }
 
     fn hydrate_value(

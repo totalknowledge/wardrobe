@@ -2,6 +2,7 @@ mod common;
 
 use common::TempDatabase;
 use serde_json::json;
+use std::fs;
 use std::path::Path;
 use wardrobe::WardrobeEngine;
 
@@ -251,6 +252,140 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
         characters[0]["weapon"]["gem"]["_id"].as_str(),
         Some("@gem:lnk_safe_gem")
     );
+}
+
+#[test]
+fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
+    let database = TempDatabase::new("us_018_id_only_raw_reference");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let application_gem_id = "existing_gem";
+    let wardrobe_gem_id = "@gem:lnk_existing_gem";
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": wardrobe_gem_id,
+                "element": "Solar",
+                "potency": 777
+            }),
+        )
+        .expect("gem should upsert");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_uses_existing_gem",
+                "name": "Sun Pike",
+                "gem": {
+                    "_id": application_gem_id
+                }
+            }),
+        )
+        .expect("weapon should upsert with raw id-only gem reference");
+
+    let gem_file =
+        fs::read_to_string(database.path.join("gem.drw")).expect("gem drawer should be readable");
+    assert!(!gem_file.contains("!!DEAD!!"));
+    assert!(gem_file.contains("\"element\":\"Solar\""));
+
+    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(weapon_file.contains("\"gem\":\"@gem:lnk_existing_gem\""));
+
+    let found_gem = engine
+        .find_by_id(wardrobe_gem_id)
+        .expect("gem lookup should succeed")
+        .expect("gem should still exist");
+    assert_eq!(found_gem["element"], "Solar");
+    assert_eq!(found_gem["potency"], 777);
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("weapon lookup should succeed");
+    assert_eq!(weapons.len(), 1);
+    assert_eq!(weapons[0]["gem"]["element"], "Solar");
+}
+
+#[test]
+fn us_018_id_only_subobject_accepts_preformatted_pointers() {
+    let database = TempDatabase::new("us_018_preformatted_reference");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let gem_id = "@gem:lnk_existing_gem";
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": gem_id,
+                "element": "Nebula",
+                "potency": 313
+            }),
+        )
+        .expect("gem should upsert");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_preformatted_reference",
+                "name": "Star Lance",
+                "gem": {
+                    "_id": gem_id
+                }
+            }),
+        )
+        .expect("weapon should upsert with preformatted reference");
+
+    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(weapon_file.contains("\"gem\":\"@gem:lnk_existing_gem\""));
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("weapon lookup should succeed");
+    assert_eq!(weapons.len(), 1);
+    assert_eq!(weapons[0]["gem"]["element"], "Nebula");
+}
+
+#[test]
+fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
+    let database = TempDatabase::new("us_018_full_subobject");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let mut engine = WardrobeEngine::new(&database_directory).expect("engine should initialize");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_full_child",
+                "name": "Moon Staff",
+                "gem": {
+                    "_id": "@gem:lnk_full_child_gem",
+                    "element": "Lunar",
+                    "potency": 123
+                }
+            }),
+        )
+        .expect("weapon should upsert with full child object");
+
+    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(weapon_file.contains("\"gem\":\"@gem:lnk_full_child_gem\""));
+
+    let found_gem = engine
+        .find_by_id("@gem:lnk_full_child_gem")
+        .expect("gem lookup should succeed")
+        .expect("gem should exist");
+    assert_eq!(found_gem["element"], "Lunar");
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("weapon lookup should succeed");
+    assert_eq!(weapons[0]["gem"]["potency"], 123);
 }
 
 #[test]
