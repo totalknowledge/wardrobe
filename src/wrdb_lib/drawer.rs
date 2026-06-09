@@ -1,9 +1,142 @@
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::recycler::Recycler;
 use crate::wrdb_lib::writer::DatabaseWriter;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let least_significant_bit = crc & 1;
+            crc >>= 1;
+            if least_significant_bit != 0 {
+                crc ^= 0xedb8_8320;
+            }
+        }
+    }
+
+    !crc
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DrawerMetadata {
+    format_version: u8,
+    primary_key: String,
+    unique_constraints: Vec<String>,
+    record_status_map: HashMap<String, String>,
+    payload_lengths: HashMap<String, usize>,
+    allocated_size_classes: HashMap<String, usize>,
+    integrity_checksums: HashMap<String, u32>,
+}
+
+impl DrawerMetadata {
+    fn load(path: &Path) -> std::io::Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let contents = std::fs::read_to_string(path)?;
+        if contents.trim().is_empty() {
+            return Ok(None);
+        }
+
+        match serde_json::from_str(&contents) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn rebuild_from_files(
+        data_file_path: &Path,
+        index_file_path: &Path,
+        primary_key: &str,
+        unique_constraints: &[String],
+    ) -> std::io::Result<Self> {
+        let mut metadata = Self {
+            format_version: DRAWER_METADATA_FORMAT_VERSION,
+            primary_key: primary_key.to_string(),
+            unique_constraints: unique_constraints.to_vec(),
+            ..Self::default()
+        };
+
+        let mut data_reader = DatabaseReader::open_drawer(data_file_path)?;
+        let mut data_entries = Vec::new();
+        data_reader.stream_with_offsets(|offset, line| {
+            data_entries.push((offset, line.starts_with("!!DEAD!!"), line.to_string()));
+        })?;
+
+        let data_len = std::fs::metadata(data_file_path)?.len();
+        for (index, (offset, is_dead, line)) in data_entries.iter().enumerate() {
+            let next_offset = data_entries
+                .get(index + 1)
+                .map(|entry| entry.0)
+                .unwrap_or(data_len);
+            let allocated_size_class = (next_offset - *offset) as usize;
+            metadata.register_entry("data", *offset, allocated_size_class, line, *is_dead);
+        }
+
+        let mut index_reader = DatabaseReader::open_drawer(index_file_path)?;
+        let mut index_entries = Vec::new();
+        index_reader.stream_with_offsets(|offset, line| {
+            index_entries.push((offset, line.starts_with("!!DEAD!!"), line.to_string()));
+        })?;
+
+        let index_len = std::fs::metadata(index_file_path)?.len();
+        for (index, (offset, is_dead, line)) in index_entries.iter().enumerate() {
+            let next_offset = index_entries
+                .get(index + 1)
+                .map(|entry| entry.0)
+                .unwrap_or(index_len);
+            let allocated_size_class = (next_offset - *offset) as usize;
+            metadata.register_entry("index", *offset, allocated_size_class, line, *is_dead);
+        }
+
+        Ok(metadata)
+    }
+
+    fn register_entry(
+        &mut self,
+        entry_kind: &str,
+        offset: u64,
+        allocated_size_class: usize,
+        line: &str,
+        is_dead: bool,
+    ) {
+        let metadata_key = format!("{}:{}", entry_kind, offset);
+        let normalized_payload = line.trim_end().to_string();
+
+        self.record_status_map.insert(
+            metadata_key.clone(),
+            if is_dead { "dead" } else { "live" }.to_string(),
+        );
+        self.payload_lengths
+            .insert(metadata_key.clone(), normalized_payload.len());
+        self.allocated_size_classes
+            .insert(metadata_key.clone(), allocated_size_class);
+        self.integrity_checksums
+            .insert(metadata_key, crc32(normalized_payload.as_bytes()));
+    }
+
+    fn persist(&self, path: &Path) -> std::io::Result<()> {
+        let serialized = serde_json::to_vec_pretty(self)?;
+        let temporary_path = path.with_extension("drw.tmp");
+        std::fs::write(&temporary_path, serialized)?;
+
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+
+        std::fs::rename(temporary_path, path)?;
+        Ok(())
+    }
+}
 
 pub struct Drawer {
     pub name: String,
@@ -20,6 +153,9 @@ pub struct Drawer {
     primary_memory_index: HashMap<String, u64>,
     secondary_memory_index: HashMap<String, HashMap<String, Vec<u64>>>,
     index_file_offsets: HashMap<String, (u64, usize)>,
+    data_file_path: PathBuf,
+    index_file_path: PathBuf,
+    meta_file_path: PathBuf,
 }
 
 impl Drawer {
@@ -33,6 +169,7 @@ impl Drawer {
 
         let data_file_path = base_path.join(format!("{}.drw", name));
         let index_file_path = base_path.join(format!("{}_index.drw", name));
+        let meta_file_path = base_path.join(format!("{}_meta.drw", name));
 
         let data_writer = DatabaseWriter::open_drawer(&data_file_path)?;
         let mut data_reader = DatabaseReader::open_drawer(&data_file_path)?;
@@ -45,7 +182,15 @@ impl Drawer {
         let mut primary_memory_index = HashMap::new();
         let mut secondary_memory_index = HashMap::new();
         let mut index_file_offsets = HashMap::new();
-        let mut inferred_unique_constraints = unique_constraints;
+        let existing_metadata = DrawerMetadata::load(&meta_file_path)?;
+        let mut inferred_unique_constraints = if unique_constraints.is_empty() {
+            existing_metadata
+                .as_ref()
+                .map(|metadata| metadata.unique_constraints.clone())
+                .unwrap_or_default()
+        } else {
+            unique_constraints
+        };
 
         for field in &inferred_unique_constraints {
             secondary_memory_index.insert(field.clone(), HashMap::new());
@@ -125,7 +270,7 @@ impl Drawer {
             }
         }
 
-        Ok(Self {
+        let drawer = Self {
             name: name.to_string(),
             primary_key: primary_key.to_string(),
             unique_constraints: inferred_unique_constraints,
@@ -137,7 +282,14 @@ impl Drawer {
             primary_memory_index,
             secondary_memory_index,
             index_file_offsets,
-        })
+            data_file_path,
+            index_file_path,
+            meta_file_path,
+        };
+
+        drawer.persist_metadata()?;
+
+        Ok(drawer)
     }
 
     pub fn upsert_record(&mut self, record: Value) -> std::io::Result<Result<(), String>> {
@@ -272,6 +424,8 @@ impl Drawer {
             }
         }
 
+        self.persist_metadata()?;
+
         Ok(Ok(()))
     }
 
@@ -363,5 +517,15 @@ impl Drawer {
         }
 
         Ok(live_records)
+    }
+
+    fn persist_metadata(&self) -> std::io::Result<()> {
+        let metadata = DrawerMetadata::rebuild_from_files(
+            &self.data_file_path,
+            &self.index_file_path,
+            &self.primary_key,
+            &self.unique_constraints,
+        )?;
+        metadata.persist(&self.meta_file_path)
     }
 }

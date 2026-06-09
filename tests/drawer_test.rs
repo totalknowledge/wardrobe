@@ -5,6 +5,15 @@ use serde_json::json;
 use std::fs;
 use wardrobe::Drawer;
 
+fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_json::Value {
+    let metadata_path = database_directory
+        .path
+        .join(format!("{}_meta.drw", drawer_name));
+    let metadata_contents =
+        fs::read_to_string(metadata_path).expect("metadata sidecar should be readable");
+    serde_json::from_str(&metadata_contents).expect("metadata sidecar should be valid json")
+}
+
 #[test]
 fn open_rebuilds_secondary_indexes_from_disk() {
     let database_directory = TempDatabase::new("drawer_rebuilds_secondary_indexes");
@@ -142,6 +151,72 @@ fn find_all_records_skips_tombstoned_lines() {
     let records = drawer.find_all_records().expect("find all should succeed");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["name"], "Blade Prime");
+}
+
+#[test]
+fn us_017_open_creates_metadata_sidecar_file_for_drawer() {
+    let database_directory = TempDatabase::new("drawer_metadata_sidecar_creation");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let _drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+        .expect("drawer should open");
+
+    let metadata_path = database_directory.path.join("socks_meta.drw");
+    assert!(metadata_path.is_file());
+
+    let metadata = load_metadata(&database_directory, "socks");
+    assert_eq!(metadata["format_version"], 1);
+    assert_eq!(metadata["primary_key"], "_id");
+    assert!(metadata["record_status_map"].is_object());
+    assert!(metadata["payload_lengths"].is_object());
+    assert!(metadata["allocated_size_classes"].is_object());
+    assert!(metadata["integrity_checksums"].is_object());
+}
+
+#[test]
+fn us_017_metadata_sidecar_tracks_live_and_tombstoned_entries() {
+    let database_directory = TempDatabase::new("drawer_metadata_sidecar_updates");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+        .expect("drawer should open");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@socks:lnk_a",
+            "color": "Blue"
+        }))
+        .expect("first upsert should succeed")
+        .expect("record should validate");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@socks:lnk_a",
+            "color": "Green"
+        }))
+        .expect("second upsert should succeed")
+        .expect("record should validate");
+
+    let metadata = load_metadata(&database_directory, "socks");
+    let statuses = metadata["record_status_map"]
+        .as_object()
+        .expect("status map should be an object");
+    let payload_lengths = metadata["payload_lengths"]
+        .as_object()
+        .expect("payload lengths should be an object");
+    let size_classes = metadata["allocated_size_classes"]
+        .as_object()
+        .expect("size classes should be an object");
+    let checksums = metadata["integrity_checksums"]
+        .as_object()
+        .expect("checksums should be an object");
+
+    assert!(statuses.keys().any(|key| key.starts_with("data:")));
+    assert!(statuses.values().any(|value| value == "live"));
+    assert!(statuses.values().any(|value| value == "dead"));
+    assert!(!payload_lengths.is_empty());
+    assert!(!size_classes.is_empty());
+    assert!(!checksums.is_empty());
 }
 
 #[test]

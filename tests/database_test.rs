@@ -136,6 +136,31 @@ fn load_existing_drawers_registers_all_non_index_drawers() {
 }
 
 #[test]
+fn load_existing_drawers_ignores_meta_sidecar_files() {
+    let database_directory = TempDatabase::new("db_ignore_meta_sidecars");
+    let mut database =
+        Database::initialize(&database_directory.path).expect("db should initialize");
+
+    database
+        .load_drawer("socks", "_id", Vec::new())
+        .expect("socks drawer should load");
+    database.close_drawer("socks");
+
+    std::fs::write(
+        database_directory.path.join("orphan_meta.drw"),
+        "{\"format_version\":1}",
+    )
+    .expect("orphan metadata file should write");
+
+    database
+        .load_existing_drawers("_id", HashMap::new())
+        .expect("existing drawers should load");
+
+    assert!(database.use_drawer("socks").is_some());
+    assert!(database.use_drawer("orphan_meta").is_none());
+}
+
+#[test]
 fn get_all_drawers_reflects_loaded_and_closed_drawers() {
     let database_directory = TempDatabase::new("db_get_all_drawers");
     let mut database =
