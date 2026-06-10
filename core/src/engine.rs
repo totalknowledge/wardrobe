@@ -87,6 +87,49 @@ impl StorageCoordinate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StorageLocator {
+    Explicit { drawer: String, id: String },
+    Inline(String),
+}
+
+impl StorageLocator {
+    pub fn explicit(drawer: &str, id: &str) -> Self {
+        Self::Explicit {
+            drawer: drawer.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    pub fn inline(locator: &str) -> Self {
+        Self::Inline(locator.to_string())
+    }
+}
+
+impl From<&str> for StorageLocator {
+    fn from(locator: &str) -> Self {
+        Self::Inline(locator.to_string())
+    }
+}
+
+impl From<String> for StorageLocator {
+    fn from(locator: String) -> Self {
+        Self::Inline(locator)
+    }
+}
+
+impl From<&String> for StorageLocator {
+    fn from(locator: &String) -> Self {
+        Self::Inline(locator.clone())
+    }
+}
+
+impl From<(&str, &str)> for StorageLocator {
+    fn from((drawer, id): (&str, &str)) -> Self {
+        Self::explicit(drawer, id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StorageScope {
     Database { database: String },
     Schema { database: String, schema: String },
@@ -353,8 +396,22 @@ impl WardrobeEngine {
         Self::find_by_id_in_database(&self.database_core, pointer, ExecutionContext::root())
     }
 
-    pub fn delete_by_id(&self, pointer: &str) -> Result<bool> {
-        Self::delete_by_id_in_database(&self.database_core, pointer, ExecutionContext::root())
+    pub fn delete<L>(&self, locator: L) -> Result<bool>
+    where
+        L: Into<StorageLocator>,
+    {
+        Self::delete_by_id_in_database(
+            &self.database_core,
+            locator.into(),
+            ExecutionContext::root(),
+        )
+    }
+
+    pub fn delete_by_id<L>(&self, locator: L) -> Result<bool>
+    where
+        L: Into<StorageLocator>,
+    {
+        self.delete(locator)
     }
 
     pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
@@ -428,7 +485,7 @@ impl WardrobeEngine {
             } => Self::count_in_database(database, &drawer_name, filter, modifiers, context)
                 .map(CommandResult::Count),
             Command::Delete { pointer } => {
-                Self::delete_by_id_in_database(database, &pointer, context)
+                Self::delete_by_id_in_database(database, StorageLocator::Inline(pointer), context)
                     .map(CommandResult::Deleted)
             }
             Command::Vacuum { drawer_name } => {
@@ -874,11 +931,12 @@ impl WardrobeEngine {
 
     fn delete_by_id_in_database(
         database_core: &RwLock<Database>,
-        pointer: &str,
+        locator: StorageLocator,
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
+        let pointer = Self::locator_to_pointer(locator);
         let operation = WalOperation::DeleteById {
-            pointer: pointer.to_string(),
+            pointer: pointer.clone(),
             drawer_namespace: context.drawer_namespace.map(str::to_string),
         };
         let tx_id = Uuid::new_v4().simple().to_string();
@@ -890,7 +948,7 @@ impl WardrobeEngine {
                 operation,
             },
         )?;
-        let result = Self::delete_by_id_in_database_unlogged(database_core, pointer, context);
+        let result = Self::delete_by_id_in_database_unlogged(database_core, &pointer, context);
 
         if result.is_ok() {
             Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
@@ -1459,6 +1517,13 @@ impl WardrobeEngine {
 
         let physical_drawer_name = Self::scoped_drawer_name(&drawer_name, context);
         Self::format_pointer(&physical_drawer_name, &record_key)
+    }
+
+    fn locator_to_pointer(locator: StorageLocator) -> String {
+        match locator {
+            StorageLocator::Explicit { drawer, id } => Self::format_pointer(&drawer, &id),
+            StorageLocator::Inline(pointer) => pointer,
+        }
     }
 
     fn relationship_drawer_name(field_name: &str) -> String {

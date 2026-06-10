@@ -6,8 +6,8 @@ pub mod wrdb_lib;
 pub mod engine;
 
 pub use engine::{
-    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageScope,
-    WardrobeEngine,
+    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageLocator,
+    StorageScope, WardrobeEngine,
 };
 pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::{Drawer, VacuumReport};

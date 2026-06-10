@@ -22,6 +22,7 @@ Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 - `Command`
 - `CommandResult`
 - `StorageCoordinate`
+- `StorageLocator`
 - `StorageScope`
 - `QueryModifiers`
 - `OrderDirection`
@@ -44,6 +45,7 @@ The main embedded entry points on `WardrobeEngine` are:
 - `find_by_filter`
 - `count`
 - `find_by_id`
+- `delete`
 - `delete_by_id`
 - `vacuum_drawer`
 - `cached_drawer_count`

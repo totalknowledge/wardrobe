@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::{
-    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageScope,
-    WardrobeEngine,
+    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageLocator,
+    StorageScope, WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -878,6 +878,93 @@ fn us_020_delete_by_id_returns_false_for_missing_record_in_existing_drawer() {
         .expect("delete against existing drawer should succeed");
 
     assert!(!deleted);
+}
+
+#[test]
+fn us_054_delete_accepts_explicit_storage_locator() {
+    let database = TempDatabase::new("us_054_delete_explicit_locator");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_054_explicit",
+                "element": "Locator"
+            }),
+        )
+        .expect("gem should upsert");
+
+    let deleted = engine
+        .delete(StorageLocator::explicit("gem", "us_054_explicit"))
+        .expect("explicit locator delete should succeed");
+
+    assert!(deleted);
+    assert!(
+        engine
+            .find_by_id("@gem:us_054_explicit")
+            .expect("lookup should succeed")
+            .is_none()
+    );
+}
+
+#[test]
+fn us_054_delete_accepts_inline_storage_locator() {
+    let database = TempDatabase::new("us_054_delete_inline_locator");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "us_054_inline",
+                "element": "Inline"
+            }),
+        )
+        .expect("gem should upsert");
+
+    let deleted = engine
+        .delete(StorageLocator::inline("@gem:us_054_inline"))
+        .expect("inline locator delete should succeed");
+
+    assert!(deleted);
+    assert!(
+        engine
+            .find_by_id("@gem:us_054_inline")
+            .expect("lookup should succeed")
+            .is_none()
+    );
+}
+
+#[test]
+fn us_054_delete_by_id_accepts_tuple_locator_conversion() {
+    let database = TempDatabase::new("us_054_delete_tuple_locator");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_054_tuple",
+                "element": "Tuple"
+            }),
+        )
+        .expect("gem should upsert");
+
+    let deleted = engine
+        .delete_by_id(("gem", "lnk_us_054_tuple"))
+        .expect("tuple locator delete should succeed");
+
+    assert!(deleted);
+    assert!(
+        engine
+            .find_by_id("@gem:us_054_tuple")
+            .expect("lookup should succeed")
+            .is_none()
+    );
 }
 
 #[test]
