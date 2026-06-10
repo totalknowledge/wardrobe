@@ -494,6 +494,128 @@ fn us_052_primary_ids_are_stored_clean_while_references_keep_drawer_routing() {
 }
 
 #[test]
+fn us_053_inline_routing_registers_polymorphic_alias_and_hydrates_targets() {
+    let database = TempDatabase::new("us_053_polymorphic_alias");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_053_fire",
+                "element": "Fire"
+            }),
+        )
+        .expect("gem should upsert");
+    engine
+        .upsert(
+            "rune",
+            json!({
+                "_id": "@rune:lnk_us_053_guard",
+                "school": "Guard"
+            }),
+        )
+        .expect("rune should upsert");
+    engine
+        .upsert(
+            "artifact",
+            json!({
+                "_id": "@artifact:lnk_us_053_satchel",
+                "name": "Satchel",
+                "attachments": [
+                    "@gem:lnk_us_053_fire",
+                    "@rune:lnk_us_053_guard"
+                ]
+            }),
+        )
+        .expect("artifact should upsert");
+
+    let metadata_contents = fs::read_to_string(database.path.join("artifact_meta.drw"))
+        .expect("artifact metadata should be readable");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_contents).expect("metadata should parse");
+    assert_eq!(
+        metadata["relationship_constraints"]["attachments"]["type"],
+        "polymorphic"
+    );
+    assert_eq!(
+        metadata["relationship_constraints"]["attachments"]["target_drawers"],
+        json!(["gem", "rune"])
+    );
+
+    let artifact_file = fs::read_to_string(database.path.join("artifact.drw"))
+        .expect("artifact drawer should be readable");
+    assert!(
+        artifact_file.contains("\"attachments\":[\"@gem:us_053_fire\",\"@rune:us_053_guard\"]")
+    );
+    assert!(!artifact_file.contains("lnk_us_053"));
+
+    let artifacts = engine
+        .find_all("artifact")
+        .expect("artifact lookup should succeed");
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0]["attachments"][0]["element"], "Fire");
+    assert_eq!(artifacts[0]["attachments"][1]["school"], "Guard");
+}
+
+#[test]
+fn us_053_self_referencing_alias_resolves_clean_string_keys() {
+    let database = TempDatabase::new("us_053_self_reference_alias");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "spouse": {
+                    "target_drawer": "character"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "alex",
+                "name": "Alex"
+            }),
+        )
+        .expect("first character should upsert");
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "sam",
+                "name": "Sam",
+                "spouse": "alex"
+            }),
+        )
+        .expect("self-referencing character should upsert");
+
+    let character_file = fs::read_to_string(database.path.join("character.drw"))
+        .expect("character drawer should be readable");
+    assert!(character_file.contains("\"spouse\":\"@character:alex\""));
+
+    let sam = engine
+        .find_by_id("@character:sam")
+        .expect("lookup should succeed")
+        .expect("sam should exist");
+    assert_eq!(sam["name"], "Sam");
+    assert_eq!(sam["spouse"]["name"], "Alex");
+}
+
+#[test]
 fn us_019_scalar_arrays_are_preserved_on_upsert() {
     let database = TempDatabase::new("us_019_scalar_arrays");
     let database_directory = database.path.to_string_lossy().into_owned();
@@ -615,9 +737,7 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
     let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
         .expect("weapon drawer should be readable");
     assert!(
-        weapon_file.contains(
-            "\"gems\":[\"@gem:array_existing_fire\",\"@gem:array_existing_air\"]"
-        )
+        weapon_file.contains("\"gems\":[\"@gem:array_existing_fire\",\"@gem:array_existing_air\"]")
     );
 
     let weapons = engine
@@ -670,8 +790,7 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
     let character_file = fs::read_to_string(database.path.join("character.drw"))
         .expect("character drawer should be readable");
     assert!(
-        character_file
-            .contains("\"weapons\":[\"@weapon:array_spear\",\"@weapon:array_shield\"]")
+        character_file.contains("\"weapons\":[\"@weapon:array_spear\",\"@weapon:array_shield\"]")
     );
 
     let weapon_file =

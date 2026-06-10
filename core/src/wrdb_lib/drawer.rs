@@ -715,6 +715,20 @@ impl Drawer {
         self.relationship_constraints.clone()
     }
 
+    pub fn register_relationship_constraint(
+        &mut self,
+        field_name: &str,
+        rule: Value,
+    ) -> std::io::Result<()> {
+        if self.relationship_constraints.contains_key(field_name) {
+            return Ok(());
+        }
+
+        self.relationship_constraints
+            .insert(field_name.to_string(), rule);
+        self.persist_metadata()
+    }
+
     pub fn delete_rules(&self) -> BTreeMap<String, Value> {
         self.delete_rules.clone()
     }
