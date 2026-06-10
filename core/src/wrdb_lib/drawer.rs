@@ -877,9 +877,10 @@ impl Drawer {
 
     fn pointer_drawer_name(pointer: &str) -> Option<&str> {
         let clean_pointer = pointer.strip_prefix('@')?;
-        let (drawer_name, record_key) = clean_pointer.split_once(":lnk_")?;
+        let (drawer_name, record_key) = clean_pointer.split_once(':')?;
+        let record_key = record_key.strip_prefix("lnk_").unwrap_or(record_key);
 
-        if drawer_name.is_empty() || record_key.is_empty() || record_key.contains(":lnk_") {
+        if drawer_name.is_empty() || record_key.is_empty() || record_key.contains(':') {
             return None;
         }
 

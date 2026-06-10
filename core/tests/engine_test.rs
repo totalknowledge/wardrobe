@@ -200,7 +200,7 @@ fn find_all_keeps_pointer_when_target_record_is_missing() {
         .expect("find_all should succeed");
 
     assert_eq!(weapons.len(), 1);
-    assert_eq!(weapons[0]["gem"], "@gem:lnk_does_not_exist");
+    assert_eq!(weapons[0]["gem"], "@gem:does_not_exist");
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
     );
     assert_eq!(
         characters[0]["weapon"]["gem"]["_id"].as_str(),
-        Some("@gem:lnk_safe_gem")
+        Some("safe_gem")
     );
 }
 
@@ -344,7 +344,7 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
 
     let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
         .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@gem:lnk_existing_gem\""));
+    assert!(weapon_file.contains("\"gem\":\"@gem:existing_gem\""));
 
     let found_gem = engine
         .find_by_id(wardrobe_gem_id)
@@ -393,7 +393,7 @@ fn us_018_id_only_subobject_accepts_preformatted_pointers() {
 
     let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
         .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@gem:lnk_existing_gem\""));
+    assert!(weapon_file.contains("\"gem\":\"@gem:existing_gem\""));
 
     let weapons = engine
         .find_all("weapon")
@@ -425,7 +425,7 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
 
     let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
         .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@gem:lnk_full_child_gem\""));
+    assert!(weapon_file.contains("\"gem\":\"@gem:full_child_gem\""));
 
     let found_gem = engine
         .find_by_id("@gem:lnk_full_child_gem")
@@ -437,6 +437,60 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
         .find_all("weapon")
         .expect("weapon lookup should succeed");
     assert_eq!(weapons[0]["gem"]["potency"], 123);
+}
+
+#[test]
+fn us_052_primary_ids_are_stored_clean_while_references_keep_drawer_routing() {
+    let database = TempDatabase::new("us_052_clean_primary_ids");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let character_pointer = engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_052_owner",
+                "name": "Clean Owner"
+            }),
+        )
+        .expect("character should upsert");
+    assert_eq!(character_pointer, "@character:us_052_owner");
+
+    let weapon_pointer = engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "lnk_us_052_weapon",
+                "name": "Clean Blade",
+                "character": { "_id": "@character:lnk_us_052_owner" }
+            }),
+        )
+        .expect("weapon should upsert");
+    assert_eq!(weapon_pointer, "@weapon:us_052_weapon");
+
+    let character_file = fs::read_to_string(database.path.join("character.drw"))
+        .expect("character drawer should be readable");
+    assert!(character_file.contains("\"_id\":\"us_052_owner\""));
+    assert!(!character_file.contains("@character:"));
+    assert!(!character_file.contains("lnk_us_052_owner"));
+
+    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(weapon_file.contains("\"_id\":\"us_052_weapon\""));
+    assert!(weapon_file.contains("\"character\":\"@character:us_052_owner\""));
+    assert!(!weapon_file.contains("lnk_us_052_weapon"));
+
+    let legacy_lookup = engine
+        .find_by_id("@weapon:lnk_us_052_weapon")
+        .expect("legacy lookup should succeed")
+        .expect("weapon should exist");
+    assert_eq!(legacy_lookup["name"], "Clean Blade");
+
+    let clean_lookup = engine
+        .find_by_id("@weapon:us_052_weapon")
+        .expect("clean lookup should succeed")
+        .expect("weapon should exist");
+    assert_eq!(clean_lookup["character"]["name"], "Clean Owner");
 }
 
 #[test]
@@ -562,7 +616,7 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
         .expect("weapon drawer should be readable");
     assert!(
         weapon_file.contains(
-            "\"gems\":[\"@gem:lnk_array_existing_fire\",\"@gem:lnk_array_existing_air\"]"
+            "\"gems\":[\"@gem:array_existing_fire\",\"@gem:array_existing_air\"]"
         )
     );
 
@@ -617,13 +671,13 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
         .expect("character drawer should be readable");
     assert!(
         character_file
-            .contains("\"weapons\":[\"@weapon:lnk_array_spear\",\"@weapon:lnk_array_shield\"]")
+            .contains("\"weapons\":[\"@weapon:array_spear\",\"@weapon:array_shield\"]")
     );
 
     let weapon_file =
         fs::read_to_string(database.path.join("weapon.drw")).expect("weapon drawer readable");
-    assert!(weapon_file.contains("\"gems\":[\"@gem:lnk_array_storm\"]"));
-    assert!(weapon_file.contains("\"gems\":[\"@gem:lnk_array_earth\"]"));
+    assert!(weapon_file.contains("\"gems\":[\"@gem:array_storm\"]"));
+    assert!(weapon_file.contains("\"gems\":[\"@gem:array_earth\"]"));
 
     let characters = engine
         .find_all("character")
@@ -857,7 +911,7 @@ fn find_by_id_handles_cyclic_links_without_recursive_overflow() {
 
     assert_eq!(hydrated["name"], "Node A");
     assert_eq!(hydrated["next"]["name"], "Node B");
-    assert_eq!(hydrated["next"]["next"], "@node:lnk_a");
+    assert_eq!(hydrated["next"]["next"], "@node:a");
 }
 
 #[test]
@@ -1264,7 +1318,7 @@ fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
 
     assert_eq!(
         result,
-        CommandResult::Pointer("@weapon:lnk_us_034_blade".to_string())
+        CommandResult::Pointer("@weapon:us_034_blade".to_string())
     );
 
     assert!(
@@ -1641,7 +1695,7 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
 
     let weapon_file = fs::read_to_string(database.path.join("tenant_graph_weapon.drw"))
         .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@tenant_graph_gem:lnk_graph_fire\""));
+    assert!(weapon_file.contains("\"gem\":\"@tenant_graph_gem:graph_fire\""));
 
     let result = engine
         .execute_in_scope(
@@ -1716,7 +1770,7 @@ fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targ
 
     let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
         .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem_slot\":\"@gem:lnk_us_037_fire\""));
+    assert!(weapon_file.contains("\"gem_slot\":\"@gem:us_037_fire\""));
 
     let duplicate_error = engine
         .upsert(

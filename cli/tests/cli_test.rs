@@ -105,7 +105,7 @@ fn records_prints_hydrated_drawer_records() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"_id\": \"@weapon:lnk_blade\""));
+    assert!(stdout.contains("\"_id\": \"blade\""));
     assert!(stdout.contains("\"gem\""));
     assert!(stdout.contains("\"element\": \"Fire\""));
 
