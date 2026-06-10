@@ -833,3 +833,123 @@ fn find_by_id_handles_cyclic_links_without_recursive_overflow() {
     assert_eq!(hydrated["next"]["name"], "Node B");
     assert_eq!(hydrated["next"]["next"], "@node:lnk_a");
 }
+
+#[test]
+fn us_031_find_by_filter_matches_exact_properties_and_string_wildcards() {
+    let database = TempDatabase::new("us_031_property_and_wildcard_matches");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_031_sunblade",
+                "name": "Sunblade",
+                "damage": 120
+            }),
+        )
+        .expect("sunblade should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_031_moonblade",
+                "name": "Moonblade",
+                "damage": 90
+            }),
+        )
+        .expect("moonblade should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_031_storm_spear",
+                "name": "Storm Spear",
+                "damage": 120
+            }),
+        )
+        .expect("storm spear should upsert");
+
+    let by_damage = engine
+        .find_by_filter("weapon", json!({ "damage": 120 }), None)
+        .expect("damage filter should succeed");
+    assert_eq!(by_damage.len(), 2);
+
+    let by_name = engine
+        .find_by_filter("weapon", json!({ "name": "%blade" }), None)
+        .expect("wildcard filter should succeed");
+    assert_eq!(by_name.len(), 2);
+    assert_eq!(by_name[0]["name"], "Sunblade");
+    assert_eq!(by_name[1]["name"], "Moonblade");
+}
+
+#[test]
+fn us_031_find_by_filter_matches_reference_ids_against_stored_pointers() {
+    let database = TempDatabase::new("us_031_reference_matches");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_031_fire",
+                "element": "Fire",
+                "potency": 500
+            }),
+        )
+        .expect("fire gem should upsert");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_031_ice",
+                "element": "Ice",
+                "potency": 300
+            }),
+        )
+        .expect("ice gem should upsert");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_031_flare",
+                "name": "Flare",
+                "gem": { "_id": "@gem:lnk_us_031_fire" }
+            }),
+        )
+        .expect("flare should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_031_frost",
+                "name": "Frost",
+                "gem": { "_id": "@gem:lnk_us_031_ice" }
+            }),
+        )
+        .expect("frost should upsert");
+
+    let matched = engine
+        .find_by_filter("weapon", json!({ "gem": { "_id": "us_031_fire" } }), None)
+        .expect("reference filter should succeed");
+
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0]["name"], "Flare");
+    assert_eq!(matched[0]["gem"]["element"], "Fire");
+}
+
+#[test]
+fn us_031_find_by_filter_rejects_non_object_filters() {
+    let database = TempDatabase::new("us_031_rejects_non_object_filters");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let error = engine
+        .find_by_filter("weapon", json!(["not", "an", "object"]), None)
+        .expect_err("non-object filter should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}

@@ -4,6 +4,9 @@ use std::collections::HashSet;
 use std::io::{Error, ErrorKind, Result};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Default)]
+pub struct QueryModifiers;
+
 pub struct WardrobeEngine {
     database_core: Database,
 }
@@ -70,15 +73,32 @@ impl WardrobeEngine {
             Vec::new()
         };
 
-        for record in &mut records {
-            let mut active_pointer_path = HashSet::new();
-            if let Value::Object(map) = record {
-                if let Some(pointer) = map.get("_id").and_then(|value| value.as_str()) {
-                    active_pointer_path.insert(pointer.to_string());
-                }
-            }
-            self.hydrate_value(record, true, &mut active_pointer_path)?;
-        }
+        self.hydrate_records(&mut records, true)?;
+
+        Ok(records)
+    }
+
+    pub fn find_by_filter(
+        &mut self,
+        drawer_name: &str,
+        filter: Value,
+        _modifiers: Option<QueryModifiers>,
+    ) -> Result<Vec<Value>> {
+        let filter_map = filter.as_object().ok_or_else(|| {
+            Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object")
+        })?;
+
+        let mut records = if let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+        {
+            drawer.find_all_records()?
+        } else {
+            Vec::new()
+        };
+
+        records.retain(|record| Self::record_matches_filter(record, filter_map));
+        self.hydrate_records(&mut records, true)?;
 
         Ok(records)
     }
@@ -238,6 +258,113 @@ impl WardrobeEngine {
         }
 
         pointers
+    }
+
+    fn record_matches_filter(record: &Value, filter_map: &Map<String, Value>) -> bool {
+        let Value::Object(record_map) = record else {
+            return false;
+        };
+
+        filter_map.iter().all(|(field_name, expected_value)| {
+            record_map.get(field_name).is_some_and(|actual_value| {
+                Self::field_matches_filter(field_name, actual_value, expected_value)
+            })
+        })
+    }
+
+    fn field_matches_filter(
+        field_name: &str,
+        actual_value: &Value,
+        expected_value: &Value,
+    ) -> bool {
+        match expected_value {
+            Value::String(expected_string) => actual_value.as_str().is_some_and(|actual_string| {
+                Self::matches_string_filter(actual_string, expected_string)
+            }),
+            Value::Object(expected_map) => {
+                if let Some(reference_id) = Self::id_only_reference(expected_map) {
+                    let relationship_drawer = Self::relationship_drawer_name(field_name);
+                    let normalized_pointer =
+                        Self::normalize_reference_pointer(&relationship_drawer, reference_id);
+                    return actual_value.as_str() == Some(normalized_pointer.as_str());
+                }
+
+                let Value::Object(actual_map) = actual_value else {
+                    return false;
+                };
+
+                expected_map.iter().all(|(nested_field, nested_expected)| {
+                    actual_map.get(nested_field).is_some_and(|nested_actual| {
+                        Self::field_matches_filter(nested_field, nested_actual, nested_expected)
+                    })
+                })
+            }
+            Value::Array(expected_array) => {
+                let Value::Array(actual_array) = actual_value else {
+                    return false;
+                };
+
+                actual_array.len() == expected_array.len()
+                    && actual_array.iter().zip(expected_array.iter()).all(
+                        |(actual_item, expected_item)| {
+                            Self::field_matches_filter(field_name, actual_item, expected_item)
+                        },
+                    )
+            }
+            _ => actual_value == expected_value,
+        }
+    }
+
+    fn matches_string_filter(actual_value: &str, expected_filter: &str) -> bool {
+        if !expected_filter.contains('%') {
+            return actual_value == expected_filter;
+        }
+
+        let actual_bytes = actual_value.as_bytes();
+        let filter_bytes = expected_filter.as_bytes();
+        let mut actual_index = 0usize;
+        let mut filter_index = 0usize;
+        let mut wildcard_index = None;
+        let mut wildcard_match_start = 0usize;
+
+        while actual_index < actual_bytes.len() {
+            if filter_index < filter_bytes.len()
+                && filter_bytes[filter_index] == actual_bytes[actual_index]
+            {
+                actual_index += 1;
+                filter_index += 1;
+            } else if filter_index < filter_bytes.len() && filter_bytes[filter_index] == b'%' {
+                wildcard_index = Some(filter_index);
+                filter_index += 1;
+                wildcard_match_start = actual_index;
+            } else if let Some(last_wildcard_index) = wildcard_index {
+                filter_index = last_wildcard_index + 1;
+                wildcard_match_start += 1;
+                actual_index = wildcard_match_start;
+            } else {
+                return false;
+            }
+        }
+
+        while filter_index < filter_bytes.len() && filter_bytes[filter_index] == b'%' {
+            filter_index += 1;
+        }
+
+        filter_index == filter_bytes.len()
+    }
+
+    fn hydrate_records(&mut self, records: &mut [Value], include_ids: bool) -> Result<()> {
+        for record in records {
+            let mut active_pointer_path = HashSet::new();
+            if let Value::Object(map) = record {
+                if let Some(pointer) = map.get("_id").and_then(|value| value.as_str()) {
+                    active_pointer_path.insert(pointer.to_string());
+                }
+            }
+            self.hydrate_value(record, include_ids, &mut active_pointer_path)?;
+        }
+
+        Ok(())
     }
 
     fn collect_pointer_strings(value: &Value, pointers: &mut Vec<String>) {
