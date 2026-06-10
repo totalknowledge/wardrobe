@@ -3,6 +3,7 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -39,6 +40,26 @@ fn write_drawer_metadata(database: &TempDatabase, drawer_name: &str, metadata: s
         serde_json::to_vec_pretty(&metadata).expect("metadata should serialize"),
     )
     .expect("metadata should write");
+}
+
+fn write_wal_record(database: &TempDatabase, record: serde_json::Value) {
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    let mut wal_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(database.path.join("wardrobe.wal"))
+        .expect("wal should open");
+    writeln!(wal_file, "{}", record).expect("wal record should write");
+    wal_file.sync_all().expect("wal should sync");
+}
+
+fn wal_records(database: &TempDatabase) -> Vec<serde_json::Value> {
+    fs::read_to_string(database.path.join("wardrobe.wal"))
+        .expect("wal should read")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("wal line should parse"))
+        .collect()
 }
 
 #[test]
@@ -2258,6 +2279,189 @@ fn us_040_shared_engine_serializes_competing_writer_threads() {
         .find_by_filter("gem", json!({ "element": "New" }), None)
         .expect("new records should query");
     assert_eq!(new_records.len(), 10);
+}
+
+#[test]
+fn us_041_mutations_append_durable_wal_begin_and_commit_records() {
+    let database = TempDatabase::new("us_041_mutation_wal");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should open");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_041_logged",
+                "element": "Logged",
+                "potency": 41
+            }),
+        )
+        .expect("logged upsert should succeed");
+
+    let records = wal_records(&database);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["event"], "begin");
+    assert_eq!(records[0]["operation"]["type"], "upsert");
+    assert_eq!(records[0]["operation"]["drawer_name"], "gem");
+    assert_eq!(
+        records[0]["operation"]["payload"]["_id"],
+        "@gem:lnk_us_041_logged"
+    );
+    assert_eq!(records[1]["event"], "commit");
+    assert_eq!(records[1]["tx_id"], records[0]["tx_id"]);
+}
+
+#[test]
+fn us_041_open_replays_incomplete_upsert_intention_from_wal() {
+    let database = TempDatabase::new("us_041_replay_upsert");
+    write_wal_record(
+        &database,
+        json!({
+            "event": "begin",
+            "tx_id": "manual-upsert",
+            "operation": {
+                "type": "upsert",
+                "drawer_name": "gem",
+                "payload": {
+                    "_id": "@gem:lnk_us_041_replayed",
+                    "element": "Replay",
+                    "potency": 4100
+                }
+            }
+        }),
+    );
+
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should recover");
+    let found = engine
+        .find_by_id("@gem:lnk_us_041_replayed")
+        .expect("lookup should succeed")
+        .expect("replayed record should exist");
+
+    assert_eq!(found["element"], "Replay");
+    assert_eq!(found["potency"], 4100);
+
+    let records = wal_records(&database);
+    assert!(
+        records
+            .iter()
+            .any(|record| record["event"] == "commit" && record["tx_id"] == "manual-upsert")
+    );
+}
+
+#[test]
+fn us_041_open_replays_incomplete_cascading_delete_intention_from_wal() {
+    let database = TempDatabase::new("us_041_replay_cascade_delete");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "equipped_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {
+                "equipped_weapons": {
+                    "action": "Cascade"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should open");
+        engine
+            .upsert(
+                "character",
+                json!({
+                    "_id": "@character:lnk_us_041_cascade_parent",
+                    "name": "Wal Cascade Parent"
+                }),
+            )
+            .expect("character should upsert");
+        engine
+            .upsert(
+                "weapon",
+                json!({
+                    "_id": "@weapon:lnk_us_041_cascade_child",
+                    "name": "Wal Cascade Child",
+                    "character": { "_id": "@character:lnk_us_041_cascade_parent" }
+                }),
+            )
+            .expect("weapon should upsert");
+    }
+
+    write_wal_record(
+        &database,
+        json!({
+            "event": "begin",
+            "tx_id": "manual-cascade-delete",
+            "operation": {
+                "type": "delete_by_id",
+                "pointer": "@character:lnk_us_041_cascade_parent"
+            }
+        }),
+    );
+
+    let recovered_engine =
+        WardrobeEngine::open(&database_directory).expect("engine should recover delete");
+
+    assert_eq!(
+        recovered_engine
+            .count("character", None, None)
+            .expect("character count should succeed"),
+        0
+    );
+    assert_eq!(
+        recovered_engine
+            .count("weapon", None, None)
+            .expect("weapon count should succeed"),
+        0
+    );
+
+    let records = wal_records(&database);
+    assert!(records.iter().any(
+        |record| record["event"] == "commit" && record["tx_id"] == "manual-cascade-delete"
+    ));
+}
+
+#[test]
+fn us_041_failed_mutations_append_abort_and_do_not_replay_on_open() {
+    let database = TempDatabase::new("us_041_abort_failed_mutation");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should open");
+        let error = engine
+            .upsert("gem", json!(["not", "an", "object"]))
+            .expect_err("invalid mutation should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    let records = wal_records(&database);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["event"], "begin");
+    assert_eq!(records[1]["event"], "abort");
+    assert_eq!(records[1]["tx_id"], records[0]["tx_id"]);
+
+    let recovered_engine =
+        WardrobeEngine::open(&database_directory).expect("aborted wal should not replay");
+    assert_eq!(
+        recovered_engine
+            .count("gem", None, None)
+            .expect("count should succeed"),
+        0
+    );
 }
 
 #[test]

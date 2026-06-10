@@ -51,6 +51,10 @@ impl Database {
             .join(format!("{}_index.drw", drawer_name))
     }
 
+    pub fn storage_directory_path(&self) -> PathBuf {
+        self.storage_directory.clone()
+    }
+
     pub fn active_drawer_or_load_from_disk(
         &mut self,
         drawer_name: &str,

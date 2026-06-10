@@ -1,7 +1,10 @@
 use crate::wrdb_lib::database::Database;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -209,6 +212,37 @@ struct InverseDeleteRule {
     mapped_by: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WalOperation {
+    Upsert {
+        drawer_name: String,
+        payload: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawer_namespace: Option<String>,
+    },
+    DeleteById {
+        pointer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawer_namespace: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum WalRecord {
+    Begin {
+        tx_id: String,
+        operation: WalOperation,
+    },
+    Commit {
+        tx_id: String,
+    },
+    Abort {
+        tx_id: String,
+    },
+}
+
 impl SortableValue<'_> {
     fn compare_same_type(&self, other: Self) -> Option<Ordering> {
         match (self, other) {
@@ -229,9 +263,11 @@ pub struct WardrobeEngine {
 impl WardrobeEngine {
     pub fn open(directory: &str) -> Result<Self> {
         let database_core = Database::initialize(directory)?;
+        let database_core = RwLock::new(database_core);
+        Self::recover_database(&database_core)?;
         Ok(Self {
             root_directory: PathBuf::from(directory),
-            database_core: RwLock::new(database_core),
+            database_core,
             routed_databases: RwLock::new(HashMap::new()),
         })
     }
@@ -388,7 +424,9 @@ impl WardrobeEngine {
         let mut routed_databases = Self::write_lock(&self.routed_databases)?;
         if !routed_databases.contains_key(&route) {
             let database = Database::initialize(storage_path)?;
-            routed_databases.insert(route.clone(), Arc::new(RwLock::new(database)));
+            let database = Arc::new(RwLock::new(database));
+            Self::recover_database(&database)?;
+            routed_databases.insert(route.clone(), database);
         }
 
         routed_databases.get(&route).cloned().ok_or_else(|| {
@@ -439,7 +477,139 @@ impl WardrobeEngine {
         database.active_drawer_or_load_from_disk(drawer_name, primary_key, unique_constraints)
     }
 
+    fn wal_path(database_core: &RwLock<Database>) -> Result<PathBuf> {
+        Ok(Self::read_lock(database_core)?
+            .storage_directory_path()
+            .join("wardrobe.wal"))
+    }
+
+    fn append_wal_record(database_core: &RwLock<Database>, record: &WalRecord) -> Result<()> {
+        let wal_path = Self::wal_path(database_core)?;
+        let mut wal_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(wal_path)?;
+        let serialized = serde_json::to_vec(record)?;
+        wal_file.write_all(&serialized)?;
+        wal_file.write_all(b"\n")?;
+        wal_file.sync_all()?;
+        Ok(())
+    }
+
+    fn recover_database(database_core: &RwLock<Database>) -> Result<()> {
+        let wal_path = Self::wal_path(database_core)?;
+        if !wal_path.exists() {
+            return Ok(());
+        }
+
+        let contents = std::fs::read_to_string(wal_path)?;
+        let mut begun_transactions = Vec::new();
+        let mut closed_transactions = HashSet::new();
+
+        for line in contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let record: WalRecord = serde_json::from_str(line).map_err(|error| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Failed to parse WAL record during recovery: {error}"),
+                )
+            })?;
+
+            match record {
+                WalRecord::Begin { tx_id, operation } => {
+                    begun_transactions.push((tx_id, operation));
+                }
+                WalRecord::Commit { tx_id } => {
+                    closed_transactions.insert(tx_id);
+                }
+                WalRecord::Abort { tx_id } => {
+                    closed_transactions.insert(tx_id);
+                }
+            }
+        }
+
+        for (tx_id, operation) in begun_transactions {
+            if closed_transactions.contains(&tx_id) {
+                continue;
+            }
+
+            Self::replay_wal_operation(database_core, &operation)?;
+            Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
+        }
+
+        Ok(())
+    }
+
+    fn replay_wal_operation(
+        database_core: &RwLock<Database>,
+        operation: &WalOperation,
+    ) -> Result<()> {
+        match operation {
+            WalOperation::Upsert {
+                drawer_name,
+                payload,
+                drawer_namespace,
+            } => {
+                let context = ExecutionContext {
+                    drawer_namespace: drawer_namespace.as_deref(),
+                };
+                Self::upsert_in_database_unlogged(
+                    database_core,
+                    drawer_name,
+                    payload.clone(),
+                    context,
+                )?;
+            }
+            WalOperation::DeleteById {
+                pointer,
+                drawer_namespace,
+            } => {
+                let context = ExecutionContext {
+                    drawer_namespace: drawer_namespace.as_deref(),
+                };
+                Self::delete_by_id_in_database_unlogged(database_core, pointer, context)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn upsert_in_database(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<String> {
+        let operation = WalOperation::Upsert {
+            drawer_name: drawer_name.to_string(),
+            payload: payload.clone(),
+            drawer_namespace: context.drawer_namespace.map(str::to_string),
+        };
+        let tx_id = Uuid::new_v4().simple().to_string();
+
+        Self::append_wal_record(
+            database_core,
+            &WalRecord::Begin {
+                tx_id: tx_id.clone(),
+                operation,
+            },
+        )?;
+        let result =
+            Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context);
+
+        if result.is_ok() {
+            Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
+        } else {
+            let _ = Self::append_wal_record(database_core, &WalRecord::Abort { tx_id });
+        }
+
+        result
+    }
+
+    fn upsert_in_database_unlogged(
         database_core: &RwLock<Database>,
         drawer_name: &str,
         payload: Value,
@@ -632,6 +802,35 @@ impl WardrobeEngine {
     }
 
     fn delete_by_id_in_database(
+        database_core: &RwLock<Database>,
+        pointer: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<bool> {
+        let operation = WalOperation::DeleteById {
+            pointer: pointer.to_string(),
+            drawer_namespace: context.drawer_namespace.map(str::to_string),
+        };
+        let tx_id = Uuid::new_v4().simple().to_string();
+
+        Self::append_wal_record(
+            database_core,
+            &WalRecord::Begin {
+                tx_id: tx_id.clone(),
+                operation,
+            },
+        )?;
+        let result = Self::delete_by_id_in_database_unlogged(database_core, pointer, context);
+
+        if result.is_ok() {
+            Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
+        } else {
+            let _ = Self::append_wal_record(database_core, &WalRecord::Abort { tx_id });
+        }
+
+        result
+    }
+
+    fn delete_by_id_in_database_unlogged(
         database_core: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
@@ -992,7 +1191,7 @@ impl WardrobeEngine {
                     );
                     Ok(Value::String(normalized_pointer))
                 } else {
-                    let child_pointer = Self::upsert_in_database(
+                    let child_pointer = Self::upsert_in_database_unlogged(
                         database_core,
                         drawer_name,
                         Value::Object(child_map),
