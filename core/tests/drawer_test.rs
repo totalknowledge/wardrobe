@@ -74,7 +74,7 @@ fn open_rebuilds_secondary_indexes_from_disk() {
             .expect("record should validate");
     }
 
-    let mut reopened = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
+    let reopened = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
         .expect("drawer should reopen from disk");
 
     let matches = reopened
@@ -105,7 +105,7 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
     )
     .expect("index file should write");
 
-    let mut drawer = Drawer::open(
+    let drawer = Drawer::open(
         &database_directory.path,
         "weapon",
         "_id",
@@ -525,7 +525,7 @@ fn updating_secondary_field_removes_stale_index_entries() {
         assert_eq!(water_matches.len(), 1);
     }
 
-    let mut reopened = Drawer::open(
+    let reopened = Drawer::open(
         &database_directory.path,
         "gem",
         "_id",

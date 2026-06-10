@@ -20,7 +20,7 @@ fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
     writeln!(file, r#"{{"_id":"@gem:lnk_a","element":"Fire"}}"#).expect("write should succeed");
     writeln!(file, "!!DEAD!!").expect("write should succeed");
 
-    let mut reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let record = reader
         .read_record_at_offset(0)
         .expect("read should succeed")
@@ -46,7 +46,7 @@ fn stream_with_offsets_reports_each_line_offset() {
     writeln!(file, r#"{{"a":1}}"#).expect("write should succeed");
     writeln!(file, r#"{{"b":2}}"#).expect("write should succeed");
 
-    let mut reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let mut offsets = Vec::new();
 
     reader

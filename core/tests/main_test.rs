@@ -47,7 +47,7 @@ fn main_prints_existing_weapon_and_character_drawers() {
     let storage_directory = working_directory.join("wardrobe");
 
     {
-        let mut engine = WardrobeEngine::open(storage_directory.to_str().expect("unicode path"))
+        let engine = WardrobeEngine::open(storage_directory.to_str().expect("unicode path"))
             .expect("engine should initialize");
         engine
             .upsert(

@@ -1,10 +1,11 @@
 use crate::wrdb_lib::drawer::Drawer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 pub struct Database {
     storage_directory: PathBuf,
-    active_drawers: HashMap<String, Drawer>,
+    active_drawers: HashMap<String, Arc<RwLock<Drawer>>>,
 }
 
 impl Database {
@@ -33,8 +34,10 @@ impl Database {
                 primary_key,
                 unique_constraints,
             )?;
-            self.active_drawers
-                .insert(drawer_name.to_string(), initiated_drawer);
+            self.active_drawers.insert(
+                drawer_name.to_string(),
+                Arc::new(RwLock::new(initiated_drawer)),
+            );
         }
         Ok(())
     }
@@ -53,7 +56,7 @@ impl Database {
         drawer_name: &str,
         primary_key: &str,
         unique_constraints: Vec<String>,
-    ) -> std::io::Result<Option<&mut Drawer>> {
+    ) -> std::io::Result<Option<Arc<RwLock<Drawer>>>> {
         if !self.active_drawers.contains_key(drawer_name) {
             let data_file = self.drawer_data_file_path(drawer_name);
             let index_file = self.drawer_index_file_path(drawer_name);
@@ -65,7 +68,7 @@ impl Database {
             self.load_drawer(drawer_name, primary_key, unique_constraints)?;
         }
 
-        Ok(self.active_drawers.get_mut(drawer_name))
+        Ok(self.active_drawers.get(drawer_name).cloned())
     }
 
     pub fn load_existing_drawers(
@@ -103,18 +106,18 @@ impl Database {
         Ok(())
     }
 
-    pub fn use_drawer(&mut self, drawer_name: &str) -> Option<&mut Drawer> {
-        self.active_drawers.get_mut(drawer_name)
+    pub fn use_drawer(&self, drawer_name: &str) -> Option<Arc<RwLock<Drawer>>> {
+        self.active_drawers.get(drawer_name).cloned()
     }
 
     pub fn close_drawer(&mut self, drawer_name: &str) {
         self.active_drawers.remove(drawer_name);
     }
 
-    pub fn get_all_drawers(&mut self) -> HashMap<String, &mut Drawer> {
+    pub fn get_all_drawers(&self) -> HashMap<String, Arc<RwLock<Drawer>>> {
         let mut registry = HashMap::new();
-        for (drawer_name, drawer_instance) in self.active_drawers.iter_mut() {
-            registry.insert(drawer_name.clone(), drawer_instance);
+        for (drawer_name, drawer_instance) in &self.active_drawers {
+            registry.insert(drawer_name.clone(), drawer_instance.clone());
         }
         registry
     }

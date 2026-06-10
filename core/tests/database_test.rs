@@ -36,7 +36,7 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
     let record_id = "@gem:lnk_restart_gem";
 
     {
-        let mut engine = wardrobe_core::WardrobeEngine::open(&database_directory)
+        let engine = wardrobe_core::WardrobeEngine::open(&database_directory)
             .expect("engine should initialize");
         engine
             .upsert(
@@ -50,7 +50,7 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
             .expect("record should upsert");
     }
 
-    let mut restarted_engine = wardrobe_core::WardrobeEngine::open(&database_directory)
+    let restarted_engine = wardrobe_core::WardrobeEngine::open(&database_directory)
         .expect("engine should reinitialize");
     let found = restarted_engine
         .find_by_id(record_id)
@@ -90,6 +90,8 @@ fn active_drawer_or_load_from_disk_opens_existing_drawer_files() {
             .use_drawer("gem")
             .expect("drawer should be active after load");
         drawer
+            .write()
+            .expect("drawer lock should be writable")
             .upsert_record(json!({
                 "_id": "@gem:lnk_db_existing",
                 "element": "Fire"
@@ -106,6 +108,8 @@ fn active_drawer_or_load_from_disk_opens_existing_drawer_files() {
         .expect("existing drawer should be loaded");
 
     let found = drawer
+        .read()
+        .expect("drawer lock should be readable")
         .find_by_primary_key("@gem:lnk_db_existing")
         .expect("lookup should succeed")
         .expect("record should exist");

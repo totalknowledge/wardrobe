@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,8 +222,8 @@ impl SortableValue<'_> {
 
 pub struct WardrobeEngine {
     root_directory: PathBuf,
-    database_core: Database,
-    routed_databases: HashMap<DatabaseRoute, Database>,
+    database_core: RwLock<Database>,
+    routed_databases: RwLock<HashMap<DatabaseRoute, Arc<RwLock<Database>>>>,
 }
 
 impl WardrobeEngine {
@@ -230,8 +231,8 @@ impl WardrobeEngine {
         let database_core = Database::initialize(directory)?;
         Ok(Self {
             root_directory: PathBuf::from(directory),
-            database_core,
-            routed_databases: HashMap::new(),
+            database_core: RwLock::new(database_core),
+            routed_databases: RwLock::new(HashMap::new()),
         })
     }
 
@@ -240,31 +241,27 @@ impl WardrobeEngine {
         Self::open(directory)
     }
 
-    pub fn upsert(&mut self, drawer_name: &str, payload: Value) -> Result<String> {
+    pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String> {
         Self::upsert_in_database(
-            &mut self.database_core,
+            &self.database_core,
             drawer_name,
             payload,
             ExecutionContext::root(),
         )
     }
 
-    pub fn find_all(&mut self, drawer_name: &str) -> std::io::Result<Vec<Value>> {
-        Self::find_all_in_database(
-            &mut self.database_core,
-            drawer_name,
-            ExecutionContext::root(),
-        )
+    pub fn find_all(&self, drawer_name: &str) -> std::io::Result<Vec<Value>> {
+        Self::find_all_in_database(&self.database_core, drawer_name, ExecutionContext::root())
     }
 
     pub fn find_by_filter(
-        &mut self,
+        &self,
         drawer_name: &str,
         filter: Value,
         modifiers: Option<QueryModifiers>,
     ) -> Result<Vec<Value>> {
         Self::find_by_filter_in_database(
-            &mut self.database_core,
+            &self.database_core,
             drawer_name,
             filter,
             modifiers,
@@ -273,13 +270,13 @@ impl WardrobeEngine {
     }
 
     pub fn count(
-        &mut self,
+        &self,
         drawer_name: &str,
         filter: Option<Value>,
         modifiers: Option<QueryModifiers>,
     ) -> Result<usize> {
         Self::count_in_database(
-            &mut self.database_core,
+            &self.database_core,
             drawer_name,
             filter,
             modifiers,
@@ -287,50 +284,44 @@ impl WardrobeEngine {
         )
     }
 
-    pub fn find_by_id(&mut self, pointer: &str) -> Result<Option<Value>> {
-        Self::find_by_id_in_database(&mut self.database_core, pointer, ExecutionContext::root())
+    pub fn find_by_id(&self, pointer: &str) -> Result<Option<Value>> {
+        Self::find_by_id_in_database(&self.database_core, pointer, ExecutionContext::root())
     }
 
-    pub fn delete_by_id(&mut self, pointer: &str) -> Result<bool> {
-        Self::delete_by_id_in_database(&mut self.database_core, pointer, ExecutionContext::root())
+    pub fn delete_by_id(&self, pointer: &str) -> Result<bool> {
+        Self::delete_by_id_in_database(&self.database_core, pointer, ExecutionContext::root())
     }
 
     pub fn execute(
-        &mut self,
+        &self,
         coordinate: StorageCoordinate,
         command: Command,
     ) -> Result<CommandResult> {
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
-        Self::execute_in_database(database, command, None)
+        Self::execute_in_database(&database, command, None)
     }
 
-    pub fn execute_in_scope(
-        &mut self,
-        scope: StorageScope,
-        command: Command,
-    ) -> Result<CommandResult> {
+    pub fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult> {
         scope.validate()?;
 
         match scope {
             StorageScope::Database { database } => {
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
-                Self::execute_in_database(database, command, None)
+                Self::execute_in_database(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
-                Self::execute_in_database(database, command, None)
+                Self::execute_in_database(&database, command, None)
             }
-            StorageScope::Drawer { namespace } => Self::execute_in_database(
-                &mut self.database_core,
-                command,
-                Some(namespace.as_str()),
-            ),
+            StorageScope::Drawer { namespace } => {
+                Self::execute_in_database(&self.database_core, command, Some(namespace.as_str()))
+            }
         }
     }
 
     fn execute_in_database(
-        database: &mut Database,
+        database: &RwLock<Database>,
         command: Command,
         drawer_namespace: Option<&str>,
     ) -> Result<CommandResult> {
@@ -370,7 +361,7 @@ impl WardrobeEngine {
         }
     }
 
-    fn database_for_route(&mut self, route: DatabaseRoute) -> Result<&mut Database> {
+    fn database_for_route(&self, route: DatabaseRoute) -> Result<Arc<RwLock<Database>>> {
         let storage_path = match &route {
             DatabaseRoute::Coordinate(coordinate) => {
                 coordinate.validate()?;
@@ -387,12 +378,20 @@ impl WardrobeEngine {
             }
         };
 
-        if !self.routed_databases.contains_key(&route) {
-            let database = Database::initialize(storage_path)?;
-            self.routed_databases.insert(route.clone(), database);
+        if let Some(database) = Self::read_lock(&self.routed_databases)?
+            .get(&route)
+            .cloned()
+        {
+            return Ok(database);
         }
 
-        self.routed_databases.get_mut(&route).ok_or_else(|| {
+        let mut routed_databases = Self::write_lock(&self.routed_databases)?;
+        if !routed_databases.contains_key(&route) {
+            let database = Database::initialize(storage_path)?;
+            routed_databases.insert(route.clone(), Arc::new(RwLock::new(database)));
+        }
+
+        routed_databases.get(&route).cloned().ok_or_else(|| {
             Error::new(
                 ErrorKind::NotFound,
                 "Failed to acquire routed database handle",
@@ -400,8 +399,48 @@ impl WardrobeEngine {
         })
     }
 
+    fn read_lock<T>(lock: &RwLock<T>) -> Result<RwLockReadGuard<'_, T>> {
+        lock.read()
+            .map_err(|_| Error::other("Wardrobe lock was poisoned during read"))
+    }
+
+    fn write_lock<T>(lock: &RwLock<T>) -> Result<RwLockWriteGuard<'_, T>> {
+        lock.write()
+            .map_err(|_| Error::other("Wardrobe lock was poisoned during write"))
+    }
+
+    fn load_drawer_handle(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        primary_key: &str,
+        unique_constraints: Vec<String>,
+    ) -> Result<Arc<RwLock<crate::wrdb_lib::drawer::Drawer>>> {
+        let mut database = Self::write_lock(database_core)?;
+        database.load_drawer(drawer_name, primary_key, unique_constraints)?;
+        database.use_drawer(drawer_name).ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{}' could not be loaded", drawer_name),
+            )
+        })
+    }
+
+    fn active_drawer_handle_or_load_from_disk(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        primary_key: &str,
+        unique_constraints: Vec<String>,
+    ) -> Result<Option<Arc<RwLock<crate::wrdb_lib::drawer::Drawer>>>> {
+        if let Some(drawer) = Self::read_lock(database_core)?.use_drawer(drawer_name) {
+            return Ok(Some(drawer));
+        }
+
+        let mut database = Self::write_lock(database_core)?;
+        database.active_drawer_or_load_from_disk(drawer_name, primary_key, unique_constraints)
+    }
+
     fn upsert_in_database(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         drawer_name: &str,
         payload: Value,
         context: ExecutionContext<'_>,
@@ -420,11 +459,14 @@ impl WardrobeEngine {
                 None => format!("@{}:lnk_{}", physical_drawer_name, Uuid::new_v4().simple()),
             };
 
-            database_core.load_drawer(&physical_drawer_name, target_primary_key, Vec::new())?;
-            let relationship_constraints = database_core
-                .use_drawer(&physical_drawer_name)
-                .map(|drawer| drawer.relationship_constraints())
-                .unwrap_or_default();
+            let drawer_handle = Self::load_drawer_handle(
+                database_core,
+                &physical_drawer_name,
+                target_primary_key,
+                Vec::new(),
+            )?;
+            let relationship_constraints =
+                Self::read_lock(&drawer_handle)?.relationship_constraints();
             let processed_map = Self::decompose_nested_objects(
                 database_core,
                 map,
@@ -432,24 +474,15 @@ impl WardrobeEngine {
                 context,
             )?;
 
-            if let Some(drawer) = database_core.use_drawer(&physical_drawer_name) {
-                let mut full_record = processed_map;
-                full_record.insert(
-                    target_primary_key.to_string(),
-                    Value::String(record_id.clone()),
-                );
+            let mut full_record = processed_map;
+            full_record.insert(
+                target_primary_key.to_string(),
+                Value::String(record_id.clone()),
+            );
 
-                match drawer.upsert_record(Value::Object(full_record))? {
-                    Ok(_) => Ok(record_id),
-                    Err(validation_error) => {
-                        Err(Error::new(ErrorKind::InvalidData, validation_error))
-                    }
-                }
-            } else {
-                Err(Error::new(
-                    ErrorKind::NotFound,
-                    "Failed to acquire target drawer handle",
-                ))
+            match Self::write_lock(&drawer_handle)?.upsert_record(Value::Object(full_record))? {
+                Ok(_) => Ok(record_id),
+                Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
             }
         } else {
             Err(Error::new(
@@ -460,17 +493,18 @@ impl WardrobeEngine {
     }
 
     fn find_all_in_database(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
     ) -> std::io::Result<Vec<Value>> {
         let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
-        let mut records = if let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+        let mut records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
             &physical_drawer_name,
             "_id",
             Vec::new(),
         )? {
-            drawer.find_all_records()?
+            Self::read_lock(&drawer)?.find_all_records()?
         } else {
             Vec::new()
         };
@@ -488,7 +522,7 @@ impl WardrobeEngine {
     }
 
     fn find_by_filter_in_database(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         drawer_name: &str,
         filter: Value,
         modifiers: Option<QueryModifiers>,
@@ -497,12 +531,13 @@ impl WardrobeEngine {
         let filter_map = Self::filter_map(&filter)?;
         let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
 
-        let mut records = if let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+        let mut records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
             &physical_drawer_name,
             "_id",
             Vec::new(),
         )? {
-            drawer.find_all_records()?
+            Self::read_lock(&drawer)?.find_all_records()?
         } else {
             Vec::new()
         };
@@ -522,7 +557,7 @@ impl WardrobeEngine {
     }
 
     fn count_in_database(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         drawer_name: &str,
         filter: Option<Value>,
         _modifiers: Option<QueryModifiers>,
@@ -530,19 +565,27 @@ impl WardrobeEngine {
     ) -> Result<usize> {
         let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
         let Some(filter) = filter else {
-            return Ok(database_core
-                .active_drawer_or_load_from_disk(&physical_drawer_name, "_id", Vec::new())?
-                .map(|drawer| drawer.record_count())
-                .unwrap_or(0));
+            let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+                database_core,
+                &physical_drawer_name,
+                "_id",
+                Vec::new(),
+            )?
+            else {
+                return Ok(0);
+            };
+
+            return Ok(Self::read_lock(&drawer)?.record_count());
         };
 
         let filter_map = Self::filter_map(&filter)?;
-        let count = if let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+        let count = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
             &physical_drawer_name,
             "_id",
             Vec::new(),
         )? {
-            drawer
+            Self::read_lock(&drawer)?
                 .find_all_records()?
                 .into_iter()
                 .filter(|record| Self::record_matches_filter(record, filter_map, context))
@@ -555,17 +598,21 @@ impl WardrobeEngine {
     }
 
     fn find_by_id_in_database(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<Option<Value>> {
         let physical_pointer = Self::scoped_pointer(pointer, context);
         let (drawer_name, _) = Self::parse_pointer(&physical_pointer)?;
 
-        if let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
-        {
-            if let Some(mut record) = drawer.find_by_primary_key(&physical_pointer)? {
+        if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &drawer_name,
+            "_id",
+            Vec::new(),
+        )? {
+            let found_record = Self::read_lock(&drawer)?.find_by_primary_key(&physical_pointer)?;
+            if let Some(mut record) = found_record {
                 let mut active_pointer_path = HashSet::from([physical_pointer]);
                 Self::hydrate_value(database_core, &mut record, false, &mut active_pointer_path)?;
                 Self::hydrate_virtual_relationships(
@@ -585,7 +632,7 @@ impl WardrobeEngine {
     }
 
     fn delete_by_id_in_database(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
@@ -600,7 +647,7 @@ impl WardrobeEngine {
     }
 
     fn delete_by_id_inner(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         active_delete_path: &mut HashSet<String>,
         context: ExecutionContext<'_>,
@@ -610,8 +657,12 @@ impl WardrobeEngine {
         }
 
         let (drawer_name, _) = Self::parse_pointer(pointer)?;
-        let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &drawer_name,
+            "_id",
+            Vec::new(),
+        )?
         else {
             return Err(Error::new(
                 ErrorKind::NotFound,
@@ -619,10 +670,17 @@ impl WardrobeEngine {
             ));
         };
 
-        let record = drawer.find_by_primary_key(pointer)?;
-        let cascade_fields = drawer.cascade_delete_fields();
-        let inverse_delete_rules =
-            Self::inverse_delete_rules(drawer.delete_rules(), drawer.relationship_constraints());
+        let (record, cascade_fields, inverse_delete_rules) = {
+            let drawer = Self::read_lock(&drawer)?;
+            (
+                drawer.find_by_primary_key(pointer)?,
+                drawer.cascade_delete_fields(),
+                Self::inverse_delete_rules(
+                    drawer.delete_rules(),
+                    drawer.relationship_constraints(),
+                ),
+            )
+        };
         let Some(record) = record else {
             return Ok(false);
         };
@@ -654,8 +712,12 @@ impl WardrobeEngine {
 
         Self::apply_set_null_delete_rules(database_core, pointer, &inverse_delete_rules, context)?;
 
-        let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &drawer_name,
+            "_id",
+            Vec::new(),
+        )?
         else {
             active_delete_path.remove(pointer);
             return Err(Error::new(
@@ -664,7 +726,7 @@ impl WardrobeEngine {
             ));
         };
 
-        let deleted_record = drawer.delete_by_primary_key(pointer)?;
+        let deleted_record = Self::write_lock(&drawer)?.delete_by_primary_key(pointer)?;
         active_delete_path.remove(pointer);
 
         Ok(deleted_record.is_some())
@@ -693,7 +755,7 @@ impl WardrobeEngine {
     }
 
     fn evaluate_restrict_delete_rules(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         inverse_delete_rules: &[InverseDeleteRule],
         context: ExecutionContext<'_>,
@@ -720,7 +782,7 @@ impl WardrobeEngine {
     }
 
     fn collect_inverse_delete_rule_pointers(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         inverse_delete_rules: &[InverseDeleteRule],
         action: DeleteAction,
@@ -751,7 +813,7 @@ impl WardrobeEngine {
     }
 
     fn apply_set_null_delete_rules(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         inverse_delete_rules: &[InverseDeleteRule],
         context: ExecutionContext<'_>,
@@ -774,7 +836,8 @@ impl WardrobeEngine {
 
             for child_record in child_records {
                 let physical_target_drawer = Self::scoped_drawer_name(&rule.target_drawer, context);
-                let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+                let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+                    database_core,
                     &physical_target_drawer,
                     "_id",
                     Vec::new(),
@@ -789,7 +852,7 @@ impl WardrobeEngine {
                     ));
                 };
 
-                match drawer.upsert_record(child_record)? {
+                match Self::write_lock(&drawer)?.upsert_record(child_record)? {
                     Ok(_) => {}
                     Err(validation_error) => {
                         return Err(Error::new(ErrorKind::InvalidData, validation_error));
@@ -802,14 +865,15 @@ impl WardrobeEngine {
     }
 
     fn records_matching_parent_pointer(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         target_drawer: &str,
         mapped_by: &str,
         parent_pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
         let physical_target_drawer = Self::scoped_drawer_name(target_drawer, context);
-        let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
             &physical_target_drawer,
             "_id",
             Vec::new(),
@@ -818,7 +882,7 @@ impl WardrobeEngine {
             return Ok(Vec::new());
         };
 
-        let records = drawer
+        let records = Self::read_lock(&drawer)?
             .find_all_records()?
             .into_iter()
             .filter(|record| {
@@ -894,7 +958,7 @@ impl WardrobeEngine {
     }
 
     fn decompose_nested_objects(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         map: Map<String, Value>,
         relationship_constraints: &BTreeMap<String, Value>,
         context: ExecutionContext<'_>,
@@ -913,7 +977,7 @@ impl WardrobeEngine {
     }
 
     fn decompose_relationship_value(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         drawer_name: &str,
         value: Value,
         context: ExecutionContext<'_>,
@@ -1281,7 +1345,7 @@ impl WardrobeEngine {
     }
 
     fn hydrate_records(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         records: &mut [Value],
         include_ids: bool,
     ) -> Result<()> {
@@ -1299,20 +1363,24 @@ impl WardrobeEngine {
     }
 
     fn hydrate_virtual_relationships(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         drawer_name: &str,
         records: &mut [Value],
         include_ids: bool,
         context: ExecutionContext<'_>,
     ) -> Result<()> {
         let virtual_relationships = {
-            let Some(drawer) =
-                database_core.active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+            let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+                database_core,
+                drawer_name,
+                "_id",
+                Vec::new(),
+            )?
             else {
                 return Ok(());
             };
 
-            drawer
+            Self::read_lock(&drawer)?
                 .relationship_constraints()
                 .into_iter()
                 .filter_map(|(field_name, rule)| {
@@ -1363,7 +1431,7 @@ impl WardrobeEngine {
     }
 
     fn virtual_relationship_children(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         target_drawer: &str,
         mapped_by: &str,
         parent_pointer: &str,
@@ -1371,10 +1439,13 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
         let physical_target_drawer = Self::scoped_drawer_name(target_drawer, context);
-        let mut child_records = if let Some(drawer) = database_core
-            .active_drawer_or_load_from_disk(&physical_target_drawer, "_id", Vec::new())?
-        {
-            drawer.find_all_records()?
+        let mut child_records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_target_drawer,
+            "_id",
+            Vec::new(),
+        )? {
+            Self::read_lock(&drawer)?.find_all_records()?
         } else {
             Vec::new()
         };
@@ -1427,7 +1498,7 @@ impl WardrobeEngine {
     }
 
     fn hydrate_value(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         current_value: &mut Value,
         include_ids: bool,
         active_pointer_path: &mut HashSet<String>,
@@ -1500,7 +1571,7 @@ impl WardrobeEngine {
     }
 
     fn resolve_pointer(
-        database_core: &mut Database,
+        database_core: &RwLock<Database>,
         pointer: &str,
         include_ids: bool,
         active_pointer_path: &mut HashSet<String>,
@@ -1511,10 +1582,13 @@ impl WardrobeEngine {
 
         let (drawer_name, _) = Self::parse_pointer(pointer)?;
 
-        let mut record = if let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
-        {
-            drawer.find_by_primary_key(pointer)?
+        let mut record = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &drawer_name,
+            "_id",
+            Vec::new(),
+        )? {
+            Self::read_lock(&drawer)?.find_by_primary_key(pointer)?
         } else {
             None
         };

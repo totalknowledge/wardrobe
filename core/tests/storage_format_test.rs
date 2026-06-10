@@ -62,7 +62,7 @@ fn us_016_plaintext_storage_format_preserves_reader_writer_flow() {
         .expect("append should succeed");
     assert_eq!(offset, 0);
 
-    let mut reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let decoded = reader
         .read_record_at_offset(offset)
         .expect("read should succeed");

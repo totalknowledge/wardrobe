@@ -22,7 +22,7 @@ fn run_cli(args: &[&str]) -> std::process::Output {
 fn drawers_lists_known_drawers_without_internal_files() {
     let storage_directory = temp_storage_directory("drawers_lists_known_drawers");
     {
-        let mut engine =
+        let engine =
             WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
@@ -55,7 +55,7 @@ fn drawers_lists_known_drawers_without_internal_files() {
 fn inspect_reports_drawer_companion_files() {
     let storage_directory = temp_storage_directory("inspect_reports_drawer_files");
     {
-        let mut engine =
+        let engine =
             WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
@@ -83,7 +83,7 @@ fn inspect_reports_drawer_companion_files() {
 fn records_prints_hydrated_drawer_records() {
     let storage_directory = temp_storage_directory("records_prints_records");
     {
-        let mut engine =
+        let engine =
             WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
@@ -116,7 +116,7 @@ fn records_prints_hydrated_drawer_records() {
 fn diagnose_reports_ok_for_structurally_complete_drawers() {
     let storage_directory = temp_storage_directory("diagnose_reports_ok");
     {
-        let mut engine =
+        let engine =
             WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine should open");
         engine
             .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))

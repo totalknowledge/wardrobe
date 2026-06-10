@@ -2,18 +2,20 @@ use super::storage_format::{PlainTextJsonFormat, StorageFormat};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 pub struct DatabaseReader {
-    drawer_file: File,
+    file_path: PathBuf,
 }
 
 impl DatabaseReader {
-    pub fn open_drawer<P: AsRef<std::path::Path>>(file_path: P) -> std::io::Result<Self> {
-        let drawer_file = File::open(file_path)?;
-        Ok(Self { drawer_file })
+    pub fn open_drawer<P: AsRef<Path>>(file_path: P) -> std::io::Result<Self> {
+        let file_path = file_path.as_ref().to_path_buf();
+        File::open(&file_path)?;
+        Ok(Self { file_path })
     }
 
-    pub fn read_record_at_offset(&mut self, byte_offset: u64) -> std::io::Result<Option<Value>> {
+    pub fn read_record_at_offset(&self, byte_offset: u64) -> std::io::Result<Option<Value>> {
         if let Some(record_bytes) = self.read_raw_bytes_at_offset(byte_offset)? {
             return PlainTextJsonFormat::deserialize_record(&record_bytes);
         }
@@ -21,21 +23,19 @@ impl DatabaseReader {
         Ok(None)
     }
 
-    pub fn read_raw_bytes_at_offset(
-        &mut self,
-        byte_offset: u64,
-    ) -> std::io::Result<Option<Vec<u8>>> {
-        let file_len = self.drawer_file.metadata()?.len();
+    pub fn read_raw_bytes_at_offset(&self, byte_offset: u64) -> std::io::Result<Option<Vec<u8>>> {
+        let mut drawer_file = File::open(&self.file_path)?;
+        let file_len = drawer_file.metadata()?.len();
         if byte_offset >= file_len {
             return Ok(None);
         }
 
-        self.drawer_file.seek(SeekFrom::Start(byte_offset))?;
+        drawer_file.seek(SeekFrom::Start(byte_offset))?;
         let mut byte_buffer = Vec::new();
         let mut single_byte_chunk = [0u8; 1];
 
         loop {
-            let bytes_read = self.drawer_file.read(&mut single_byte_chunk)?;
+            let bytes_read = drawer_file.read(&mut single_byte_chunk)?;
             if bytes_read == 0 {
                 break;
             }
@@ -52,12 +52,13 @@ impl DatabaseReader {
         }
     }
 
-    pub fn stream_with_offsets<F>(&mut self, mut processing_closure: F) -> std::io::Result<()>
+    pub fn stream_with_offsets<F>(&self, mut processing_closure: F) -> std::io::Result<()>
     where
         F: FnMut(u64, &str),
     {
-        self.drawer_file.seek(SeekFrom::Start(0))?;
-        let reader = BufReader::new(&mut self.drawer_file);
+        let mut drawer_file = File::open(&self.file_path)?;
+        drawer_file.seek(SeekFrom::Start(0))?;
+        let reader = BufReader::new(drawer_file);
         let mut track_offset = 0u64;
 
         for line_entry in reader.lines() {

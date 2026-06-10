@@ -185,7 +185,7 @@ impl Drawer {
         let data_writer = DatabaseWriter::open_drawer(&data_file_path)?;
         let data_reader = DatabaseReader::open_drawer(&data_file_path)?;
         let index_writer = DatabaseWriter::open_drawer(&index_file_path)?;
-        let mut index_reader = DatabaseReader::open_drawer(&index_file_path)?;
+        let index_reader = DatabaseReader::open_drawer(&index_file_path)?;
 
         let mut data_recycler = Recycler::new();
         let mut index_recycler = Recycler::new();
@@ -489,14 +489,14 @@ impl Drawer {
         Ok(Ok(()))
     }
 
-    pub fn find_by_primary_key(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+    pub fn find_by_primary_key(&self, key: &str) -> std::io::Result<Option<Value>> {
         if let Some(&offset) = self.primary_memory_index.get(key) {
             return self.data_reader.read_record_at_offset(offset);
         }
         Ok(None)
     }
 
-    pub fn find_by_secondary_key(&mut self, field: &str, key: &str) -> std::io::Result<Vec<Value>> {
+    pub fn find_by_secondary_key(&self, field: &str, key: &str) -> std::io::Result<Vec<Value>> {
         let mut matching_records = Vec::new();
         if let Some(field_map) = self.secondary_memory_index.get(field) {
             if let Some(offsets) = field_map.get(key) {
@@ -596,7 +596,7 @@ impl Drawer {
     }
 
     fn validate_relationship_constraints(
-        &mut self,
+        &self,
         record: &Value,
         primary_key_value: &str,
     ) -> std::io::Result<Option<String>> {
@@ -654,7 +654,7 @@ impl Drawer {
     }
 
     fn validate_one_to_one_unique(
-        &mut self,
+        &self,
         field_name: &str,
         pointer: &str,
         primary_key_value: &str,
@@ -1101,7 +1101,7 @@ impl Drawer {
         Ok(())
     }
 
-    pub fn find_all_records(&mut self) -> std::io::Result<Vec<Value>> {
+    pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {
         let mut live_records = Vec::new();
         let mut raw_lines = Vec::new();
 
