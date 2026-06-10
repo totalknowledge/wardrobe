@@ -1927,6 +1927,231 @@ fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
 }
 
 #[test]
+fn us_039_cascade_delete_rule_removes_child_records_tracking_parent_pointer() {
+    let database = TempDatabase::new("us_039_cascade_delete_rule");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "equipped_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {
+                "equipped_weapons": {
+                    "action": "Cascade"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_039_cascade_parent",
+                "name": "Cascade Parent"
+            }),
+        )
+        .expect("character should upsert");
+    for (id, name) in [("blade", "Cascade Blade"), ("lance", "Cascade Lance")] {
+        engine
+            .upsert(
+                "weapon",
+                json!({
+                    "_id": format!("@weapon:lnk_us_039_cascade_{id}"),
+                    "name": name,
+                    "character": { "_id": "@character:lnk_us_039_cascade_parent" }
+                }),
+            )
+            .expect("weapon should upsert");
+    }
+
+    let deleted = engine
+        .delete_by_id("@character:lnk_us_039_cascade_parent")
+        .expect("cascade delete should succeed");
+
+    assert!(deleted);
+    assert_eq!(
+        engine
+            .count("character", None, None)
+            .expect("character count should succeed"),
+        0
+    );
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("weapon count should succeed"),
+        0
+    );
+}
+
+#[test]
+fn us_039_restrict_delete_rule_aborts_before_cascade_mutations() {
+    let database = TempDatabase::new("us_039_restrict_delete_rule");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "equipped_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                },
+                "critical_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {
+                "equipped_weapons": {
+                    "action": "Cascade"
+                },
+                "critical_weapons": {
+                    "action": "Restrict"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_039_restrict_parent",
+                "name": "Restrict Parent"
+            }),
+        )
+        .expect("character should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_039_restrict_child",
+                "name": "Restrict Child",
+                "character": { "_id": "@character:lnk_us_039_restrict_parent" }
+            }),
+        )
+        .expect("weapon should upsert");
+
+    let error = engine
+        .delete_by_id("@character:lnk_us_039_restrict_parent")
+        .expect_err("restrict rule should block delete");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("Delete restricted"));
+    assert_eq!(
+        engine
+            .count("character", None, None)
+            .expect("character count should succeed"),
+        1
+    );
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("weapon count should succeed"),
+        1
+    );
+}
+
+#[test]
+fn us_039_set_null_delete_rule_clears_child_pointer_and_preserves_child_record() {
+    let database = TempDatabase::new("us_039_set_null_delete_rule");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "assigned_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {
+                "assigned_weapons": {
+                    "action": "SetNull"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_039_set_null_parent",
+                "name": "SetNull Parent"
+            }),
+        )
+        .expect("character should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_039_set_null_child",
+                "name": "SetNull Child",
+                "character": { "_id": "@character:lnk_us_039_set_null_parent" }
+            }),
+        )
+        .expect("weapon should upsert");
+
+    let deleted = engine
+        .delete_by_id("@character:lnk_us_039_set_null_parent")
+        .expect("set-null delete should succeed");
+
+    assert!(deleted);
+    assert_eq!(
+        engine
+            .count("character", None, None)
+            .expect("character count should succeed"),
+        0
+    );
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("weapon count should succeed"),
+        1
+    );
+
+    let weapon = engine
+        .find_by_id("@weapon:lnk_us_039_set_null_child")
+        .expect("weapon lookup should succeed")
+        .expect("weapon should remain");
+    assert_eq!(weapon["name"], "SetNull Child");
+    assert!(weapon.get("character").is_none());
+}
+
+#[test]
 fn us_035_engine_rejects_schema_violations_as_invalid_data() {
     let database = TempDatabase::new("us_035_engine_schema_invalid_data");
     fs::create_dir_all(&database.path).expect("temp dir should create");

@@ -591,6 +591,10 @@ impl Drawer {
         self.relationship_constraints.clone()
     }
 
+    pub fn delete_rules(&self) -> BTreeMap<String, Value> {
+        self.delete_rules.clone()
+    }
+
     fn validate_relationship_constraints(
         &mut self,
         record: &Value,
