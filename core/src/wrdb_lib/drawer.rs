@@ -360,6 +360,12 @@ impl Drawer {
         }
 
         let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
+        if let Some(validation_error) =
+            self.validate_relationship_constraints(&record, &primary_key_value)?
+        {
+            return Ok(Err(validation_error));
+        }
+
         let is_new_record = old_data_offset.is_none();
         let old_record = if let Some(existing_offset) = old_data_offset {
             self.data_reader.read_record_at_offset(existing_offset)?
@@ -579,6 +585,184 @@ impl Drawer {
         }
 
         fields
+    }
+
+    pub fn relationship_constraints(&self) -> BTreeMap<String, Value> {
+        self.relationship_constraints.clone()
+    }
+
+    fn validate_relationship_constraints(
+        &mut self,
+        record: &Value,
+        primary_key_value: &str,
+    ) -> std::io::Result<Option<String>> {
+        let relationship_constraints = self.relationship_constraints.clone();
+
+        for (field_name, rule) in relationship_constraints {
+            let Some(relationship_type) = Self::relationship_type(&rule) else {
+                continue;
+            };
+
+            match relationship_type {
+                "1:1" => {
+                    if let Some(field_value) = record.get(&field_name) {
+                        if let Some(validation_error) =
+                            Self::validate_reference_field(&field_name, field_value, &rule)
+                        {
+                            return Ok(Some(validation_error));
+                        }
+
+                        if let Some(pointer) = field_value.as_str() {
+                            if let Some(validation_error) = self.validate_one_to_one_unique(
+                                &field_name,
+                                pointer,
+                                primary_key_value,
+                            )? {
+                                return Ok(Some(validation_error));
+                            }
+                        }
+                    }
+                }
+                "M:1" => {
+                    if let Some(field_value) = record.get(&field_name) {
+                        if let Some(validation_error) =
+                            Self::validate_reference_field(&field_name, field_value, &rule)
+                        {
+                            return Ok(Some(validation_error));
+                        }
+                    }
+                }
+                "M:M" => {
+                    if let Some(field_value) = record.get(&field_name) {
+                        if let Some(validation_error) =
+                            Self::validate_many_to_many_field(&field_name, field_value, &rule)
+                        {
+                            return Ok(Some(validation_error));
+                        }
+                    }
+                }
+                "1:M" => {}
+                _ => {}
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn validate_one_to_one_unique(
+        &mut self,
+        field_name: &str,
+        pointer: &str,
+        primary_key_value: &str,
+    ) -> std::io::Result<Option<String>> {
+        for existing_record in self.find_all_records()? {
+            if existing_record
+                .get(&self.primary_key)
+                .and_then(|value| value.as_str())
+                == Some(primary_key_value)
+            {
+                continue;
+            }
+
+            if existing_record
+                .get(field_name)
+                .and_then(|value| value.as_str())
+                == Some(pointer)
+            {
+                return Ok(Some(format!(
+                    "1:1 relationship constraint violation: Field '{}' with value '{}' already exists",
+                    field_name, pointer
+                )));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn validate_reference_field(field_name: &str, value: &Value, rule: &Value) -> Option<String> {
+        let Some(pointer) = value.as_str() else {
+            return Some(format!(
+                "Relationship constraint violation: Field '{}' must be a pointer string",
+                field_name
+            ));
+        };
+
+        Self::validate_pointer_target(field_name, pointer, rule)
+    }
+
+    fn validate_many_to_many_field(
+        field_name: &str,
+        value: &Value,
+        rule: &Value,
+    ) -> Option<String> {
+        let Some(values) = value.as_array() else {
+            return Some(format!(
+                "M:M relationship constraint violation: Field '{}' must be an array of pointer strings",
+                field_name
+            ));
+        };
+
+        for value in values {
+            let Some(pointer) = value.as_str() else {
+                return Some(format!(
+                    "M:M relationship constraint violation: Field '{}' must contain only pointer strings",
+                    field_name
+                ));
+            };
+
+            if let Some(validation_error) = Self::validate_pointer_target(field_name, pointer, rule)
+            {
+                return Some(validation_error);
+            }
+        }
+
+        None
+    }
+
+    fn validate_pointer_target(field_name: &str, pointer: &str, rule: &Value) -> Option<String> {
+        let Some(pointer_drawer) = Self::pointer_drawer_name(pointer) else {
+            return Some(format!(
+                "Relationship constraint violation: Field '{}' contains malformed pointer '{}'",
+                field_name, pointer
+            ));
+        };
+
+        if let Some(target_drawer) = Self::relationship_target_drawer(rule) {
+            if !Self::pointer_matches_target_drawer(pointer_drawer, target_drawer) {
+                return Some(format!(
+                    "Relationship constraint violation: Field '{}' expected target drawer '{}' but found '{}'",
+                    field_name, target_drawer, pointer_drawer
+                ));
+            }
+        }
+
+        None
+    }
+
+    fn relationship_type(rule: &Value) -> Option<&str> {
+        rule.get("type").and_then(|value| value.as_str())
+    }
+
+    fn relationship_target_drawer(rule: &Value) -> Option<&str> {
+        rule.get("target_drawer").and_then(|value| value.as_str())
+    }
+
+    fn pointer_drawer_name(pointer: &str) -> Option<&str> {
+        let clean_pointer = pointer.strip_prefix('@')?;
+        let (drawer_name, record_key) = clean_pointer.split_once(":lnk_")?;
+
+        if drawer_name.is_empty() || record_key.is_empty() || record_key.contains(":lnk_") {
+            return None;
+        }
+
+        Some(drawer_name)
+    }
+
+    fn pointer_matches_target_drawer(pointer_drawer: &str, target_drawer: &str) -> bool {
+        pointer_drawer == target_drawer
+            || pointer_drawer
+                .strip_suffix(target_drawer)
+                .is_some_and(|prefix| prefix.ends_with('_'))
     }
 
     fn validate_schema(&self, record: &Value) -> Result<(), String> {

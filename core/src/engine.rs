@@ -1,7 +1,7 @@
 use crate::wrdb_lib::database::Database;
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
@@ -405,9 +405,17 @@ impl WardrobeEngine {
                 None => format!("@{}:lnk_{}", physical_drawer_name, Uuid::new_v4().simple()),
             };
 
-            let processed_map = Self::decompose_nested_objects(database_core, map, context)?;
-
             database_core.load_drawer(&physical_drawer_name, target_primary_key, Vec::new())?;
+            let relationship_constraints = database_core
+                .use_drawer(&physical_drawer_name)
+                .map(|drawer| drawer.relationship_constraints())
+                .unwrap_or_default();
+            let processed_map = Self::decompose_nested_objects(
+                database_core,
+                map,
+                &relationship_constraints,
+                context,
+            )?;
 
             if let Some(drawer) = database_core.use_drawer(&physical_drawer_name) {
                 let mut full_record = processed_map;
@@ -453,6 +461,13 @@ impl WardrobeEngine {
         };
 
         Self::hydrate_records(database_core, &mut records, true)?;
+        Self::hydrate_virtual_relationships(
+            database_core,
+            &physical_drawer_name,
+            &mut records,
+            true,
+            context,
+        )?;
 
         Ok(records)
     }
@@ -480,6 +495,13 @@ impl WardrobeEngine {
         records.retain(|record| Self::record_matches_filter(record, filter_map, context));
         Self::apply_query_modifiers(&mut records, modifiers.as_ref());
         Self::hydrate_records(database_core, &mut records, true)?;
+        Self::hydrate_virtual_relationships(
+            database_core,
+            &physical_drawer_name,
+            &mut records,
+            true,
+            context,
+        )?;
 
         Ok(records)
     }
@@ -531,6 +553,13 @@ impl WardrobeEngine {
             if let Some(mut record) = drawer.find_by_primary_key(&physical_pointer)? {
                 let mut active_pointer_path = HashSet::from([physical_pointer]);
                 Self::hydrate_value(database_core, &mut record, false, &mut active_pointer_path)?;
+                Self::hydrate_virtual_relationships(
+                    database_core,
+                    &drawer_name,
+                    std::slice::from_mut(&mut record),
+                    false,
+                    context,
+                )?;
                 if let Value::Object(ref mut map) = record {
                     map.remove("_id");
                 }
@@ -600,12 +629,14 @@ impl WardrobeEngine {
     fn decompose_nested_objects(
         database_core: &mut Database,
         map: Map<String, Value>,
+        relationship_constraints: &BTreeMap<String, Value>,
         context: ExecutionContext<'_>,
     ) -> Result<Map<String, Value>> {
         let mut continuous_map = Map::new();
 
         for (key, value) in map {
-            let drawer_name = Self::relationship_drawer_name(&key);
+            let drawer_name =
+                Self::relationship_drawer_name_for_field(&key, relationship_constraints);
             let processed_value =
                 Self::decompose_relationship_value(database_core, &drawer_name, value, context)?;
             continuous_map.insert(key, processed_value);
@@ -754,6 +785,17 @@ impl WardrobeEngine {
         }
 
         field_name.to_string()
+    }
+
+    fn relationship_drawer_name_for_field(
+        field_name: &str,
+        relationship_constraints: &BTreeMap<String, Value>,
+    ) -> String {
+        relationship_constraints
+            .get(field_name)
+            .and_then(Self::relationship_target_drawer)
+            .map(|target_drawer| target_drawer.to_string())
+            .unwrap_or_else(|| Self::relationship_drawer_name(field_name))
     }
 
     fn collect_cascade_pointers(record: &Value, cascade_fields: &[String]) -> Vec<String> {
@@ -987,6 +1029,115 @@ impl WardrobeEngine {
         }
 
         Ok(())
+    }
+
+    fn hydrate_virtual_relationships(
+        database_core: &mut Database,
+        drawer_name: &str,
+        records: &mut [Value],
+        include_ids: bool,
+        context: ExecutionContext<'_>,
+    ) -> Result<()> {
+        let virtual_relationships = {
+            let Some(drawer) =
+                database_core.active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+            else {
+                return Ok(());
+            };
+
+            drawer
+                .relationship_constraints()
+                .into_iter()
+                .filter_map(|(field_name, rule)| {
+                    if Self::relationship_constraint_type(&rule) != Some("1:M") {
+                        return None;
+                    }
+
+                    let target_drawer = Self::relationship_target_drawer(&rule)?.to_string();
+                    let mapped_by = Self::relationship_mapped_by(&rule)?.to_string();
+                    Some((field_name, target_drawer, mapped_by))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if virtual_relationships.is_empty() {
+            return Ok(());
+        }
+
+        for record in records {
+            let Some(record_map) = record.as_object_mut() else {
+                continue;
+            };
+            let Some(parent_pointer) = record_map
+                .get("_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+            else {
+                continue;
+            };
+
+            for (field_name, target_drawer, mapped_by) in &virtual_relationships {
+                let mut child_records = Self::virtual_relationship_children(
+                    database_core,
+                    target_drawer,
+                    mapped_by,
+                    &parent_pointer,
+                    include_ids,
+                    context,
+                )?;
+                if !include_ids {
+                    Self::remove_root_ids(&mut child_records);
+                }
+                record_map.insert(field_name.clone(), Value::Array(child_records));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn virtual_relationship_children(
+        database_core: &mut Database,
+        target_drawer: &str,
+        mapped_by: &str,
+        parent_pointer: &str,
+        include_ids: bool,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<Value>> {
+        let physical_target_drawer = Self::scoped_drawer_name(target_drawer, context);
+        let mut child_records = if let Some(drawer) = database_core
+            .active_drawer_or_load_from_disk(&physical_target_drawer, "_id", Vec::new())?
+        {
+            drawer.find_all_records()?
+        } else {
+            Vec::new()
+        };
+
+        child_records.retain(|record| {
+            record.get(mapped_by).and_then(|value| value.as_str()) == Some(parent_pointer)
+        });
+        Self::hydrate_records(database_core, &mut child_records, include_ids)?;
+
+        Ok(child_records)
+    }
+
+    fn remove_root_ids(records: &mut [Value]) {
+        for record in records {
+            if let Value::Object(map) = record {
+                map.remove("_id");
+            }
+        }
+    }
+
+    fn relationship_constraint_type(rule: &Value) -> Option<&str> {
+        rule.get("type").and_then(|value| value.as_str())
+    }
+
+    fn relationship_target_drawer(rule: &Value) -> Option<&str> {
+        rule.get("target_drawer").and_then(|value| value.as_str())
+    }
+
+    fn relationship_mapped_by(rule: &Value) -> Option<&str> {
+        rule.get("mapped_by").and_then(|value| value.as_str())
     }
 
     fn collect_pointer_strings(value: &Value, pointers: &mut Vec<String>) {

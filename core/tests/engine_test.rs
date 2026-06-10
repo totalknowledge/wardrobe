@@ -1649,6 +1649,284 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
 }
 
 #[test]
+fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targets() {
+    let database = TempDatabase::new("us_037_relationship_cardinality");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "gem_slot": {
+                    "type": "1:1",
+                    "target_drawer": "gem"
+                },
+                "faction_id": {
+                    "type": "M:1",
+                    "target_drawer": "faction"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_037_sword",
+                "name": "Constraint Sword",
+                "gem_slot": { "_id": "us_037_fire" },
+                "faction_id": "@faction:lnk_us_037_order"
+            }),
+        )
+        .expect("first constrained weapon should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_037_spear",
+                "name": "Constraint Spear",
+                "gem_slot": { "_id": "us_037_water" },
+                "faction_id": "@faction:lnk_us_037_order"
+            }),
+        )
+        .expect("many-to-one faction target should allow duplicate references");
+
+    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(weapon_file.contains("\"gem_slot\":\"@gem:lnk_us_037_fire\""));
+
+    let duplicate_error = engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_037_axe",
+                "name": "Constraint Axe",
+                "gem_slot": "@gem:lnk_us_037_fire",
+                "faction_id": "@faction:lnk_us_037_order"
+            }),
+        )
+        .expect_err("duplicate one-to-one pointer should fail");
+
+    assert_eq!(duplicate_error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(duplicate_error.to_string().contains("1:1 relationship"));
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("count should succeed"),
+        2
+    );
+}
+
+#[test]
+fn us_037_relationship_constraints_reject_wrong_target_drawer_pointers() {
+    let database = TempDatabase::new("us_037_wrong_target_drawer");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "faction_id": {
+                    "type": "M:1",
+                    "target_drawer": "faction"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let error = engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_037_wrong_target",
+                "name": "Wrong Target",
+                "faction_id": "@gem:lnk_us_037_not_a_faction"
+            }),
+        )
+        .expect_err("wrong target drawer should fail validation");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("expected target drawer 'faction'")
+    );
+}
+
+#[test]
+fn us_038_one_to_many_virtual_relationships_populate_child_arrays_on_read() {
+    let database = TempDatabase::new("us_038_virtual_one_to_many");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "equipped_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_038_mech",
+                "name": "Mech Pilot"
+            }),
+        )
+        .expect("character should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_038_lance",
+                "name": "Pilot Lance",
+                "character": { "_id": "@character:lnk_us_038_mech" }
+            }),
+        )
+        .expect("first child weapon should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_038_blade",
+                "name": "Pilot Blade",
+                "character": { "_id": "@character:lnk_us_038_mech" }
+            }),
+        )
+        .expect("second child weapon should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_038_other",
+                "name": "Other Blade",
+                "character": { "_id": "@character:lnk_us_038_other" }
+            }),
+        )
+        .expect("unrelated child weapon should upsert");
+
+    let characters = engine
+        .find_all("character")
+        .expect("characters should read with virtual relationships");
+
+    assert_eq!(characters.len(), 1);
+    let equipped_weapons = characters[0]["equipped_weapons"]
+        .as_array()
+        .expect("virtual relationship should hydrate as an array");
+    let weapon_names = equipped_weapons
+        .iter()
+        .map(|weapon| weapon["name"].as_str().expect("weapon should have name"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(weapon_names, vec!["Pilot Lance", "Pilot Blade"]);
+}
+
+#[test]
+fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
+    let database = TempDatabase::new("us_038_many_to_many");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "shared_skills": {
+                    "type": "M:M",
+                    "target_drawer": "skill"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    for (id, name) in [("dash", "Dash"), ("guard", "Guard")] {
+        engine
+            .upsert(
+                "skill",
+                json!({
+                    "_id": format!("@skill:lnk_us_038_{id}"),
+                    "name": name
+                }),
+            )
+            .expect("skill should upsert");
+    }
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_038_skilled",
+                "name": "Skilled Character",
+                "shared_skills": [
+                    "@skill:lnk_us_038_dash",
+                    "@skill:lnk_us_038_guard"
+                ]
+            }),
+        )
+        .expect("many-to-many pointer array should upsert");
+
+    let error = engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_038_wrong_skill",
+                "name": "Wrong Skill Character",
+                "shared_skills": [
+                    "@gem:lnk_us_038_wrong_target"
+                ]
+            }),
+        )
+        .expect_err("wrong many-to-many pointer target should fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("expected target drawer 'skill'"));
+
+    let characters = engine
+        .find_all("character")
+        .expect("character should read with hydrated many-to-many pointers");
+    assert_eq!(characters.len(), 1);
+    assert_eq!(characters[0]["shared_skills"][0]["name"], "Dash");
+    assert_eq!(characters[0]["shared_skills"][1]["name"], "Guard");
+}
+
+#[test]
 fn us_035_engine_rejects_schema_violations_as_invalid_data() {
     let database = TempDatabase::new("us_035_engine_schema_invalid_data");
     fs::create_dir_all(&database.path).expect("temp dir should create");
