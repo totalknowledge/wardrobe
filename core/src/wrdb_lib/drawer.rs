@@ -33,6 +33,8 @@ struct DrawerMetadata {
     #[serde(default)]
     primary_key: String,
     #[serde(default)]
+    record_count: usize,
+    #[serde(default)]
     unique_constraints: Vec<String>,
     #[serde(default)]
     relationship_constraints: BTreeMap<String, Value>,
@@ -61,6 +63,7 @@ impl DrawerMetadata {
 
     fn from_configuration(
         primary_key: &str,
+        record_count: usize,
         unique_constraints: &[String],
         relationship_constraints: BTreeMap<String, Value>,
         delete_rules: BTreeMap<String, Value>,
@@ -69,6 +72,7 @@ impl DrawerMetadata {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
             primary_key: primary_key.to_string(),
+            record_count,
             unique_constraints: unique_constraints.to_vec(),
             relationship_constraints,
             delete_rules,
@@ -156,6 +160,7 @@ pub struct Drawer {
     relationship_constraints: BTreeMap<String, Value>,
     delete_rules: BTreeMap<String, Value>,
     cascade_delete_rules: BTreeMap<String, bool>,
+    record_count: usize,
     meta_file_path: PathBuf,
 }
 
@@ -303,6 +308,8 @@ impl Drawer {
             }
         }
 
+        let record_count = primary_memory_index.len();
+
         let drawer = Self {
             name: name.to_string(),
             primary_key: primary_key.to_string(),
@@ -319,6 +326,7 @@ impl Drawer {
             relationship_constraints,
             delete_rules,
             cascade_delete_rules,
+            record_count,
             meta_file_path,
         };
 
@@ -339,6 +347,7 @@ impl Drawer {
         };
 
         let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
+        let is_new_record = old_data_offset.is_none();
         let old_record = if let Some(existing_offset) = old_data_offset {
             self.data_reader.read_record_at_offset(existing_offset)?
         } else {
@@ -453,6 +462,11 @@ impl Drawer {
             }
         }
 
+        if is_new_record {
+            self.record_count += 1;
+            self.persist_metadata()?;
+        }
+
         Ok(Ok(()))
     }
 
@@ -502,6 +516,7 @@ impl Drawer {
         self.data_block_index.remove(&stale_offset);
         self.data_recycler
             .register_free_slot(old_block.size_class, stale_offset);
+        self.record_count = self.record_count.saturating_sub(1);
 
         let fields_to_clear = self.unique_constraints.clone();
         for unique_field in fields_to_clear {
@@ -522,7 +537,13 @@ impl Drawer {
             }
         }
 
+        self.persist_metadata()?;
+
         Ok(Some(deleted_record))
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.record_count
     }
 
     pub fn cascade_delete_fields(&self) -> Vec<String> {
@@ -717,6 +738,7 @@ impl Drawer {
     fn persist_metadata(&self) -> std::io::Result<()> {
         let metadata = DrawerMetadata::from_configuration(
             &self.primary_key,
+            self.record_count,
             &self.unique_constraints,
             self.relationship_constraints.clone(),
             self.delete_rules.clone(),

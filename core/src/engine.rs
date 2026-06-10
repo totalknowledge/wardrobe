@@ -84,9 +84,7 @@ impl WardrobeEngine {
         filter: Value,
         _modifiers: Option<QueryModifiers>,
     ) -> Result<Vec<Value>> {
-        let filter_map = filter.as_object().ok_or_else(|| {
-            Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object")
-        })?;
+        let filter_map = Self::filter_map(&filter)?;
 
         let mut records = if let Some(drawer) =
             self.database_core
@@ -101,6 +99,37 @@ impl WardrobeEngine {
         self.hydrate_records(&mut records, true)?;
 
         Ok(records)
+    }
+
+    pub fn count(
+        &mut self,
+        drawer_name: &str,
+        filter: Option<Value>,
+        _modifiers: Option<QueryModifiers>,
+    ) -> Result<usize> {
+        let Some(filter) = filter else {
+            return Ok(self
+                .database_core
+                .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+                .map(|drawer| drawer.record_count())
+                .unwrap_or(0));
+        };
+
+        let filter_map = Self::filter_map(&filter)?;
+        let count = if let Some(drawer) =
+            self.database_core
+                .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+        {
+            drawer
+                .find_all_records()?
+                .into_iter()
+                .filter(|record| Self::record_matches_filter(record, filter_map))
+                .count()
+        } else {
+            0
+        };
+
+        Ok(count)
     }
 
     pub fn find_by_id(&mut self, pointer: &str) -> Result<Option<Value>> {
@@ -351,6 +380,12 @@ impl WardrobeEngine {
         }
 
         filter_index == filter_bytes.len()
+    }
+
+    fn filter_map(filter: &Value) -> Result<&Map<String, Value>> {
+        filter
+            .as_object()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object"))
     }
 
     fn hydrate_records(&mut self, records: &mut [Value], include_ids: bool) -> Result<()> {

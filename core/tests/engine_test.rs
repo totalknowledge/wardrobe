@@ -953,3 +953,132 @@ fn us_031_find_by_filter_rejects_non_object_filters() {
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+#[test]
+fn us_032_count_uses_metadata_fast_path_when_no_filter_is_provided() {
+    let database = TempDatabase::new("us_032_count_no_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_032_flare",
+                "name": "Flare",
+                "gem": "@missing:lnk_unresolved"
+            }),
+        )
+        .expect("first weapon should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_032_frost",
+                "name": "Frost"
+            }),
+        )
+        .expect("second weapon should upsert");
+
+    let total = engine
+        .count("weapon", None, None)
+        .expect("count without filter should succeed");
+
+    assert_eq!(total, 2);
+    assert!(!database.path.join("missing.drw").exists());
+    assert!(!database.path.join("missing_index.drw").exists());
+}
+
+#[test]
+fn us_032_count_matches_filter_semantics_without_hydrating_records() {
+    let database = TempDatabase::new("us_032_count_filtered_matches");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_032_fire",
+                "element": "Fire",
+                "potency": 500
+            }),
+        )
+        .expect("fire gem should upsert");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_us_032_ice",
+                "element": "Ice",
+                "potency": 300
+            }),
+        )
+        .expect("ice gem should upsert");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_032_blaze",
+                "name": "Blazeblade",
+                "damage": 120,
+                "gem": { "_id": "@gem:lnk_us_032_fire" }
+            }),
+        )
+        .expect("blazeblade should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_032_frost",
+                "name": "Frostblade",
+                "damage": 90,
+                "gem": { "_id": "@gem:lnk_us_032_ice" }
+            }),
+        )
+        .expect("frostblade should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_032_storm",
+                "name": "Storm Spear",
+                "damage": 120,
+                "gem": { "_id": "@gem:lnk_us_032_fire" }
+            }),
+        )
+        .expect("storm spear should upsert");
+
+    let wildcard_count = engine
+        .count("weapon", Some(json!({ "name": "%blade" })), None)
+        .expect("wildcard count should succeed");
+    assert_eq!(wildcard_count, 2);
+
+    let reference_count = engine
+        .count(
+            "weapon",
+            Some(json!({ "gem": { "_id": "us_032_fire" } })),
+            None,
+        )
+        .expect("reference count should succeed");
+    assert_eq!(reference_count, 2);
+
+    let exact_count = engine
+        .count("weapon", Some(json!({ "damage": 90 })), None)
+        .expect("exact count should succeed");
+    assert_eq!(exact_count, 1);
+}
+
+#[test]
+fn us_032_count_rejects_non_object_filters() {
+    let database = TempDatabase::new("us_032_count_rejects_non_object_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let error = engine
+        .count("weapon", Some(json!(["not", "an", "object"])), None)
+        .expect_err("non-object filter should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}

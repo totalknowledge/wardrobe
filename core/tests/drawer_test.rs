@@ -14,12 +14,6 @@ fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_
     serde_json::from_str(&metadata_contents).expect("metadata sidecar should be valid json")
 }
 
-fn metadata_path(database_directory: &TempDatabase, drawer_name: &str) -> std::path::PathBuf {
-    database_directory
-        .path
-        .join(format!("{}_meta.drw", drawer_name))
-}
-
 fn load_index_records(
     database_directory: &TempDatabase,
     drawer_name: &str,
@@ -250,6 +244,7 @@ fn us_017_open_creates_metadata_sidecar_file_for_drawer() {
     let metadata = load_metadata(&database_directory, "socks");
     assert_eq!(metadata["format_version"], 1);
     assert_eq!(metadata["primary_key"], "_id");
+    assert_eq!(metadata["record_count"], 0);
     assert!(metadata["relationship_constraints"].is_object());
     assert!(metadata["delete_rules"].is_object());
     assert!(metadata.get("blocks").is_none());
@@ -261,14 +256,14 @@ fn us_017_open_creates_metadata_sidecar_file_for_drawer() {
 }
 
 #[test]
-fn us_017_metadata_sidecar_stays_static_during_standard_upserts() {
-    let database_directory = TempDatabase::new("drawer_metadata_sidecar_static");
+fn us_017_metadata_sidecar_tracks_record_count_during_standard_writes() {
+    let database_directory = TempDatabase::new("drawer_metadata_sidecar_record_count");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
     let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
         .expect("drawer should open");
-    let initial_metadata =
-        fs::read_to_string(metadata_path(&database_directory, "socks")).expect("metadata readable");
+    let initial_metadata = load_metadata(&database_directory, "socks");
+    assert_eq!(initial_metadata["record_count"], 0);
 
     drawer
         .upsert_record(json!({
@@ -286,13 +281,27 @@ fn us_017_metadata_sidecar_stays_static_during_standard_upserts() {
         .expect("second upsert should succeed")
         .expect("record should validate");
 
-    let updated_metadata =
-        fs::read_to_string(metadata_path(&database_directory, "socks")).expect("metadata readable");
-    let metadata = load_metadata(&database_directory, "socks");
+    let metadata_after_upserts = load_metadata(&database_directory, "socks");
+    assert_eq!(metadata_after_upserts["record_count"], 1);
+    assert!(metadata_after_upserts.get("blocks").is_none());
+    assert!(metadata_after_upserts.get("free_slots").is_none());
 
-    assert_eq!(updated_metadata, initial_metadata);
-    assert!(metadata.get("blocks").is_none());
-    assert!(metadata.get("free_slots").is_none());
+    drawer
+        .upsert_record(json!({
+            "_id": "@socks:lnk_b",
+            "color": "Gold"
+        }))
+        .expect("third upsert should succeed")
+        .expect("record should validate");
+    let metadata_after_insert = load_metadata(&database_directory, "socks");
+    assert_eq!(metadata_after_insert["record_count"], 2);
+
+    drawer
+        .delete_by_primary_key("@socks:lnk_a")
+        .expect("delete should succeed")
+        .expect("record should exist");
+    let metadata_after_delete = load_metadata(&database_directory, "socks");
+    assert_eq!(metadata_after_delete["record_count"], 1);
 }
 
 #[test]
