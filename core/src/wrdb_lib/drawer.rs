@@ -42,6 +42,8 @@ struct DrawerMetadata {
     delete_rules: BTreeMap<String, Value>,
     #[serde(default)]
     cascade_delete_rules: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schema: Option<Value>,
 }
 
 impl DrawerMetadata {
@@ -68,6 +70,7 @@ impl DrawerMetadata {
         relationship_constraints: BTreeMap<String, Value>,
         delete_rules: BTreeMap<String, Value>,
         cascade_delete_rules: BTreeMap<String, bool>,
+        schema: Option<Value>,
     ) -> Self {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
@@ -77,6 +80,7 @@ impl DrawerMetadata {
             relationship_constraints,
             delete_rules,
             cascade_delete_rules,
+            schema,
         }
     }
 
@@ -160,6 +164,7 @@ pub struct Drawer {
     relationship_constraints: BTreeMap<String, Value>,
     delete_rules: BTreeMap<String, Value>,
     cascade_delete_rules: BTreeMap<String, bool>,
+    schema: Option<Value>,
     record_count: usize,
     meta_file_path: PathBuf,
 }
@@ -202,6 +207,9 @@ impl Drawer {
             .as_ref()
             .map(|metadata| metadata.cascade_delete_rules.clone())
             .unwrap_or_default();
+        let schema = existing_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.schema.clone());
         let mut inferred_unique_constraints = if unique_constraints.is_empty() {
             existing_metadata
                 .as_ref()
@@ -326,6 +334,7 @@ impl Drawer {
             relationship_constraints,
             delete_rules,
             cascade_delete_rules,
+            schema,
             record_count,
             meta_file_path,
         };
@@ -345,6 +354,10 @@ impl Drawer {
                 )));
             }
         };
+
+        if let Err(validation_error) = self.validate_schema(&record) {
+            return Ok(Err(validation_error));
+        }
 
         let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
         let is_new_record = old_data_offset.is_none();
@@ -568,6 +581,192 @@ impl Drawer {
         fields
     }
 
+    fn validate_schema(&self, record: &Value) -> Result<(), String> {
+        let Some(schema) = self.schema.as_ref() else {
+            return Ok(());
+        };
+
+        Self::validate_value_against_schema(record, schema, "$")
+    }
+
+    fn validate_value_against_schema(
+        value: &Value,
+        schema: &Value,
+        path: &str,
+    ) -> Result<(), String> {
+        let Some(schema_map) = schema.as_object() else {
+            return Ok(());
+        };
+
+        if let Some(allowed_values) = schema_map
+            .get("enum")
+            .and_then(|enum_value| enum_value.as_array())
+        {
+            if !allowed_values
+                .iter()
+                .any(|allowed_value| allowed_value == value)
+            {
+                return Err(format!("{path} must match one of the declared enum values"));
+            }
+        }
+
+        if let Some(type_rule) = schema_map.get("type") {
+            Self::validate_type_rule(value, type_rule, path)?;
+        }
+
+        if let Some(required_fields) = schema_map.get("required") {
+            Self::validate_required_fields(value, required_fields, path)?;
+        }
+
+        if let Some(properties) = schema_map
+            .get("properties")
+            .and_then(|properties| properties.as_object())
+        {
+            if let Some(object) = value.as_object() {
+                for (field_name, field_schema) in properties {
+                    if let Some(field_value) = object.get(field_name) {
+                        let field_path = format!("{path}.{field_name}");
+                        Self::validate_value_against_schema(
+                            field_value,
+                            field_schema,
+                            &field_path,
+                        )?;
+                    }
+                }
+
+                if schema_map
+                    .get("additionalProperties")
+                    .and_then(|rule| rule.as_bool())
+                    == Some(false)
+                {
+                    for field_name in object.keys() {
+                        if !properties.contains_key(field_name) {
+                            return Err(format!("{path}.{field_name} is not allowed by schema"));
+                        }
+                    }
+                }
+            }
+        }
+
+        Self::validate_string_bounds(value, schema_map, path)?;
+        Self::validate_numeric_bounds(value, schema_map, path)?;
+
+        Ok(())
+    }
+
+    fn validate_type_rule(value: &Value, type_rule: &Value, path: &str) -> Result<(), String> {
+        if let Some(type_name) = type_rule.as_str() {
+            if Self::value_matches_type(value, type_name) {
+                return Ok(());
+            }
+
+            return Err(format!("{path} must be of type {type_name}"));
+        }
+
+        if let Some(type_names) = type_rule.as_array() {
+            let matches_any_type = type_names
+                .iter()
+                .filter_map(|type_name| type_name.as_str())
+                .any(|type_name| Self::value_matches_type(value, type_name));
+
+            if matches_any_type {
+                return Ok(());
+            }
+
+            return Err(format!(
+                "{path} must match one of the declared schema types"
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_required_fields(
+        value: &Value,
+        required_fields: &Value,
+        path: &str,
+    ) -> Result<(), String> {
+        let Some(object) = value.as_object() else {
+            return Ok(());
+        };
+        let Some(required_fields) = required_fields.as_array() else {
+            return Ok(());
+        };
+
+        for field in required_fields {
+            let Some(field_name) = field.as_str() else {
+                continue;
+            };
+
+            if !object.contains_key(field_name) {
+                return Err(format!("{path}.{field_name} is required by schema"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_string_bounds(
+        value: &Value,
+        schema: &serde_json::Map<String, Value>,
+        path: &str,
+    ) -> Result<(), String> {
+        let Some(value) = value.as_str() else {
+            return Ok(());
+        };
+
+        if let Some(min_length) = schema.get("minLength").and_then(|length| length.as_u64()) {
+            if value.chars().count() < min_length as usize {
+                return Err(format!("{path} must have at least {min_length} characters"));
+            }
+        }
+
+        if let Some(max_length) = schema.get("maxLength").and_then(|length| length.as_u64()) {
+            if value.chars().count() > max_length as usize {
+                return Err(format!("{path} must have at most {max_length} characters"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_numeric_bounds(
+        value: &Value,
+        schema: &serde_json::Map<String, Value>,
+        path: &str,
+    ) -> Result<(), String> {
+        let Some(value) = value.as_f64() else {
+            return Ok(());
+        };
+
+        if let Some(minimum) = schema.get("minimum").and_then(|minimum| minimum.as_f64()) {
+            if value < minimum {
+                return Err(format!("{path} must be greater than or equal to {minimum}"));
+            }
+        }
+
+        if let Some(maximum) = schema.get("maximum").and_then(|maximum| maximum.as_f64()) {
+            if value > maximum {
+                return Err(format!("{path} must be less than or equal to {maximum}"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn value_matches_type(value: &Value, type_name: &str) -> bool {
+        match type_name {
+            "array" => value.is_array(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "null" => value.is_null(),
+            "number" => value.is_number(),
+            "object" => value.is_object(),
+            "string" => value.is_string(),
+            _ => false,
+        }
+    }
+
     fn delete_rule_is_cascade(rule: &Value) -> bool {
         if rule.as_str().is_some_and(|action| action == "Cascade") {
             return true;
@@ -743,6 +942,7 @@ impl Drawer {
             self.relationship_constraints.clone(),
             self.delete_rules.clone(),
             self.cascade_delete_rules.clone(),
+            self.schema.clone(),
         );
         metadata.persist(&self.meta_file_path)
     }

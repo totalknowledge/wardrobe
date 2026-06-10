@@ -14,6 +14,20 @@ fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_
     serde_json::from_str(&metadata_contents).expect("metadata sidecar should be valid json")
 }
 
+fn write_metadata(
+    database_directory: &TempDatabase,
+    drawer_name: &str,
+    metadata: serde_json::Value,
+) {
+    fs::write(
+        database_directory
+            .path
+            .join(format!("{}_meta.drw", drawer_name)),
+        serde_json::to_vec_pretty(&metadata).expect("metadata should serialize"),
+    )
+    .expect("metadata should write");
+}
+
 fn load_index_records(
     database_directory: &TempDatabase,
     drawer_name: &str,
@@ -532,4 +546,130 @@ fn updating_secondary_field_removes_stale_index_entries() {
             .len(),
         1
     );
+}
+
+#[test]
+fn us_035_drawer_without_schema_accepts_flexible_json_documents() {
+    let database_directory = TempDatabase::new("us_035_schema_less_drawer");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let mut drawer = Drawer::open(&database_directory.path, "artifact", "_id", Vec::new())
+        .expect("drawer should open");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@artifact:lnk_flexible",
+            "name": "Flexible",
+            "nested": {
+                "free_form": true
+            },
+            "tags": ["schema-less", 42]
+        }))
+        .expect("upsert should succeed")
+        .expect("schema-less record should validate");
+
+    let records = drawer.find_all_records().expect("records should read");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["nested"]["free_form"], true);
+}
+
+#[test]
+fn us_035_drawer_schema_rejects_missing_required_or_wrong_type_fields() {
+    let database_directory = TempDatabase::new("us_035_schema_rejects_invalid");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+    write_metadata(
+        &database_directory,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {},
+            "delete_rules": {},
+            "cascade_delete_rules": {},
+            "schema": {
+                "type": "object",
+                "required": ["_id", "name", "damage"],
+                "properties": {
+                    "_id": { "type": "string" },
+                    "name": { "type": "string", "minLength": 3 },
+                    "damage": { "type": "integer", "minimum": 0 },
+                    "rarity": { "enum": ["common", "rare"] }
+                },
+                "additionalProperties": false
+            }
+        }),
+    );
+
+    let mut drawer = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
+        .expect("drawer should open");
+
+    let wrong_type = drawer
+        .upsert_record(json!({
+            "_id": "@weapon:lnk_wrong_type",
+            "name": "Blade",
+            "damage": "large"
+        }))
+        .expect("upsert should not fail at io level");
+    assert!(
+        wrong_type
+            .expect_err("wrong type should fail validation")
+            .contains("$.damage must be of type integer")
+    );
+
+    let missing_required = drawer
+        .upsert_record(json!({
+            "_id": "@weapon:lnk_missing_required",
+            "name": "Blade"
+        }))
+        .expect("upsert should not fail at io level");
+    assert!(
+        missing_required
+            .expect_err("missing field should fail validation")
+            .contains("$.damage is required by schema")
+    );
+
+    let extra_field = drawer
+        .upsert_record(json!({
+            "_id": "@weapon:lnk_extra",
+            "name": "Blade",
+            "damage": 10,
+            "weight": 3
+        }))
+        .expect("upsert should not fail at io level");
+    assert!(
+        extra_field
+            .expect_err("extra field should fail validation")
+            .contains("$.weight is not allowed by schema")
+    );
+
+    let invalid_enum = drawer
+        .upsert_record(json!({
+            "_id": "@weapon:lnk_invalid_enum",
+            "name": "Blade",
+            "damage": 10,
+            "rarity": "legendary"
+        }))
+        .expect("upsert should not fail at io level");
+    assert!(
+        invalid_enum
+            .expect_err("enum should fail validation")
+            .contains("$.rarity must match one of the declared enum values")
+    );
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@weapon:lnk_valid",
+            "name": "Blade",
+            "damage": 10,
+            "rarity": "rare"
+        }))
+        .expect("valid record should write")
+        .expect("valid record should pass schema");
+
+    assert_eq!(drawer.record_count(), 1);
+    let metadata = load_metadata(&database_directory, "weapon");
+    assert!(metadata.get("schema").is_some());
+    assert_eq!(metadata["record_count"], 1);
 }

@@ -30,6 +30,14 @@ fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields
     .expect("metadata should write");
 }
 
+fn write_drawer_metadata(database: &TempDatabase, drawer_name: &str, metadata: serde_json::Value) {
+    fs::write(
+        database.path.join(format!("{}_meta.drw", drawer_name)),
+        serde_json::to_vec_pretty(&metadata).expect("metadata should serialize"),
+    )
+    .expect("metadata should write");
+}
+
 #[test]
 fn find_all_loads_existing_drawer_files_after_restart() {
     let database = TempDatabase::new("find_all_loads_existing_drawer_files");
@@ -1417,4 +1425,75 @@ fn us_034_storage_coordinate_rejects_path_traversal_segments() {
         .expect_err("path traversal coordinate should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn us_035_engine_rejects_schema_violations_as_invalid_data() {
+    let database = TempDatabase::new("us_035_engine_schema_invalid_data");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {},
+            "delete_rules": {},
+            "cascade_delete_rules": {},
+            "schema": {
+                "type": "object",
+                "required": ["_id", "name", "damage"],
+                "properties": {
+                    "_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "damage": { "type": "integer" }
+                }
+            }
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let error = engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_schema_invalid",
+                "name": "Schema Blade",
+                "damage": "heavy"
+            }),
+        )
+        .expect_err("schema violation should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("$.damage must be of type integer")
+    );
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("count should succeed"),
+        0
+    );
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_schema_valid",
+                "name": "Schema Blade",
+                "damage": 42
+            }),
+        )
+        .expect("valid schema record should write");
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("count should succeed"),
+        1
+    );
 }
