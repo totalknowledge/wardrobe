@@ -1,4 +1,14 @@
 {
+  "gem":[{
+    "element": "Lightning",
+    "potency": 9999
+  }],
+  "weapon": [
+    {
+      "damage": 10,
+      "name": "Rusty Sword"
+    }
+  ],
   "character": [
     {
       "name": "Gorthor",

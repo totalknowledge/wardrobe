@@ -7,10 +7,6 @@ edition = "2024"
 name = "wardrobe_core"
 path = "src/lib.rs"
 
-[[bin]]
-name = "wardrobe"
-path = "src/main.rs"
-
 [dependencies]
 rand = "0.10.1"
 serde = { version = "1.0", features = ["derive"] }

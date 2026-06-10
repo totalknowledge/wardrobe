@@ -1,84 +1,178 @@
 # Wardrobe
 
-Wardrobe is an experimental database engine written in Rust. The current demo uses fantasy game data, such as gems, weapons, and characters, but the real goal is the storage engine underneath it.
+Wardrobe is an embedded Rust document database for local-first applications, developer tooling, test environments, desktop software, and service backends that need structured storage without a separate database server in the hot path.
 
-At a high level, Wardrobe is intended to become a fast, single-process NoSQL document store that keeps records in flat files. The current implementation stores JSON payloads in aligned text records, with a path toward storing items in binary files later.
+Today, Wardrobe stores JSON-like records in flat files with file-backed indexes, relationship hydration, schema validation, scoped multi-tenant routing, write-ahead recovery, vacuum compaction, and bounded drawer caching. The long-term direction remains a binary storage engine, but the current API is already useful for a wide range of application workflows.
 
-## Project Goals
-
-- Store document-like records in local flat files.
-- Organize records into semantic collections called drawers.
-- Give each record a stable pointer-style identity, such as `@gem:lnk_...`.
-- Maintain file-backed indexes for fast lookup by primary key.
-- Support updates without rewriting the whole file.
-- Reuse freed disk space through tombstoned slots and size-class recycling.
-- Resolve links between records so related objects can be hydrated on read.
-- Evolve from the current JSON-line storage format toward a binary storage format.
-
-## What Has Been Implemented
-
-- A Rust crate and demo binary for the Wardrobe engine.
-- A `WardrobeEngine` API with `new`, `upsert`, `find_all`, and `find_by_id`.
-- Database initialization that creates the storage directory if it does not exist.
-- Drawer files using the `.drw` extension.
-- Separate data and index files for each drawer.
-- Primary key indexes based on the `_id` field.
-- Pointer-style IDs generated with UUIDs when `_id` is not supplied.
-- Upsert behavior that writes a new version and tombstones the old record after the new index is written.
-- Aligned record writes using size classes.
-- A `Recycler` for reusing tombstoned slots.
-- Basic nested object decomposition during upsert.
-- Safe engine-level pointer hydration during reads without raw pointer casting.
-- Demo drawers for gems, weapons, and characters.
-
-## Current Shape
-
-The storage layout currently looks like this:
+## Workspace
 
 ```text
 wardrobe/
-  gem.drw
-  gem_index.drw
-  weapon.drw
-  weapon_index.drw
-  character.drw
-  character_index.drw
+  core/                 Embedded engine library crate
+  cli/                  Command-line inspection and diagnostics
+  server/               Standalone daemon scaffold
+  samples/basic-usage/  End-to-end sample application
 ```
 
-Each drawer has a data file and an index file. The data file stores serialized records. The index file maps lookup keys to byte offsets in the data file.
+## Current Public API
 
-## Next Design Areas
+Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 
-- Make drawer discovery and loading more explicit so reads work from existing files on disk.
-- Formalize secondary indexes and unique constraints.
-- Add support for one-to-many relationships through arrays of pointers.
-- Add tests around update ordering, tombstoning, recycling, and hydration.
-- Define the binary record format that will eventually replace plaintext JSON records.
+- `WardrobeEngine`
+- `Command`
+- `CommandResult`
+- `StorageCoordinate`
+- `StorageScope`
+- `QueryModifiers`
+- `OrderDirection`
+- `Database`
+- `Drawer`
+- `VacuumReport`
+- `DatabaseReader`
+- `DatabaseWriter`
+- `Recycler`
+- `StorageFormat`
+- `PlainTextJsonFormat`
 
-## Tests And Coverage
+The main embedded entry points on `WardrobeEngine` are:
 
-Run the behavior suite with:
+- `open`
+- `open_with_drawer_cache_limit`
+- `new` as a deprecated compatibility alias for `open`
+- `upsert`
+- `find_all`
+- `find_by_filter`
+- `count`
+- `find_by_id`
+- `delete_by_id`
+- `vacuum_drawer`
+- `cached_drawer_count`
+- `execute`
+- `execute_in_scope`
+
+Supporting execution and routing types include:
+
+- `QueryModifiers` and `OrderDirection` for sorting and pagination
+- `StorageCoordinate` for tenant/database/schema routing
+- `StorageScope` for database, schema, or drawer isolation modes
+- `Command` and `CommandResult` for a command-driven execution surface
+
+The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.
+
+## Usage
+
+### Embedded Quick Start
+
+```rust
+use serde_json::json;
+use wardrobe_core::WardrobeEngine;
+
+fn main() -> std::io::Result<()> {
+    let engine = WardrobeEngine::open("./data")?;
+
+    let weapon_id = engine.upsert(
+        "weapon",
+        json!({
+            "name": "Field Service Toolkit",
+            "category": "maintenance",
+            "tags": ["portable", "repair"]
+        }),
+    )?;
+
+    let weapon = engine.find_by_id(&weapon_id)?;
+    println!("{weapon:?}");
+
+    Ok(())
+}
+```
+
+### Filtering, Counting, and Pagination
+
+```rust
+use serde_json::json;
+use wardrobe_core::{OrderDirection, QueryModifiers, WardrobeEngine};
+
+fn query(engine: &WardrobeEngine) -> std::io::Result<()> {
+    let records = engine.find_by_filter(
+        "device",
+        json!({ "name": "sensor%" }),
+        Some(QueryModifiers {
+            order_by: Some("name".to_string()),
+            order_direction: Some(OrderDirection::Ascending),
+            offset: Some(0),
+            limit: Some(25),
+        }),
+    )?;
+
+    let total = engine.count("device", Some(json!({ "name": "sensor%" })), None)?;
+
+    println!("matched {} records, returned {}", total, records.len());
+    Ok(())
+}
+```
+
+### Routed Multi-Tenant Execution
+
+```rust
+use serde_json::json;
+use wardrobe_core::{Command, StorageCoordinate, WardrobeEngine};
+
+fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
+    let scope = StorageCoordinate::new("tenant_a", "production", "core");
+
+    engine.execute(
+        scope,
+        Command::Upsert {
+            drawer_name: "account".to_string(),
+            payload: json!({
+                "_id": "@account:lnk_acme",
+                "name": "Acme Manufacturing"
+            }),
+        },
+    )?;
+
+    Ok(())
+}
+```
+
+### Sample Application
+
+Run the basic sample crate to seed data from `core/tests/common/test_seed.json` and print hydrated drawers:
 
 ```text
-cargo test
+cargo run -p basic-usage
 ```
 
-`cargo test` does not produce file coverage by itself. To get a coverage summary, install `cargo-llvm-cov` and run the configured alias:
+## Current Capabilities
 
-A coverage-summary alias is configured in `.cargo/config.toml`:
+- Flat-file drawer storage with separate data, index, and metadata sidecar files
+- Primary-key indexing and secondary unique-field indexing
+- Upsert semantics with tombstoning and size-class slot recycling
+- Recursive record hydration across drawers without unsafe code
+- Array handling for scalar values, pointer arrays, and nested object arrays
+- Schema-less writes or optional per-drawer schema validation through metadata
+- Relationship constraints for `1:1`, `M:1`, `1:M`, and `M:M` patterns
+- Declarative delete behavior including cascade, restrict, and set-null rules
+- Scoped storage routing across database, schema, and drawer isolation models
+- Write-ahead log recovery for incomplete upsert and delete operations
+- Explicit vacuum compaction for reclaiming fragmented drawer storage
+- Optional LRU drawer caching to bound open file handles and cached drawer state
+
+## Tooling
+
+- `wardrobe-core`: embedded library crate
+- `wardrobe-cli`: local inspection and diagnostics
+- `wardrobe-server`: standalone daemon scaffold
+- `basic-usage`: practical sample application
+
+Run the test suite with:
+
+```text
+cargo test --workspace
+```
+
+For a coverage summary, install `cargo-llvm-cov` and run:
 
 ```text
 cargo coverage-summary
-```
-
-The alias runs:
-
-```text
-cargo llvm-cov --workspace --summary-only
-```
-
-Install the coverage tool with:
-
-```text
-cargo install cargo-llvm-cov
 ```

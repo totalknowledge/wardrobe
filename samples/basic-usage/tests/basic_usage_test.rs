@@ -19,14 +19,14 @@ fn temp_working_directory(test_name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn main_creates_demo_storage_in_current_directory() {
+fn sample_creates_demo_storage_in_current_directory() {
     let _guard = cwd_lock().lock().expect("cwd lock should not be poisoned");
     let previous_directory = env::current_dir().expect("cwd should be readable");
-    let working_directory = temp_working_directory("main_creates_demo_storage");
+    let working_directory = temp_working_directory("sample_creates_demo_storage");
     fs::create_dir_all(&working_directory).expect("temp dir should create");
 
     env::set_current_dir(&working_directory).expect("cwd should change");
-    let output = Command::new(env!("CARGO_BIN_EXE_wardrobe"))
+    let output = Command::new(env!("CARGO_BIN_EXE_basic-usage"))
         .output()
         .expect("binary should run");
     env::set_current_dir(previous_directory).expect("cwd should restore");
@@ -39,10 +39,10 @@ fn main_creates_demo_storage_in_current_directory() {
 }
 
 #[test]
-fn main_prints_existing_weapon_and_character_drawers() {
+fn sample_prints_existing_weapon_and_character_drawers() {
     let _guard = cwd_lock().lock().expect("cwd lock should not be poisoned");
     let previous_directory = env::current_dir().expect("cwd should be readable");
-    let working_directory = temp_working_directory("main_prints_existing_drawers");
+    let working_directory = temp_working_directory("sample_prints_existing_drawers");
     fs::create_dir_all(&working_directory).expect("temp dir should create");
     let storage_directory = working_directory.join("wardrobe");
 
@@ -70,7 +70,7 @@ fn main_prints_existing_weapon_and_character_drawers() {
     }
 
     env::set_current_dir(&working_directory).expect("cwd should change");
-    let output = Command::new(env!("CARGO_BIN_EXE_wardrobe"))
+    let output = Command::new(env!("CARGO_BIN_EXE_basic-usage"))
         .output()
         .expect("binary should run");
     env::set_current_dir(previous_directory).expect("cwd should restore");
@@ -84,17 +84,17 @@ fn main_prints_existing_weapon_and_character_drawers() {
 }
 
 #[test]
-fn main_handles_startup_write_failure_with_empty_reads() {
+fn sample_handles_startup_write_failure_with_empty_reads() {
     let _guard = cwd_lock().lock().expect("cwd lock should not be poisoned");
     let previous_directory = env::current_dir().expect("cwd should be readable");
-    let working_directory = temp_working_directory("main_handles_startup_write_failure");
+    let working_directory = temp_working_directory("sample_handles_startup_write_failure");
     fs::create_dir_all(&working_directory).expect("temp dir should create");
 
     let wardrobe_file = working_directory.join("wardrobe");
     fs::write(&wardrobe_file, b"blocked").expect("file should create");
 
     env::set_current_dir(&working_directory).expect("cwd should change");
-    let output = Command::new(env!("CARGO_BIN_EXE_wardrobe"))
+    let output = Command::new(env!("CARGO_BIN_EXE_basic-usage"))
         .output()
         .expect("binary should run");
     env::set_current_dir(previous_directory).expect("cwd should restore");

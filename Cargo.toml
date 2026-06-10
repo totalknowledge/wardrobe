@@ -2,6 +2,7 @@
 members = [
     "cli",
     "core",
+    "samples/basic-usage",
     "server",
 ]
 resolver = "3"
