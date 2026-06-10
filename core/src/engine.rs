@@ -81,6 +81,69 @@ impl StorageCoordinate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StorageScope {
+    Database { database: String },
+    Schema { database: String, schema: String },
+    Drawer { namespace: String },
+}
+
+impl StorageScope {
+    pub fn database(database: &str) -> Self {
+        Self::Database {
+            database: database.to_string(),
+        }
+    }
+
+    pub fn schema(database: &str, schema: &str) -> Self {
+        Self::Schema {
+            database: database.to_string(),
+            schema: schema.to_string(),
+        }
+    }
+
+    pub fn drawer(namespace: &str) -> Self {
+        Self::Drawer {
+            namespace: namespace.to_string(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Database { database } => {
+                StorageCoordinate::validate_component("database", database)
+            }
+            Self::Schema { database, schema } => {
+                StorageCoordinate::validate_component("database", database)?;
+                StorageCoordinate::validate_component("schema", schema)
+            }
+            Self::Drawer { namespace } => {
+                StorageCoordinate::validate_component("namespace", namespace)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DatabaseRoute {
+    Coordinate(StorageCoordinate),
+    Database(String),
+    Schema { database: String, schema: String },
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionContext<'a> {
+    drawer_namespace: Option<&'a str>,
+}
+
+impl ExecutionContext<'_> {
+    fn root() -> Self {
+        Self {
+            drawer_namespace: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Upsert {
@@ -144,7 +207,7 @@ impl SortableValue<'_> {
 pub struct WardrobeEngine {
     root_directory: PathBuf,
     database_core: Database,
-    routed_databases: HashMap<StorageCoordinate, Database>,
+    routed_databases: HashMap<DatabaseRoute, Database>,
 }
 
 impl WardrobeEngine {
@@ -163,11 +226,20 @@ impl WardrobeEngine {
     }
 
     pub fn upsert(&mut self, drawer_name: &str, payload: Value) -> Result<String> {
-        Self::upsert_in_database(&mut self.database_core, drawer_name, payload)
+        Self::upsert_in_database(
+            &mut self.database_core,
+            drawer_name,
+            payload,
+            ExecutionContext::root(),
+        )
     }
 
     pub fn find_all(&mut self, drawer_name: &str) -> std::io::Result<Vec<Value>> {
-        Self::find_all_in_database(&mut self.database_core, drawer_name)
+        Self::find_all_in_database(
+            &mut self.database_core,
+            drawer_name,
+            ExecutionContext::root(),
+        )
     }
 
     pub fn find_by_filter(
@@ -176,7 +248,13 @@ impl WardrobeEngine {
         filter: Value,
         modifiers: Option<QueryModifiers>,
     ) -> Result<Vec<Value>> {
-        Self::find_by_filter_in_database(&mut self.database_core, drawer_name, filter, modifiers)
+        Self::find_by_filter_in_database(
+            &mut self.database_core,
+            drawer_name,
+            filter,
+            modifiers,
+            ExecutionContext::root(),
+        )
     }
 
     pub fn count(
@@ -185,15 +263,21 @@ impl WardrobeEngine {
         filter: Option<Value>,
         modifiers: Option<QueryModifiers>,
     ) -> Result<usize> {
-        Self::count_in_database(&mut self.database_core, drawer_name, filter, modifiers)
+        Self::count_in_database(
+            &mut self.database_core,
+            drawer_name,
+            filter,
+            modifiers,
+            ExecutionContext::root(),
+        )
     }
 
     pub fn find_by_id(&mut self, pointer: &str) -> Result<Option<Value>> {
-        Self::find_by_id_in_database(&mut self.database_core, pointer)
+        Self::find_by_id_in_database(&mut self.database_core, pointer, ExecutionContext::root())
     }
 
     pub fn delete_by_id(&mut self, pointer: &str) -> Result<bool> {
-        Self::delete_by_id_in_database(&mut self.database_core, pointer)
+        Self::delete_by_id_in_database(&mut self.database_core, pointer, ExecutionContext::root())
     }
 
     pub fn execute(
@@ -201,48 +285,99 @@ impl WardrobeEngine {
         coordinate: StorageCoordinate,
         command: Command,
     ) -> Result<CommandResult> {
-        let database = self.database_for_coordinate(coordinate)?;
+        let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
+        Self::execute_in_database(database, command, None)
+    }
+
+    pub fn execute_in_scope(
+        &mut self,
+        scope: StorageScope,
+        command: Command,
+    ) -> Result<CommandResult> {
+        scope.validate()?;
+
+        match scope {
+            StorageScope::Database { database } => {
+                let database = self.database_for_route(DatabaseRoute::Database(database))?;
+                Self::execute_in_database(database, command, None)
+            }
+            StorageScope::Schema { database, schema } => {
+                let database =
+                    self.database_for_route(DatabaseRoute::Schema { database, schema })?;
+                Self::execute_in_database(database, command, None)
+            }
+            StorageScope::Drawer { namespace } => Self::execute_in_database(
+                &mut self.database_core,
+                command,
+                Some(namespace.as_str()),
+            ),
+        }
+    }
+
+    fn execute_in_database(
+        database: &mut Database,
+        command: Command,
+        drawer_namespace: Option<&str>,
+    ) -> Result<CommandResult> {
+        let context = ExecutionContext { drawer_namespace };
 
         match command {
             Command::Upsert {
                 drawer_name,
                 payload,
-            } => Self::upsert_in_database(database, &drawer_name, payload)
+            } => Self::upsert_in_database(database, &drawer_name, payload, context)
                 .map(CommandResult::Pointer),
             Command::FindAll { drawer_name } => {
-                Self::find_all_in_database(database, &drawer_name).map(CommandResult::Records)
+                Self::find_all_in_database(database, &drawer_name, context)
+                    .map(CommandResult::Records)
             }
             Command::FindById { pointer } => {
-                Self::find_by_id_in_database(database, &pointer).map(CommandResult::Record)
+                Self::find_by_id_in_database(database, &pointer, context).map(CommandResult::Record)
             }
             Command::FindByFilter {
                 drawer_name,
                 filter,
                 modifiers,
-            } => Self::find_by_filter_in_database(database, &drawer_name, filter, modifiers)
-                .map(CommandResult::Records),
+            } => {
+                Self::find_by_filter_in_database(database, &drawer_name, filter, modifiers, context)
+                    .map(CommandResult::Records)
+            }
             Command::Count {
                 drawer_name,
                 filter,
                 modifiers,
-            } => Self::count_in_database(database, &drawer_name, filter, modifiers)
+            } => Self::count_in_database(database, &drawer_name, filter, modifiers, context)
                 .map(CommandResult::Count),
             Command::Delete { pointer } => {
-                Self::delete_by_id_in_database(database, &pointer).map(CommandResult::Deleted)
+                Self::delete_by_id_in_database(database, &pointer, context)
+                    .map(CommandResult::Deleted)
             }
         }
     }
 
-    fn database_for_coordinate(&mut self, coordinate: StorageCoordinate) -> Result<&mut Database> {
-        coordinate.validate()?;
+    fn database_for_route(&mut self, route: DatabaseRoute) -> Result<&mut Database> {
+        let storage_path = match &route {
+            DatabaseRoute::Coordinate(coordinate) => {
+                coordinate.validate()?;
+                coordinate.path_under(&self.root_directory)
+            }
+            DatabaseRoute::Database(database) => {
+                StorageCoordinate::validate_component("database", database)?;
+                self.root_directory.join(database)
+            }
+            DatabaseRoute::Schema { database, schema } => {
+                StorageCoordinate::validate_component("database", database)?;
+                StorageCoordinate::validate_component("schema", schema)?;
+                self.root_directory.join(database).join(schema)
+            }
+        };
 
-        if !self.routed_databases.contains_key(&coordinate) {
-            let storage_path = coordinate.path_under(&self.root_directory);
+        if !self.routed_databases.contains_key(&route) {
             let database = Database::initialize(storage_path)?;
-            self.routed_databases.insert(coordinate.clone(), database);
+            self.routed_databases.insert(route.clone(), database);
         }
 
-        self.routed_databases.get_mut(&coordinate).ok_or_else(|| {
+        self.routed_databases.get_mut(&route).ok_or_else(|| {
             Error::new(
                 ErrorKind::NotFound,
                 "Failed to acquire routed database handle",
@@ -254,20 +389,27 @@ impl WardrobeEngine {
         database_core: &mut Database,
         drawer_name: &str,
         payload: Value,
+        context: ExecutionContext<'_>,
     ) -> Result<String> {
         if let Value::Object(map) = payload {
             let target_primary_key = "_id";
+            let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
 
             let record_id = match map.get(target_primary_key).and_then(|v| v.as_str()) {
-                Some(existing_id) => existing_id.to_string(),
-                None => format!("@{}:lnk_{}", drawer_name, Uuid::new_v4().simple()),
+                Some(existing_id) => Self::normalize_primary_key(
+                    &physical_drawer_name,
+                    drawer_name,
+                    existing_id,
+                    context,
+                ),
+                None => format!("@{}:lnk_{}", physical_drawer_name, Uuid::new_v4().simple()),
             };
 
-            let processed_map = Self::decompose_nested_objects(database_core, map)?;
+            let processed_map = Self::decompose_nested_objects(database_core, map, context)?;
 
-            database_core.load_drawer(drawer_name, target_primary_key, Vec::new())?;
+            database_core.load_drawer(&physical_drawer_name, target_primary_key, Vec::new())?;
 
-            if let Some(drawer) = database_core.use_drawer(drawer_name) {
+            if let Some(drawer) = database_core.use_drawer(&physical_drawer_name) {
                 let mut full_record = processed_map;
                 full_record.insert(
                     target_primary_key.to_string(),
@@ -297,10 +439,14 @@ impl WardrobeEngine {
     fn find_all_in_database(
         database_core: &mut Database,
         drawer_name: &str,
+        context: ExecutionContext<'_>,
     ) -> std::io::Result<Vec<Value>> {
-        let mut records = if let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
-        {
+        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let mut records = if let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )? {
             drawer.find_all_records()?
         } else {
             Vec::new()
@@ -316,18 +462,22 @@ impl WardrobeEngine {
         drawer_name: &str,
         filter: Value,
         modifiers: Option<QueryModifiers>,
+        context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
         let filter_map = Self::filter_map(&filter)?;
+        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
 
-        let mut records = if let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
-        {
+        let mut records = if let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )? {
             drawer.find_all_records()?
         } else {
             Vec::new()
         };
 
-        records.retain(|record| Self::record_matches_filter(record, filter_map));
+        records.retain(|record| Self::record_matches_filter(record, filter_map, context));
         Self::apply_query_modifiers(&mut records, modifiers.as_ref());
         Self::hydrate_records(database_core, &mut records, true)?;
 
@@ -339,22 +489,26 @@ impl WardrobeEngine {
         drawer_name: &str,
         filter: Option<Value>,
         _modifiers: Option<QueryModifiers>,
+        context: ExecutionContext<'_>,
     ) -> Result<usize> {
+        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
         let Some(filter) = filter else {
             return Ok(database_core
-                .active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
+                .active_drawer_or_load_from_disk(&physical_drawer_name, "_id", Vec::new())?
                 .map(|drawer| drawer.record_count())
                 .unwrap_or(0));
         };
 
         let filter_map = Self::filter_map(&filter)?;
-        let count = if let Some(drawer) =
-            database_core.active_drawer_or_load_from_disk(drawer_name, "_id", Vec::new())?
-        {
+        let count = if let Some(drawer) = database_core.active_drawer_or_load_from_disk(
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )? {
             drawer
                 .find_all_records()?
                 .into_iter()
-                .filter(|record| Self::record_matches_filter(record, filter_map))
+                .filter(|record| Self::record_matches_filter(record, filter_map, context))
                 .count()
         } else {
             0
@@ -366,14 +520,16 @@ impl WardrobeEngine {
     fn find_by_id_in_database(
         database_core: &mut Database,
         pointer: &str,
+        context: ExecutionContext<'_>,
     ) -> Result<Option<Value>> {
-        let (drawer_name, _) = Self::parse_pointer(pointer)?;
+        let physical_pointer = Self::scoped_pointer(pointer, context);
+        let (drawer_name, _) = Self::parse_pointer(&physical_pointer)?;
 
         if let Some(drawer) =
             database_core.active_drawer_or_load_from_disk(&drawer_name, "_id", Vec::new())?
         {
-            if let Some(mut record) = drawer.find_by_primary_key(pointer)? {
-                let mut active_pointer_path = HashSet::from([pointer.to_string()]);
+            if let Some(mut record) = drawer.find_by_primary_key(&physical_pointer)? {
+                let mut active_pointer_path = HashSet::from([physical_pointer]);
                 Self::hydrate_value(database_core, &mut record, false, &mut active_pointer_path)?;
                 if let Value::Object(ref mut map) = record {
                     map.remove("_id");
@@ -384,9 +540,14 @@ impl WardrobeEngine {
         Ok(None)
     }
 
-    fn delete_by_id_in_database(database_core: &mut Database, pointer: &str) -> Result<bool> {
+    fn delete_by_id_in_database(
+        database_core: &mut Database,
+        pointer: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<bool> {
         let mut active_delete_path = HashSet::new();
-        Self::delete_by_id_inner(database_core, pointer, &mut active_delete_path)
+        let physical_pointer = Self::scoped_pointer(pointer, context);
+        Self::delete_by_id_inner(database_core, &physical_pointer, &mut active_delete_path)
     }
 
     fn delete_by_id_inner(
@@ -439,13 +600,14 @@ impl WardrobeEngine {
     fn decompose_nested_objects(
         database_core: &mut Database,
         map: Map<String, Value>,
+        context: ExecutionContext<'_>,
     ) -> Result<Map<String, Value>> {
         let mut continuous_map = Map::new();
 
         for (key, value) in map {
             let drawer_name = Self::relationship_drawer_name(&key);
             let processed_value =
-                Self::decompose_relationship_value(database_core, &drawer_name, value)?;
+                Self::decompose_relationship_value(database_core, &drawer_name, value, context)?;
             continuous_map.insert(key, processed_value);
         }
 
@@ -456,25 +618,32 @@ impl WardrobeEngine {
         database_core: &mut Database,
         drawer_name: &str,
         value: Value,
+        context: ExecutionContext<'_>,
     ) -> Result<Value> {
         match value {
             Value::Object(child_map) => {
                 if let Some(reference_id) = Self::id_only_reference(&child_map) {
-                    let normalized_pointer =
-                        Self::normalize_reference_pointer(drawer_name, reference_id);
+                    let normalized_pointer = Self::normalize_reference_pointer_for_context(
+                        drawer_name,
+                        reference_id,
+                        context,
+                    );
                     Ok(Value::String(normalized_pointer))
                 } else {
                     let child_pointer = Self::upsert_in_database(
                         database_core,
                         drawer_name,
                         Value::Object(child_map),
+                        context,
                     )?;
                     Ok(Value::String(child_pointer))
                 }
             }
             Value::Array(values) => values
                 .into_iter()
-                .map(|item| Self::decompose_relationship_value(database_core, drawer_name, item))
+                .map(|item| {
+                    Self::decompose_relationship_value(database_core, drawer_name, item, context)
+                })
                 .collect::<Result<Vec<_>>>()
                 .map(Value::Array),
             other => Ok(other),
@@ -500,6 +669,75 @@ impl WardrobeEngine {
         } else {
             format!("@{}:lnk_{}", drawer_name, clean_id)
         }
+    }
+
+    fn normalize_reference_pointer_for_context(
+        drawer_name: &str,
+        reference_id: &str,
+        context: ExecutionContext<'_>,
+    ) -> String {
+        let Some(_) = context.drawer_namespace else {
+            return Self::normalize_reference_pointer(drawer_name, reference_id);
+        };
+
+        if let Some((pointer_drawer, pointer_key)) = Self::try_parse_pointer(reference_id) {
+            let physical_pointer_drawer = Self::scoped_drawer_name(&pointer_drawer, context);
+            return format!("@{}:lnk_{}", physical_pointer_drawer, pointer_key);
+        }
+
+        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        Self::normalize_reference_pointer(&physical_drawer_name, reference_id)
+    }
+
+    fn normalize_primary_key(
+        physical_drawer_name: &str,
+        logical_drawer_name: &str,
+        existing_id: &str,
+        context: ExecutionContext<'_>,
+    ) -> String {
+        let Some(_) = context.drawer_namespace else {
+            return existing_id.to_string();
+        };
+
+        if let Some((pointer_drawer, pointer_key)) = Self::try_parse_pointer(existing_id) {
+            if pointer_drawer == logical_drawer_name || pointer_drawer == physical_drawer_name {
+                return format!("@{}:lnk_{}", physical_drawer_name, pointer_key);
+            }
+
+            return existing_id.to_string();
+        }
+
+        format!(
+            "@{}:lnk_{}",
+            physical_drawer_name,
+            existing_id.trim_start_matches('@')
+        )
+    }
+
+    fn scoped_drawer_name(drawer_name: &str, context: ExecutionContext<'_>) -> String {
+        let Some(namespace) = context.drawer_namespace else {
+            return drawer_name.to_string();
+        };
+
+        let prefix = format!("{namespace}_");
+        if drawer_name.starts_with(&prefix) {
+            drawer_name.to_string()
+        } else {
+            format!("{prefix}{drawer_name}")
+        }
+    }
+
+    fn scoped_pointer(pointer: &str, context: ExecutionContext<'_>) -> String {
+        let Some(_) = context.drawer_namespace else {
+            return pointer.to_string();
+        };
+
+        let Some((drawer_name, record_key)) = Self::try_parse_pointer(pointer) else {
+            return pointer.to_string();
+        };
+
+        let physical_drawer_name = Self::scoped_drawer_name(&drawer_name, context);
+        format!("@{}:lnk_{}", physical_drawer_name, record_key)
     }
 
     fn relationship_drawer_name(field_name: &str) -> String {
@@ -532,14 +770,18 @@ impl WardrobeEngine {
         pointers
     }
 
-    fn record_matches_filter(record: &Value, filter_map: &Map<String, Value>) -> bool {
+    fn record_matches_filter(
+        record: &Value,
+        filter_map: &Map<String, Value>,
+        context: ExecutionContext<'_>,
+    ) -> bool {
         let Value::Object(record_map) = record else {
             return false;
         };
 
         filter_map.iter().all(|(field_name, expected_value)| {
             record_map.get(field_name).is_some_and(|actual_value| {
-                Self::field_matches_filter(field_name, actual_value, expected_value)
+                Self::field_matches_filter(field_name, actual_value, expected_value, context)
             })
         })
     }
@@ -548,6 +790,7 @@ impl WardrobeEngine {
         field_name: &str,
         actual_value: &Value,
         expected_value: &Value,
+        context: ExecutionContext<'_>,
     ) -> bool {
         match expected_value {
             Value::String(expected_string) => actual_value.as_str().is_some_and(|actual_string| {
@@ -556,8 +799,11 @@ impl WardrobeEngine {
             Value::Object(expected_map) => {
                 if let Some(reference_id) = Self::id_only_reference(expected_map) {
                     let relationship_drawer = Self::relationship_drawer_name(field_name);
-                    let normalized_pointer =
-                        Self::normalize_reference_pointer(&relationship_drawer, reference_id);
+                    let normalized_pointer = Self::normalize_reference_pointer_for_context(
+                        &relationship_drawer,
+                        reference_id,
+                        context,
+                    );
                     return actual_value.as_str() == Some(normalized_pointer.as_str());
                 }
 
@@ -567,7 +813,12 @@ impl WardrobeEngine {
 
                 expected_map.iter().all(|(nested_field, nested_expected)| {
                     actual_map.get(nested_field).is_some_and(|nested_actual| {
-                        Self::field_matches_filter(nested_field, nested_actual, nested_expected)
+                        Self::field_matches_filter(
+                            nested_field,
+                            nested_actual,
+                            nested_expected,
+                            context,
+                        )
                     })
                 })
             }
@@ -579,7 +830,12 @@ impl WardrobeEngine {
                 actual_array.len() == expected_array.len()
                     && actual_array.iter().zip(expected_array.iter()).all(
                         |(actual_item, expected_item)| {
-                            Self::field_matches_filter(field_name, actual_item, expected_item)
+                            Self::field_matches_filter(
+                                field_name,
+                                actual_item,
+                                expected_item,
+                                context,
+                            )
                         },
                     )
             }
@@ -869,17 +1125,23 @@ impl WardrobeEngine {
         value.starts_with('@') && value.contains(":lnk_")
     }
 
-    fn parse_pointer(pointer: &str) -> Result<(String, String)> {
+    fn try_parse_pointer(pointer: &str) -> Option<(String, String)> {
         let clean_pointer = pointer.trim_start_matches('@');
-        let segments: Vec<&str> = clean_pointer.split(":lnk_").collect();
+        let (drawer_name, record_key) = clean_pointer.split_once(":lnk_")?;
 
-        if segments.len() == 2 {
-            Ok((segments[0].to_string(), segments[1].to_string()))
-        } else {
-            Err(Error::new(
+        if drawer_name.is_empty() || record_key.is_empty() || record_key.contains(":lnk_") {
+            return None;
+        }
+
+        Some((drawer_name.to_string(), record_key.to_string()))
+    }
+
+    fn parse_pointer(pointer: &str) -> Result<(String, String)> {
+        Self::try_parse_pointer(pointer).ok_or_else(|| {
+            Error::new(
                 ErrorKind::InvalidData,
                 format!("Malformed pointer reference encountered: {}", pointer),
-            ))
-        }
+            )
+        })
     }
 }

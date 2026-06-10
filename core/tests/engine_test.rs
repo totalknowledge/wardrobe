@@ -5,7 +5,8 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use wardrobe_core::{
-    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, WardrobeEngine,
+    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageScope,
+    WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -1425,6 +1426,226 @@ fn us_034_storage_coordinate_rejects_path_traversal_segments() {
         .expect_err("path traversal coordinate should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn us_036_database_level_isolation_uses_independent_open_paths() {
+    let tenant_a_database = TempDatabase::new("us_036_database_tenant_a");
+    let tenant_b_database = TempDatabase::new("us_036_database_tenant_b");
+    let tenant_a_directory = tenant_a_database.path.to_string_lossy().into_owned();
+    let tenant_b_directory = tenant_b_database.path.to_string_lossy().into_owned();
+
+    let mut tenant_a_engine =
+        WardrobeEngine::open(&tenant_a_directory).expect("tenant a should initialize");
+    let mut tenant_b_engine =
+        WardrobeEngine::open(&tenant_b_directory).expect("tenant b should initialize");
+
+    tenant_a_engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_shared_database_key",
+                "name": "Tenant A Blade"
+            }),
+        )
+        .expect("tenant a weapon should upsert");
+    tenant_b_engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_shared_database_key",
+                "name": "Tenant B Blade"
+            }),
+        )
+        .expect("tenant b weapon should upsert");
+
+    let tenant_a_record = tenant_a_engine
+        .find_by_id("@weapon:lnk_shared_database_key")
+        .expect("tenant a lookup should succeed")
+        .expect("tenant a record should exist");
+    let tenant_b_record = tenant_b_engine
+        .find_by_id("@weapon:lnk_shared_database_key")
+        .expect("tenant b lookup should succeed")
+        .expect("tenant b record should exist");
+
+    assert_eq!(tenant_a_record["name"], "Tenant A Blade");
+    assert_eq!(tenant_b_record["name"], "Tenant B Blade");
+    assert!(tenant_a_database.path.join("weapon.drw").is_file());
+    assert!(tenant_b_database.path.join("weapon.drw").is_file());
+}
+
+#[test]
+fn us_036_schema_level_isolation_uses_nested_database_schema_folders() {
+    let database = TempDatabase::new("us_036_schema_level");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let schema_scope = StorageScope::schema("main_db", "tenant_1");
+
+    {
+        let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+        engine
+            .execute_in_scope(
+                schema_scope.clone(),
+                Command::Upsert {
+                    drawer_name: "gem".to_string(),
+                    payload: json!({
+                        "_id": "@gem:lnk_schema_fire",
+                        "element": "Schema Fire"
+                    }),
+                },
+            )
+            .expect("schema-scoped upsert should succeed");
+    }
+
+    assert!(
+        database
+            .path
+            .join("main_db")
+            .join("tenant_1")
+            .join("gem.drw")
+            .is_file()
+    );
+    assert!(!database.path.join("gem.drw").exists());
+    assert!(!database.path.join("main_db").join("gem.drw").exists());
+
+    let mut restarted_engine =
+        WardrobeEngine::open(&storage_pool).expect("engine should reinitialize");
+    let count = restarted_engine
+        .execute_in_scope(
+            schema_scope.clone(),
+            Command::Count {
+                drawer_name: "gem".to_string(),
+                filter: None,
+                modifiers: None,
+            },
+        )
+        .expect("schema-scoped count should succeed");
+    assert_eq!(count, CommandResult::Count(1));
+
+    let records = restarted_engine
+        .execute_in_scope(
+            schema_scope,
+            Command::FindAll {
+                drawer_name: "gem".to_string(),
+            },
+        )
+        .expect("schema-scoped find_all should succeed");
+
+    let CommandResult::Records(records) = records else {
+        panic!("expected records result");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["element"], "Schema Fire");
+}
+
+#[test]
+fn us_036_drawer_level_isolation_uses_prefixed_drawer_files() {
+    let database = TempDatabase::new("us_036_drawer_level");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let tenant_a_scope = StorageScope::drawer("tenant1");
+    let tenant_b_scope = StorageScope::drawer("tenant2");
+    let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    for (scope, name) in [
+        (tenant_a_scope.clone(), "Tenant 1 Gem"),
+        (tenant_b_scope.clone(), "Tenant 2 Gem"),
+    ] {
+        engine
+            .execute_in_scope(
+                scope,
+                Command::Upsert {
+                    drawer_name: "gem".to_string(),
+                    payload: json!({
+                        "_id": "@gem:lnk_shared_drawer_key",
+                        "element": name
+                    }),
+                },
+            )
+            .expect("drawer-scoped upsert should succeed");
+    }
+
+    assert!(database.path.join("tenant1_gem.drw").is_file());
+    assert!(database.path.join("tenant2_gem.drw").is_file());
+    assert!(!database.path.join("gem.drw").exists());
+
+    let tenant_a_record = engine
+        .execute_in_scope(
+            tenant_a_scope,
+            Command::FindById {
+                pointer: "@gem:lnk_shared_drawer_key".to_string(),
+            },
+        )
+        .expect("tenant 1 lookup should succeed");
+    let tenant_b_record = engine
+        .execute_in_scope(
+            tenant_b_scope,
+            Command::FindById {
+                pointer: "@gem:lnk_shared_drawer_key".to_string(),
+            },
+        )
+        .expect("tenant 2 lookup should succeed");
+
+    let CommandResult::Record(Some(tenant_a_record)) = tenant_a_record else {
+        panic!("expected tenant 1 record");
+    };
+    let CommandResult::Record(Some(tenant_b_record)) = tenant_b_record else {
+        panic!("expected tenant 2 record");
+    };
+
+    assert_eq!(tenant_a_record["element"], "Tenant 1 Gem");
+    assert_eq!(tenant_b_record["element"], "Tenant 2 Gem");
+}
+
+#[test]
+fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
+    let database = TempDatabase::new("us_036_drawer_level_nested");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let scope = StorageScope::drawer("tenant_graph");
+    let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    engine
+        .execute_in_scope(
+            scope.clone(),
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "@weapon:lnk_graph_staff",
+                    "name": "Graph Staff",
+                    "gem": {
+                        "_id": "@gem:lnk_graph_fire",
+                        "element": "Graph Fire",
+                        "potency": 999
+                    }
+                }),
+            },
+        )
+        .expect("drawer-scoped nested upsert should succeed");
+
+    assert!(database.path.join("tenant_graph_weapon.drw").is_file());
+    assert!(database.path.join("tenant_graph_gem.drw").is_file());
+    assert!(!database.path.join("weapon.drw").exists());
+    assert!(!database.path.join("gem.drw").exists());
+
+    let weapon_file = fs::read_to_string(database.path.join("tenant_graph_weapon.drw"))
+        .expect("weapon drawer should be readable");
+    assert!(weapon_file.contains("\"gem\":\"@tenant_graph_gem:lnk_graph_fire\""));
+
+    let result = engine
+        .execute_in_scope(
+            scope,
+            Command::FindByFilter {
+                drawer_name: "weapon".to_string(),
+                filter: json!({ "gem": { "_id": "graph_fire" } }),
+                modifiers: None,
+            },
+        )
+        .expect("drawer-scoped reference filter should succeed");
+
+    let CommandResult::Records(records) = result else {
+        panic!("expected records result");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["name"], "Graph Staff");
+    assert_eq!(records[0]["gem"]["element"], "Graph Fire");
 }
 
 #[test]
