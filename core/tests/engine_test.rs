@@ -2703,3 +2703,82 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["element"], "Air");
 }
+
+#[test]
+fn us_043_engine_reloads_evicted_drawers_from_disk_with_cache_limit() {
+    let database = TempDatabase::new("us_043_engine_lru_reloads_evicted_drawers");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open_with_drawer_cache_limit(&database_directory, 1)
+        .expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_lru_gem",
+                "element": "Light",
+                "potency": 9001
+            }),
+        )
+        .expect("gem should upsert");
+    assert_eq!(
+        engine
+            .cached_drawer_count()
+            .expect("cache count should read"),
+        1
+    );
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_lru_weapon",
+                "name": "Cache Blade",
+                "gem": { "_id": "@gem:lnk_lru_gem" }
+            }),
+        )
+        .expect("weapon should upsert");
+    assert_eq!(
+        engine
+            .cached_drawer_count()
+            .expect("cache count should read"),
+        1
+    );
+
+    let gem = engine
+        .find_by_id("@gem:lnk_lru_gem")
+        .expect("evicted gem drawer should reload")
+        .expect("gem should exist");
+    assert_eq!(gem["element"], "Light");
+    assert_eq!(
+        engine
+            .cached_drawer_count()
+            .expect("cache count should read"),
+        1
+    );
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("evicted weapon drawer should reload");
+    assert_eq!(weapons.len(), 1);
+    assert_eq!(weapons[0]["name"], "Cache Blade");
+    assert_eq!(weapons[0]["gem"]["potency"], 9001);
+    assert_eq!(
+        engine
+            .cached_drawer_count()
+            .expect("cache count should read"),
+        1
+    );
+}
+
+#[test]
+fn us_043_engine_rejects_zero_drawer_cache_limit() {
+    let database = TempDatabase::new("us_043_engine_rejects_zero_limit");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let Err(error) = WardrobeEngine::open_with_drawer_cache_limit(&database_directory, 0) else {
+        panic!("zero cache limit should fail");
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}

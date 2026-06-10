@@ -263,17 +263,33 @@ pub struct WardrobeEngine {
     root_directory: PathBuf,
     database_core: RwLock<Database>,
     routed_databases: RwLock<HashMap<DatabaseRoute, Arc<RwLock<Database>>>>,
+    max_cached_drawers: Option<usize>,
 }
 
 impl WardrobeEngine {
     pub fn open(directory: &str) -> Result<Self> {
-        let database_core = Database::initialize(directory)?;
+        Self::open_with_optional_drawer_cache_limit(directory, None)
+    }
+
+    pub fn open_with_drawer_cache_limit(
+        directory: &str,
+        max_cached_drawers: usize,
+    ) -> Result<Self> {
+        Self::open_with_optional_drawer_cache_limit(directory, Some(max_cached_drawers))
+    }
+
+    fn open_with_optional_drawer_cache_limit(
+        directory: &str,
+        max_cached_drawers: Option<usize>,
+    ) -> Result<Self> {
+        let database_core = Database::initialize_with_cache_limit(directory, max_cached_drawers)?;
         let database_core = RwLock::new(database_core);
         Self::recover_database(&database_core)?;
         Ok(Self {
             root_directory: PathBuf::from(directory),
             database_core,
             routed_databases: RwLock::new(HashMap::new()),
+            max_cached_drawers,
         })
     }
 
@@ -335,6 +351,10 @@ impl WardrobeEngine {
 
     pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
         Self::vacuum_drawer_in_database(&self.database_core, drawer_name, ExecutionContext::root())
+    }
+
+    pub fn cached_drawer_count(&self) -> Result<usize> {
+        Ok(Self::read_lock(&self.database_core)?.cached_drawer_count())
     }
 
     pub fn execute(
@@ -436,7 +456,8 @@ impl WardrobeEngine {
 
         let mut routed_databases = Self::write_lock(&self.routed_databases)?;
         if !routed_databases.contains_key(&route) {
-            let database = Database::initialize(storage_path)?;
+            let database =
+                Database::initialize_with_cache_limit(storage_path, self.max_cached_drawers)?;
             let database = Arc::new(RwLock::new(database));
             Self::recover_database(&database)?;
             routed_databases.insert(route.clone(), database);

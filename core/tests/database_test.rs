@@ -185,3 +185,68 @@ fn get_all_drawers_reflects_loaded_and_closed_drawers() {
     assert_eq!(loaded_after_close.len(), 1);
     assert!(loaded_after_close.contains_key("gem"));
 }
+
+#[test]
+fn us_043_lru_cache_evicts_least_recently_used_drawer_when_limit_is_exceeded() {
+    let database_directory = TempDatabase::new("us_043_lru_evicts_oldest_drawer");
+    let mut database = Database::initialize_with_cache_limit(&database_directory.path, Some(2))
+        .expect("db should initialize");
+
+    database
+        .load_drawer("gem", "_id", Vec::new())
+        .expect("gem drawer should load");
+    database
+        .load_drawer("weapon", "_id", Vec::new())
+        .expect("weapon drawer should load");
+    database
+        .use_drawer("gem")
+        .expect("gem should be hot in cache");
+    database
+        .load_drawer("character", "_id", Vec::new())
+        .expect("character drawer should load");
+
+    assert_eq!(database.cached_drawer_count(), 2);
+    assert!(database.use_drawer("gem").is_some());
+    assert!(database.use_drawer("character").is_some());
+    assert!(database.use_drawer("weapon").is_none());
+}
+
+#[test]
+fn us_043_lru_cache_does_not_evict_actively_borrowed_drawers() {
+    let database_directory = TempDatabase::new("us_043_lru_keeps_borrowed_drawer");
+    let mut database = Database::initialize_with_cache_limit(&database_directory.path, Some(1))
+        .expect("db should initialize");
+
+    database
+        .load_drawer("gem", "_id", Vec::new())
+        .expect("gem drawer should load");
+    let borrowed_gem = database
+        .use_drawer("gem")
+        .expect("gem should be active in cache");
+
+    database
+        .load_drawer("weapon", "_id", Vec::new())
+        .expect("weapon drawer should load");
+    assert_eq!(database.cached_drawer_count(), 2);
+
+    drop(borrowed_gem);
+    database
+        .load_drawer("character", "_id", Vec::new())
+        .expect("character drawer should load");
+
+    assert_eq!(database.cached_drawer_count(), 1);
+    assert!(database.use_drawer("character").is_some());
+    assert!(database.use_drawer("gem").is_none());
+    assert!(database.use_drawer("weapon").is_none());
+}
+
+#[test]
+fn us_043_cache_limit_rejects_zero_sized_pool() {
+    let database_directory = TempDatabase::new("us_043_lru_rejects_zero");
+    let Err(error) = Database::initialize_with_cache_limit(&database_directory.path, Some(0))
+    else {
+        panic!("zero limit should fail");
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
