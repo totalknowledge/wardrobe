@@ -145,6 +145,16 @@ impl DataBlockIndexEntry {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VacuumReport {
+    pub records_rewritten: usize,
+    pub data_bytes_before: u64,
+    pub data_bytes_after: u64,
+    pub index_bytes_before: u64,
+    pub index_bytes_after: u64,
+    pub bytes_reclaimed: u64,
+}
+
 pub struct Drawer {
     pub name: String,
     pub primary_key: String,
@@ -559,6 +569,120 @@ impl Drawer {
         self.persist_metadata()?;
 
         Ok(Some(deleted_record))
+    }
+
+    pub fn vacuum(&mut self) -> std::io::Result<VacuumReport> {
+        let data_bytes_before = self.data_writer.current_length()?;
+        let index_bytes_before = self.index_writer.current_length()?;
+        let mut live_offsets = self
+            .primary_memory_index
+            .iter()
+            .map(|(key, offset)| (key.clone(), *offset))
+            .collect::<Vec<_>>();
+        live_offsets.sort_by_key(|(_, offset)| *offset);
+
+        let mut live_records = Vec::new();
+        for (_, offset) in live_offsets {
+            if let Some(record) = self.data_reader.read_record_at_offset(offset)? {
+                live_records.push(record);
+            }
+        }
+
+        let mut compact_data = Vec::new();
+        let mut compact_index = Vec::new();
+        let mut primary_memory_index = HashMap::new();
+        let mut secondary_memory_index = HashMap::new();
+        let mut index_file_offsets = HashMap::new();
+        let mut data_block_index = HashMap::new();
+
+        for field in &self.unique_constraints {
+            secondary_memory_index.insert(field.clone(), HashMap::new());
+        }
+
+        for record in &live_records {
+            let primary_key_value = record
+                .get(&self.primary_key)
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Missing primary key field: {}", self.primary_key),
+                    )
+                })?;
+            let serialized_record = PlainTextJsonFormat::serialize_record(record)?;
+            let data_offset = Self::append_compact_payload(&mut compact_data, &serialized_record);
+            let block_entry =
+                DataBlockIndexEntry::live(&serialized_record, serialized_record.len() + 1);
+
+            let primary_index_entry = Self::index_entry_value(
+                &self.primary_key,
+                primary_key_value,
+                Value::from(data_offset),
+                Some(block_entry),
+            );
+            let (index_offset, index_slot_size) =
+                Self::append_compact_index_entry(&mut compact_index, &primary_index_entry)?;
+
+            primary_memory_index.insert(primary_key_value.to_string(), data_offset);
+            index_file_offsets.insert(
+                format!("{}:{}", self.primary_key, primary_key_value),
+                (index_offset, index_slot_size),
+            );
+            data_block_index.insert(data_offset, block_entry);
+
+            for unique_field in &self.unique_constraints {
+                if let Some(field_value) = record.get(unique_field).and_then(|value| value.as_str())
+                {
+                    let secondary_index_entry = Self::index_entry_value(
+                        unique_field,
+                        field_value,
+                        Value::from(data_offset),
+                        None,
+                    );
+                    let (index_offset, index_slot_size) = Self::append_compact_index_entry(
+                        &mut compact_index,
+                        &secondary_index_entry,
+                    )?;
+
+                    index_file_offsets.insert(
+                        format!("{}:{}", unique_field, field_value),
+                        (index_offset, index_slot_size),
+                    );
+                    secondary_memory_index
+                        .entry(unique_field.clone())
+                        .or_insert_with(HashMap::new)
+                        .entry(field_value.to_string())
+                        .or_insert_with(Vec::new)
+                        .push(data_offset);
+                }
+            }
+        }
+
+        self.data_writer.rewrite_all(&compact_data)?;
+        self.index_writer.rewrite_all(&compact_index)?;
+
+        self.primary_memory_index = primary_memory_index;
+        self.secondary_memory_index = secondary_memory_index;
+        self.index_file_offsets = index_file_offsets;
+        self.data_block_index = data_block_index;
+        self.data_recycler = Recycler::new();
+        self.index_recycler = Recycler::new();
+        self.record_count = self.primary_memory_index.len();
+        self.persist_metadata()?;
+
+        let data_bytes_after = compact_data.len() as u64;
+        let index_bytes_after = compact_index.len() as u64;
+        let total_before = data_bytes_before.saturating_add(index_bytes_before);
+        let total_after = data_bytes_after.saturating_add(index_bytes_after);
+
+        Ok(VacuumReport {
+            records_rewritten: self.record_count,
+            data_bytes_before,
+            data_bytes_after,
+            index_bytes_before,
+            index_bytes_after,
+            bytes_reclaimed: total_before.saturating_sub(total_after),
+        })
     }
 
     pub fn record_count(&self) -> usize {
@@ -1099,6 +1223,47 @@ impl Drawer {
         self.index_writer
             .append_aligned_index(&serialized_index, target_size_class)?;
         Ok(())
+    }
+
+    fn index_entry_value(
+        field: &str,
+        key: &str,
+        offset_value: Value,
+        block_entry: Option<DataBlockIndexEntry>,
+    ) -> Value {
+        let mut index_entry = serde_json::json!({
+            "f": field,
+            "k": key,
+            "o": offset_value
+        });
+
+        if let Some(block_entry) = block_entry {
+            index_entry["len"] = Value::from(block_entry.payload_len as u64);
+            index_entry["class"] = Value::from(block_entry.size_class as u64);
+            index_entry["crc"] = Value::from(block_entry.crc as u64);
+            index_entry["status"] = Value::from(block_entry.status as u64);
+        }
+
+        index_entry
+    }
+
+    fn append_compact_payload(target: &mut Vec<u8>, payload: &[u8]) -> u64 {
+        let starting_offset = target.len() as u64;
+        target.extend_from_slice(payload);
+        target.push(b'\n');
+        starting_offset
+    }
+
+    fn append_compact_index_entry(
+        target: &mut Vec<u8>,
+        index_entry: &Value,
+    ) -> std::io::Result<(u64, usize)> {
+        let starting_offset = target.len() as u64;
+        let serialized_index = PlainTextJsonFormat::serialize_record(index_entry)?;
+        target.extend_from_slice(&serialized_index);
+        target.push(b'\n');
+
+        Ok((starting_offset, serialized_index.len() + 1))
     }
 
     pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {

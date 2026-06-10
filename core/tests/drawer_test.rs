@@ -673,3 +673,116 @@ fn us_035_drawer_schema_rejects_missing_required_or_wrong_type_fields() {
     assert!(metadata.get("schema").is_some());
     assert_eq!(metadata["record_count"], 1);
 }
+
+#[test]
+fn us_042_vacuum_compacts_live_records_and_rebuilds_indexes() {
+    let database_directory = TempDatabase::new("us_042_vacuum_compacts_drawer");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let data_path = database_directory.path.join("gem.drw");
+    let mut drawer = Drawer::open(
+        &database_directory.path,
+        "gem",
+        "_id",
+        vec!["element".to_string()],
+    )
+    .expect("drawer should open");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@gem:lnk_a",
+            "element": "Fire",
+            "description": "A very long ember payload that leaves visible slack after the update"
+        }))
+        .expect("upsert should succeed")
+        .expect("record should validate");
+    drawer
+        .upsert_record(json!({
+            "_id": "@gem:lnk_b",
+            "element": "Water",
+            "description": "This record will be removed before vacuuming"
+        }))
+        .expect("upsert should succeed")
+        .expect("record should validate");
+    drawer
+        .upsert_record(json!({
+            "_id": "@gem:lnk_a",
+            "element": "Light",
+            "description": "small"
+        }))
+        .expect("update should succeed")
+        .expect("record should validate");
+    drawer
+        .delete_by_primary_key("@gem:lnk_b")
+        .expect("delete should succeed")
+        .expect("record should delete");
+
+    let before_contents = fs::read_to_string(&data_path).expect("data file should read");
+    let before_len = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+    assert!(before_contents.contains("!!DEAD!!"));
+
+    let report = drawer.vacuum().expect("vacuum should succeed");
+
+    let after_contents = fs::read_to_string(&data_path).expect("data file should read");
+    let after_len = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+
+    assert_eq!(report.records_rewritten, 1);
+    assert_eq!(report.data_bytes_before, before_len);
+    assert_eq!(report.data_bytes_after, after_len);
+    assert!(report.bytes_reclaimed > 0);
+    assert!(after_len < before_len);
+    assert!(!after_contents.contains("!!DEAD!!"));
+    assert!(after_contents.lines().all(|line| line == line.trim_end()));
+
+    assert_eq!(
+        drawer
+            .find_by_primary_key("@gem:lnk_a")
+            .expect("lookup should succeed")
+            .expect("record should exist")["element"],
+        "Light"
+    );
+    assert!(
+        drawer
+            .find_by_primary_key("@gem:lnk_b")
+            .expect("lookup should succeed")
+            .is_none()
+    );
+    assert_eq!(
+        drawer
+            .find_by_secondary_key("element", "Light")
+            .expect("secondary lookup should succeed")
+            .len(),
+        1
+    );
+    assert!(
+        drawer
+            .find_by_secondary_key("element", "Fire")
+            .expect("secondary lookup should succeed")
+            .is_empty()
+    );
+
+    let metadata = load_metadata(&database_directory, "gem");
+    assert_eq!(metadata["record_count"], 1);
+
+    drop(drawer);
+    let reopened = Drawer::open(
+        &database_directory.path,
+        "gem",
+        "_id",
+        vec!["element".to_string()],
+    )
+    .expect("drawer should reopen");
+
+    assert_eq!(reopened.record_count(), 1);
+    assert_eq!(
+        reopened
+            .find_by_secondary_key("element", "Light")
+            .expect("secondary lookup should survive restart")
+            .len(),
+        1
+    );
+}

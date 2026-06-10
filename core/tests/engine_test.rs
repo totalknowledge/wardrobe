@@ -2534,3 +2534,172 @@ fn us_035_engine_rejects_schema_violations_as_invalid_data() {
         1
     );
 }
+
+#[test]
+fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
+    let database = TempDatabase::new("us_042_engine_vacuum_drawer");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_vacuum_keep",
+                "name": "Very Long Vacuum Blade Name",
+                "description": "large payload that should leave dead padded space after update",
+                "gem": {
+                    "_id": "@gem:lnk_vacuum_gem",
+                    "element": "Light",
+                    "potency": 9001
+                }
+            }),
+        )
+        .expect("weapon should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_vacuum_delete",
+                "name": "Deleted Blade"
+            }),
+        )
+        .expect("second weapon should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_vacuum_keep",
+                "name": "Compact Blade",
+                "gem": { "_id": "@gem:lnk_vacuum_gem" }
+            }),
+        )
+        .expect("weapon should update");
+    engine
+        .delete_by_id("@weapon:lnk_vacuum_delete")
+        .expect("weapon should delete");
+
+    let data_path = database.path.join("weapon.drw");
+    let before_len = fs::metadata(&data_path)
+        .expect("weapon data metadata should read")
+        .len();
+    assert!(
+        fs::read_to_string(&data_path)
+            .expect("weapon data should read")
+            .contains("!!DEAD!!")
+    );
+
+    let report = engine
+        .vacuum_drawer("weapon")
+        .expect("vacuum should succeed");
+
+    let after_contents = fs::read_to_string(&data_path).expect("weapon data should read");
+    let after_len = fs::metadata(&data_path)
+        .expect("weapon data metadata should read")
+        .len();
+
+    assert_eq!(report.records_rewritten, 1);
+    assert_eq!(report.data_bytes_before, before_len);
+    assert_eq!(report.data_bytes_after, after_len);
+    assert!(report.bytes_reclaimed > 0);
+    assert!(after_len < before_len);
+    assert!(!after_contents.contains("!!DEAD!!"));
+
+    let weapons = engine
+        .find_all("weapon")
+        .expect("weapons should read after vacuum");
+    assert_eq!(weapons.len(), 1);
+    assert_eq!(weapons[0]["name"], "Compact Blade");
+    assert_eq!(weapons[0]["gem"]["element"], "Light");
+
+    let restarted_engine =
+        WardrobeEngine::open(&database_directory).expect("engine should reopen after vacuum");
+    let weapon = restarted_engine
+        .find_by_id("@weapon:lnk_vacuum_keep")
+        .expect("lookup should succeed")
+        .expect("weapon should exist");
+    assert_eq!(weapon["gem"]["potency"], 9001);
+}
+
+#[test]
+fn us_042_vacuum_command_compacts_routed_drawer_scope() {
+    let database = TempDatabase::new("us_042_routed_vacuum_command");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+    let coordinate = StorageCoordinate::new("tenant_vacuum", "prod", "core");
+
+    engine
+        .execute(
+            coordinate.clone(),
+            Command::Upsert {
+                drawer_name: "gem".to_string(),
+                payload: json!({
+                    "_id": "@gem:lnk_routed_keep",
+                    "element": "Long Element Value",
+                    "potency": 1
+                }),
+            },
+        )
+        .expect("routed gem should upsert");
+    engine
+        .execute(
+            coordinate.clone(),
+            Command::Upsert {
+                drawer_name: "gem".to_string(),
+                payload: json!({
+                    "_id": "@gem:lnk_routed_keep",
+                    "element": "Air",
+                    "potency": 2
+                }),
+            },
+        )
+        .expect("routed gem should update");
+
+    let scoped_data_path = database
+        .path
+        .join("tenant_vacuum")
+        .join("prod")
+        .join("core")
+        .join("gem.drw");
+    assert!(
+        fs::read_to_string(&scoped_data_path)
+            .expect("routed data should read")
+            .contains("!!DEAD!!")
+    );
+
+    let result = engine
+        .execute(
+            coordinate.clone(),
+            Command::Vacuum {
+                drawer_name: "gem".to_string(),
+            },
+        )
+        .expect("routed vacuum should succeed");
+
+    let CommandResult::Vacuumed(report) = result else {
+        panic!("expected vacuum report");
+    };
+
+    assert_eq!(report.records_rewritten, 1);
+    assert!(report.bytes_reclaimed > 0);
+    assert!(!database.path.join("gem.drw").exists());
+    assert!(
+        !fs::read_to_string(&scoped_data_path)
+            .expect("routed data should read")
+            .contains("!!DEAD!!")
+    );
+
+    let result = engine
+        .execute(
+            coordinate,
+            Command::FindAll {
+                drawer_name: "gem".to_string(),
+            },
+        )
+        .expect("routed find should succeed");
+    let CommandResult::Records(records) = result else {
+        panic!("expected records");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["element"], "Air");
+}

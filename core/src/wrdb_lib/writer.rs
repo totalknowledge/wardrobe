@@ -25,6 +25,16 @@ impl DatabaseWriter {
         Ok(self.file_handle.metadata()?.len())
     }
 
+    pub fn rewrite_all(&mut self, contents: &[u8]) -> std::io::Result<()> {
+        self.file_handle.set_len(0)?;
+        self.file_handle.seek(SeekFrom::Start(0))?;
+        self.file_handle.write_all(contents)?;
+        self.file_handle.flush()?;
+        self.file_handle.sync_all()?;
+
+        Ok(())
+    }
+
     pub fn append_record(
         &mut self,
         record_payload: &[u8],

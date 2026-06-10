@@ -1,4 +1,5 @@
 use crate::wrdb_lib::database::Database;
+use crate::wrdb_lib::drawer::VacuumReport;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
@@ -173,6 +174,9 @@ pub enum Command {
     Delete {
         pointer: String,
     },
+    Vacuum {
+        drawer_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +186,7 @@ pub enum CommandResult {
     Record(Option<Value>),
     Count(usize),
     Deleted(bool),
+    Vacuumed(VacuumReport),
 }
 
 enum SortableValue<'a> {
@@ -328,6 +333,10 @@ impl WardrobeEngine {
         Self::delete_by_id_in_database(&self.database_core, pointer, ExecutionContext::root())
     }
 
+    pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
+        Self::vacuum_drawer_in_database(&self.database_core, drawer_name, ExecutionContext::root())
+    }
+
     pub fn execute(
         &self,
         coordinate: StorageCoordinate,
@@ -393,6 +402,10 @@ impl WardrobeEngine {
             Command::Delete { pointer } => {
                 Self::delete_by_id_in_database(database, &pointer, context)
                     .map(CommandResult::Deleted)
+            }
+            Command::Vacuum { drawer_name } => {
+                Self::vacuum_drawer_in_database(database, &drawer_name, context)
+                    .map(CommandResult::Vacuumed)
             }
         }
     }
@@ -765,6 +778,28 @@ impl WardrobeEngine {
         };
 
         Ok(count)
+    }
+
+    fn vacuum_drawer_in_database(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<VacuumReport> {
+        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{}' was not found", drawer_name),
+            ));
+        };
+
+        Self::write_lock(&drawer)?.vacuum()
     }
 
     fn find_by_id_in_database(
