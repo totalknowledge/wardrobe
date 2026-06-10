@@ -4,7 +4,9 @@ use common::TempDatabase;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use wardrobe_core::{OrderDirection, QueryModifiers, WardrobeEngine};
+use wardrobe_core::{
+    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, WardrobeEngine,
+};
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
     let cascade_delete_rules = fields
@@ -1214,4 +1216,205 @@ fn us_033_count_ignores_query_pagination_modifiers() {
         .expect("count should succeed");
 
     assert_eq!(count, 3);
+}
+
+#[test]
+fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
+    let database = TempDatabase::new("us_034_execute_routes_nested_paths");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+    let coordinate = StorageCoordinate::new("tenant_1", "production_db", "core_schema");
+
+    let result = engine
+        .execute(
+            coordinate.clone(),
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "@weapon:lnk_us_034_blade",
+                    "name": "Tenant Blade"
+                }),
+            },
+        )
+        .expect("routed upsert should succeed");
+
+    assert_eq!(
+        result,
+        CommandResult::Pointer("@weapon:lnk_us_034_blade".to_string())
+    );
+
+    assert!(
+        database
+            .path
+            .join("tenant_1")
+            .join("production_db")
+            .join("core_schema")
+            .join("weapon.drw")
+            .is_file()
+    );
+    assert!(!database.path.join("weapon.drw").exists());
+
+    let result = engine
+        .execute(
+            coordinate,
+            Command::FindAll {
+                drawer_name: "weapon".to_string(),
+            },
+        )
+        .expect("routed find all should succeed");
+
+    let CommandResult::Records(records) = result else {
+        panic!("expected records result");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["name"], "Tenant Blade");
+}
+
+#[test]
+fn us_034_storage_coordinates_isolate_neighboring_tenants() {
+    let database = TempDatabase::new("us_034_isolates_neighboring_tenants");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+    let tenant_a = StorageCoordinate::new("tenant_a", "production_db", "core_schema");
+    let tenant_b = StorageCoordinate::new("tenant_b", "production_db", "core_schema");
+
+    for (coordinate, name) in [
+        (tenant_a.clone(), "Tenant A Blade"),
+        (tenant_b.clone(), "Tenant B Blade"),
+    ] {
+        engine
+            .execute(
+                coordinate,
+                Command::Upsert {
+                    drawer_name: "weapon".to_string(),
+                    payload: json!({
+                        "_id": "@weapon:lnk_shared_key",
+                        "name": name
+                    }),
+                },
+            )
+            .expect("routed upsert should succeed");
+    }
+
+    let deleted = engine
+        .execute(
+            tenant_a.clone(),
+            Command::Delete {
+                pointer: "@weapon:lnk_shared_key".to_string(),
+            },
+        )
+        .expect("routed delete should succeed");
+    assert_eq!(deleted, CommandResult::Deleted(true));
+
+    let tenant_a_count = engine
+        .execute(
+            tenant_a,
+            Command::Count {
+                drawer_name: "weapon".to_string(),
+                filter: None,
+                modifiers: None,
+            },
+        )
+        .expect("tenant a count should succeed");
+    let tenant_b_count = engine
+        .execute(
+            tenant_b.clone(),
+            Command::Count {
+                drawer_name: "weapon".to_string(),
+                filter: None,
+                modifiers: None,
+            },
+        )
+        .expect("tenant b count should succeed");
+
+    assert_eq!(tenant_a_count, CommandResult::Count(0));
+    assert_eq!(tenant_b_count, CommandResult::Count(1));
+
+    let tenant_b_record = engine
+        .execute(
+            tenant_b,
+            Command::FindById {
+                pointer: "@weapon:lnk_shared_key".to_string(),
+            },
+        )
+        .expect("tenant b lookup should succeed");
+
+    let CommandResult::Record(Some(record)) = tenant_b_record else {
+        panic!("expected tenant b record");
+    };
+    assert_eq!(record["name"], "Tenant B Blade");
+}
+
+#[test]
+fn us_034_routed_nested_objects_and_hydration_stay_inside_coordinate() {
+    let database = TempDatabase::new("us_034_nested_hydration_stays_routed");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+    let coordinate = StorageCoordinate::new("tenant_nested", "production_db", "core_schema");
+
+    engine
+        .execute(
+            coordinate.clone(),
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "@weapon:lnk_us_034_staff",
+                    "name": "Routed Staff",
+                    "gem": {
+                        "_id": "@gem:lnk_us_034_gem",
+                        "element": "Route",
+                        "potency": 700
+                    }
+                }),
+            },
+        )
+        .expect("routed nested upsert should succeed");
+
+    assert!(
+        database
+            .path
+            .join("tenant_nested")
+            .join("production_db")
+            .join("core_schema")
+            .join("gem.drw")
+            .is_file()
+    );
+    assert!(!database.path.join("gem.drw").exists());
+
+    let result = engine
+        .execute(
+            coordinate,
+            Command::FindByFilter {
+                drawer_name: "weapon".to_string(),
+                filter: json!({ "gem": { "_id": "us_034_gem" } }),
+                modifiers: None,
+            },
+        )
+        .expect("routed filtered query should succeed");
+
+    let CommandResult::Records(records) = result else {
+        panic!("expected records result");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["gem"]["element"], "Route");
+}
+
+#[test]
+fn us_034_storage_coordinate_rejects_path_traversal_segments() {
+    let database = TempDatabase::new("us_034_rejects_path_traversal");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    let error = engine
+        .execute(
+            StorageCoordinate::new("tenant", "..", "schema"),
+            Command::Count {
+                drawer_name: "weapon".to_string(),
+                filter: None,
+                modifiers: None,
+            },
+        )
+        .expect_err("path traversal coordinate should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
