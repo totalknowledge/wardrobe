@@ -4,7 +4,7 @@ use common::TempDatabase;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use wardrobe_core::WardrobeEngine;
+use wardrobe_core::{OrderDirection, QueryModifiers, WardrobeEngine};
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
     let cascade_delete_rules = fields
@@ -1081,4 +1081,137 @@ fn us_032_count_rejects_non_object_filters() {
         .expect_err("non-object filter should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn us_033_find_by_filter_applies_sorting_before_offset_and_limit() {
+    let database = TempDatabase::new("us_033_sort_offset_limit");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    for (id, name, damage) in [
+        ("low", "Training Blade", 10),
+        ("high", "Sunblade", 40),
+        ("mid", "Moonblade", 20),
+        ("higher", "Stormblade", 30),
+    ] {
+        engine
+            .upsert(
+                "weapon",
+                json!({
+                    "_id": format!("@weapon:lnk_us_033_{id}"),
+                    "name": name,
+                    "damage": damage
+                }),
+            )
+            .expect("weapon should upsert");
+    }
+
+    let records = engine
+        .find_by_filter(
+            "weapon",
+            json!({ "name": "%blade" }),
+            Some(QueryModifiers {
+                order_by: Some("damage".to_string()),
+                order_direction: Some(OrderDirection::Descending),
+                offset: Some(1),
+                limit: Some(2),
+            }),
+        )
+        .expect("filtered query should succeed");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["name"], "Stormblade");
+    assert_eq!(records[1]["name"], "Moonblade");
+}
+
+#[test]
+fn us_033_sorting_pushes_missing_and_mixed_type_fields_to_the_end() {
+    let database = TempDatabase::new("us_033_sort_missing_and_mixed");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    for payload in [
+        json!({
+            "_id": "@weapon:lnk_us_033_damage_20",
+            "name": "Twenty",
+            "damage": 20
+        }),
+        json!({
+            "_id": "@weapon:lnk_us_033_damage_text",
+            "name": "Text Damage",
+            "damage": "unknown"
+        }),
+        json!({
+            "_id": "@weapon:lnk_us_033_damage_missing",
+            "name": "Missing Damage"
+        }),
+        json!({
+            "_id": "@weapon:lnk_us_033_damage_30",
+            "name": "Thirty",
+            "damage": 30
+        }),
+    ] {
+        engine
+            .upsert("weapon", payload)
+            .expect("weapon should upsert");
+    }
+
+    let records = engine
+        .find_by_filter(
+            "weapon",
+            json!({}),
+            Some(QueryModifiers {
+                order_by: Some("damage".to_string()),
+                order_direction: Some(OrderDirection::Descending),
+                offset: None,
+                limit: None,
+            }),
+        )
+        .expect("query should succeed");
+
+    let names = records
+        .iter()
+        .map(|record| record["name"].as_str().expect("name should be a string"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        vec!["Thirty", "Twenty", "Text Damage", "Missing Damage"]
+    );
+}
+
+#[test]
+fn us_033_count_ignores_query_pagination_modifiers() {
+    let database = TempDatabase::new("us_033_count_ignores_modifiers");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let mut engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    for i in 0..3 {
+        engine
+            .upsert(
+                "weapon",
+                json!({
+                    "_id": format!("@weapon:lnk_us_033_count_{i}"),
+                    "name": format!("Blade {i}"),
+                    "damage": i
+                }),
+            )
+            .expect("weapon should upsert");
+    }
+
+    let count = engine
+        .count(
+            "weapon",
+            Some(json!({ "name": "Blade %" })),
+            Some(QueryModifiers {
+                order_by: Some("damage".to_string()),
+                order_direction: Some(OrderDirection::Descending),
+                offset: Some(1),
+                limit: Some(1),
+            }),
+        )
+        .expect("count should succeed");
+
+    assert_eq!(count, 3);
 }

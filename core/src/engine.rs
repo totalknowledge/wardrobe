@@ -1,11 +1,47 @@
 use crate::wrdb_lib::database::Database;
 use serde_json::{Map, Value};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::io::{Error, ErrorKind, Result};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Default)]
-pub struct QueryModifiers;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryModifiers {
+    pub order_by: Option<String>,
+    pub order_direction: Option<OrderDirection>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+enum SortableValue<'a> {
+    Bool(bool),
+    Number(f64),
+    String(&'a str),
+}
+
+#[derive(Clone, Copy)]
+enum SortableType {
+    Bool,
+    Number,
+    String,
+}
+
+impl SortableValue<'_> {
+    fn compare_same_type(&self, other: Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Bool(left), Self::Bool(right)) => Some(left.cmp(&right)),
+            (Self::Number(left), Self::Number(right)) => left.partial_cmp(&right),
+            (Self::String(left), Self::String(right)) => Some(left.cmp(&right)),
+            _ => None,
+        }
+    }
+}
 
 pub struct WardrobeEngine {
     database_core: Database,
@@ -82,7 +118,7 @@ impl WardrobeEngine {
         &mut self,
         drawer_name: &str,
         filter: Value,
-        _modifiers: Option<QueryModifiers>,
+        modifiers: Option<QueryModifiers>,
     ) -> Result<Vec<Value>> {
         let filter_map = Self::filter_map(&filter)?;
 
@@ -96,6 +132,7 @@ impl WardrobeEngine {
         };
 
         records.retain(|record| Self::record_matches_filter(record, filter_map));
+        Self::apply_query_modifiers(&mut records, modifiers.as_ref());
         self.hydrate_records(&mut records, true)?;
 
         Ok(records)
@@ -386,6 +423,90 @@ impl WardrobeEngine {
         filter
             .as_object()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object"))
+    }
+
+    fn apply_query_modifiers(records: &mut Vec<Value>, modifiers: Option<&QueryModifiers>) {
+        let Some(modifiers) = modifiers else {
+            return;
+        };
+
+        if let Some(order_by) = modifiers.order_by.as_deref() {
+            let direction = modifiers
+                .order_direction
+                .unwrap_or(OrderDirection::Ascending);
+            let sort_type = Self::sort_type_for_records(records, order_by);
+            records.sort_by(|left, right| {
+                Self::compare_records_by_field(left, right, order_by, direction, sort_type)
+            });
+        }
+
+        let offset = modifiers.offset.unwrap_or(0);
+        if offset > 0 {
+            if offset >= records.len() {
+                records.clear();
+            } else {
+                records.drain(0..offset);
+            }
+        }
+
+        if let Some(limit) = modifiers.limit {
+            records.truncate(limit);
+        }
+    }
+
+    fn compare_records_by_field(
+        left: &Value,
+        right: &Value,
+        field_name: &str,
+        direction: OrderDirection,
+        sort_type: Option<SortableType>,
+    ) -> Ordering {
+        let Some(sort_type) = sort_type else {
+            return Ordering::Equal;
+        };
+
+        let left_value = left.get(field_name);
+        let right_value = right.get(field_name);
+
+        match (
+            left_value.and_then(|value| Self::sortable_value(value, sort_type)),
+            right_value.and_then(|value| Self::sortable_value(value, sort_type)),
+        ) {
+            (Some(left_sortable), Some(right_sortable)) => {
+                match left_sortable.compare_same_type(right_sortable) {
+                    Some(ordering) => match direction {
+                        OrderDirection::Ascending => ordering,
+                        OrderDirection::Descending => ordering.reverse(),
+                    },
+                    None => Ordering::Equal,
+                }
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+
+    fn sort_type_for_records(records: &[Value], field_name: &str) -> Option<SortableType> {
+        records.iter().find_map(|record| {
+            record.get(field_name).and_then(|value| match value {
+                Value::Bool(_) => Some(SortableType::Bool),
+                Value::Number(_) => Some(SortableType::Number),
+                Value::String(_) => Some(SortableType::String),
+                _ => None,
+            })
+        })
+    }
+
+    fn sortable_value(value: &Value, sort_type: SortableType) -> Option<SortableValue<'_>> {
+        match (value, sort_type) {
+            (Value::Bool(value), SortableType::Bool) => Some(SortableValue::Bool(*value)),
+            (Value::Number(value), SortableType::Number) => {
+                value.as_f64().map(SortableValue::Number)
+            }
+            (Value::String(value), SortableType::String) => Some(SortableValue::String(value)),
+            _ => None,
+        }
     }
 
     fn hydrate_records(&mut self, records: &mut [Value], include_ids: bool) -> Result<()> {

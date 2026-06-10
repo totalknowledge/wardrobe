@@ -5,7 +5,7 @@ pub mod wrdb_lib;
 
 pub mod engine;
 
-pub use engine::{QueryModifiers, WardrobeEngine};
+pub use engine::{OrderDirection, QueryModifiers, WardrobeEngine};
 pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::Drawer;
 pub use wrdb_lib::reader::DatabaseReader;
