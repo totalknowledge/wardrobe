@@ -21,6 +21,10 @@ Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 - `WardrobeEngine`
 - `Command`
 - `CommandResult`
+- `WardrobeClient`
+- `ConnectionTarget`
+- `DriverKind`
+- `DEFAULT_NETWORK_PORT`
 - `StorageCoordinate`
 - `StorageLocator`
 - `StorageScope`
@@ -62,6 +66,8 @@ Supporting execution and routing types include:
 
 The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.
 
+`WardrobeClient::open(...)` is the deployment-neutral client entrypoint inside `wardrobe-core`. It accepts a direct file-system path, an embedded URI, a TCP URI, or a Unix socket URI. Embedded paths delegate to the local engine immediately. TCP and Unix socket drivers are selected and typed now, but return `Unsupported` for operations until the server protocol is implemented.
+
 ## Usage
 
 ### Embedded Quick Start
@@ -88,6 +94,30 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 ```
+
+### Driver-Selecting Client
+
+```rust
+use wardrobe_core::WardrobeClient;
+
+fn connect() -> std::io::Result<()> {
+    let embedded = WardrobeClient::open("./data")?;
+    let embedded_uri = WardrobeClient::open("wardrobe://local/./data")?;
+    let network = WardrobeClient::open("wardrobe://localhost:24842")?;
+    let socket = WardrobeClient::open("wardrobe+unix:///tmp/wardrobe.sock")?;
+
+    Ok(())
+}
+```
+
+Supported connection shapes:
+
+- Direct path: `./data`
+- Embedded URI: `wardrobe://local/path/to/data`
+- File URI: `wardrobe+file://path/to/data`
+- TCP URI: `wardrobe://localhost:24842`
+- TCP default port: `wardrobe://localhost` uses `24842`
+- Unix socket URI: `wardrobe+unix:///tmp/wardrobe.sock`
 
 ### Filtering, Counting, and Pagination
 

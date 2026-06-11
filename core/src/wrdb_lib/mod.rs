@@ -1,3 +1,4 @@
+pub mod connection;
 pub mod database;
 pub mod drawer;
 pub mod reader;

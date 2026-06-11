@@ -65,7 +65,7 @@ Wardrobe is expected to move from a single Rust crate into a Cargo workspace. Th
 - An embedded Rust engine library.
 - A standalone server daemon.
 - A command-line management tool.
-- Future cross-language bindings and client packages.
+- Future cross-language bindings with one public package per language ecosystem.
 
 Target layout:
 
@@ -96,9 +96,11 @@ The repository root `Cargo.toml` should become the workspace configuration. `Car
 
 ### Core Crate
 
-The `core` crate should be the embedded database engine library. It should contain pure storage mechanics, drawer behavior, memory indexing, recyclers, query orchestration, and the public Rust API for embedded use.
+The `core` crate should be the single Rust library package. It should contain pure storage mechanics, drawer behavior, memory indexing, recyclers, query orchestration, and the public Rust API for embedded use and future server-backed access.
 
 The core crate should not depend on server transport code, command-line parsing, or language binding packaging.
+
+The driver-selection API belongs inside the core crate as an internal module boundary rather than a separate package boundary. This keeps Rust consumers on one crate while still allowing language bindings to choose their own packaging strategy later.
 
 ### Server Crate
 
@@ -120,58 +122,47 @@ Initial binding targets may include Node.js and Python, but those should be adde
 
 ## Driver Pattern
 
-Foreign language libraries should expose a uniform public interface while choosing an internal driver based on the connection string.
+Client libraries should expose a uniform public interface while choosing an internal driver based on the connection string.
 
 Examples:
 
 ```text
+./data
 wardrobe://local/path/to/data
-wardrobe://localhost:7300
+wardrobe+file://path/to/data
+wardrobe://localhost:24842
+wardrobe+unix:///tmp/wardrobe.sock
 ```
 
-The local path form should activate an embedded driver that calls the compiled core storage engine in-process through a native binding. The network form should activate a network driver that serializes commands into protocol frames and sends them to the standalone Wardrobe server.
+The direct path, `wardrobe://local/...`, `wardrobe+file://...`, and `file://...` forms activate an embedded driver that calls the compiled core storage engine in-process. The TCP form activates a network driver that serializes commands into protocol frames and sends them to the standalone Wardrobe server. The Unix socket form activates a local socket driver for same-machine client/server use.
+
+The default TCP port is `24842`.
 
 This keeps application code stable while allowing deployment to choose between local embedded storage and client/server storage.
 
 ## Foreign Language Package Strategy
 
-Managed runtimes such as Node.js and Python treat compiled native binaries as opaque artifacts. JavaScript bundlers cannot tree-shake native binaries because they cannot inspect the binary's abstract syntax tree.
+Wardrobe should expose one public package per language ecosystem wherever possible. Package users should install one thing, while the package internally chooses between embedded, TCP, and Unix socket drivers from the connection string.
 
-To avoid forcing lightweight deployments to carry the embedded storage engine, foreign language ecosystems should be split into separate packages.
+This keeps the ecosystem manageable:
 
-### Network-Only Client Package
+- One Rust crate.
+- One npm package when JavaScript bindings arrive.
+- One pip package when Python bindings arrive.
+- One public API shape per language.
 
-Example Node package name:
+### Internal Driver Modes
 
-```text
-@wardrobe/client
-```
+Embedded mode:
 
-This package should be pure TypeScript or JavaScript and contain no compiled native binaries. It should connect to a standalone Wardrobe server using runtime socket APIs.
+- Uses the local storage engine in-process.
+- Good fit for local-first apps, desktop software, background jobs, and tests.
 
-Target characteristics:
+Client mode:
 
-- Small install size.
-- No `.node`, `.dll`, `.so`, or similar native artifacts.
-- Good fit for serverless functions, edge-adjacent runtimes that allow sockets, and applications that only need a remote client.
-- Bundler-friendly and tree-shakable where the runtime supports the required network APIs.
-
-### Local Embedded Package
-
-Example Node package name:
-
-```text
-@wardrobe/embedded
-```
-
-This package should provide a high-level wrapper API bundled with precompiled native binding binaries built from the Rust core crate.
-
-Target characteristics:
-
-- Larger install size.
-- Includes native binary artifacts.
-- Good fit for long-running background processes, local automation, desktop applications, Electron, Tauri, and deployments that need a zero-server local database.
-- Exposes the same public API shape as the network client where practical, while using the embedded driver internally.
+- Uses TCP or Unix sockets to talk to a running Wardrobe server.
+- Does not touch local drawer files directly.
+- Good fit for shared server deployments and language runtimes that should not load the embedded engine.
 
 ## Record Identity
 

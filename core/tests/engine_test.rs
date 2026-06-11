@@ -116,6 +116,32 @@ fn wal_records(database: &TempDatabase) -> Vec<serde_json::Value> {
 }
 
 #[test]
+fn embedded_engine_opens_direct_storage_path_and_writes_records() {
+    let database = TempDatabase::new("embedded_engine_direct_storage_path");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let pointer = engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "@gem:lnk_embedded_target",
+                "element": "Fire"
+            }),
+        )
+        .expect("embedded engine should write directly");
+
+    assert_eq!(pointer, "@gem:embedded_target");
+    assert!(database.path.join("gem.drw").is_file());
+    assert_eq!(
+        engine
+            .count("gem", None, None)
+            .expect("count should succeed"),
+        1
+    );
+}
+
+#[test]
 fn find_all_loads_existing_drawer_files_after_restart() {
     let database = TempDatabase::new("find_all_loads_existing_drawer_files");
     let database_directory = database.path.to_string_lossy().into_owned();

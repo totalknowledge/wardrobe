@@ -3,12 +3,15 @@
 #[path = "wrdb_lib/mod.rs"]
 pub mod wrdb_lib;
 
+pub mod client;
 pub mod engine;
 
+pub use client::WardrobeClient;
 pub use engine::{
     Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageLocator,
     StorageScope, WardrobeEngine,
 };
+pub use wrdb_lib::connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::{Drawer, VacuumReport};
 pub use wrdb_lib::reader::DatabaseReader;
