@@ -3,7 +3,7 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::fs;
-use wardrobe_core::Drawer;
+use wardrobe_core::{DatabaseWriter, Drawer, PlainTextJsonFormat, Recycler, StorageFormat};
 
 fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_json::Value {
     let metadata_path = database_directory
@@ -319,7 +319,7 @@ fn us_017_metadata_sidecar_tracks_record_count_during_standard_writes() {
 }
 
 #[test]
-fn us_015_index_journal_tracks_blocks_and_rebuilds_recycler_on_open() {
+fn us_015_index_journal_tracks_blocks_and_reuses_dead_slots_after_reopen() {
     let database_directory = TempDatabase::new("drawer_index_block_journal_recycler");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
@@ -462,6 +462,74 @@ fn us_046_upsert_reuses_recycler_slot_before_appending() {
         .len();
 
     assert!(len_after_append > len_after_reuse);
+}
+
+#[test]
+fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
+    let database_directory = TempDatabase::new("us_047_lazy_recycler_cache");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let data_path = database_directory.path.join("socks.drw");
+    let index_path = database_directory.path.join("socks_index.drw");
+    let reclaimed_record = json!({
+        "_id": "@socks:lnk_reclaimed",
+        "color": "Gold"
+    });
+    let serialized_record =
+        PlainTextJsonFormat::serialize_record(&reclaimed_record).expect("record should serialize");
+    let target_size_class = Recycler::new().calculate_aligned_size(serialized_record.len());
+    let dead_offset = {
+        let mut data_writer =
+            DatabaseWriter::open_drawer(&data_path).expect("data writer should open");
+        let dead_offset = data_writer
+            .append_record(&serialized_record, target_size_class)
+            .expect("seed record should append");
+        data_writer
+            .write_tombstone_at_offset(dead_offset, target_size_class)
+            .expect("seed record should tombstone");
+        dead_offset
+    };
+
+    let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+        .expect("drawer should open before free-list index entry exists");
+    let len_before_lazy_scan = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+
+    let dead_index_entry = json!({
+        "f": "_id",
+        "k": "@socks:lnk_reclaimed",
+        "o": dead_offset,
+        "len": serialized_record.len(),
+        "class": target_size_class,
+        "crc": 0,
+        "status": 0
+    });
+    let serialized_index =
+        PlainTextJsonFormat::serialize_record(&dead_index_entry).expect("index should serialize");
+    let index_size_class = Recycler::new().calculate_aligned_size(serialized_index.len());
+    DatabaseWriter::open_drawer(&index_path)
+        .expect("index writer should open")
+        .append_aligned_index(&serialized_index, index_size_class)
+        .expect("dead index entry should append after drawer open");
+
+    drawer
+        .upsert_record(reclaimed_record)
+        .expect("upsert should succeed")
+        .expect("record should validate");
+
+    let len_after_lazy_reuse = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+    assert_eq!(len_after_lazy_reuse, len_before_lazy_scan);
+
+    let reused_offset = load_index_records(&database_directory, "socks")
+        .iter()
+        .rev()
+        .find(|record| record["k"] == "@socks:lnk_reclaimed" && record["status"] == 1)
+        .and_then(|record| record["o"].as_u64())
+        .expect("live record should be written after lazy cache scan");
+    assert_eq!(reused_offset, dead_offset);
 }
 
 #[test]

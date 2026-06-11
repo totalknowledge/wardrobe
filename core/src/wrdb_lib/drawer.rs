@@ -165,6 +165,7 @@ pub struct Drawer {
     index_writer: DatabaseWriter,
 
     data_recycler: Recycler,
+    data_recycler_cache_initialized: bool,
     index_recycler: Recycler,
 
     primary_memory_index: HashMap<String, u64>,
@@ -176,6 +177,7 @@ pub struct Drawer {
     cascade_delete_rules: BTreeMap<String, bool>,
     schema: Option<Value>,
     record_count: usize,
+    index_file_path: PathBuf,
     meta_file_path: PathBuf,
 }
 
@@ -197,7 +199,7 @@ impl Drawer {
         let index_writer = DatabaseWriter::open_drawer(&index_file_path)?;
         let index_reader = DatabaseReader::open_drawer(&index_file_path)?;
 
-        let mut data_recycler = Recycler::new();
+        let data_recycler = Recycler::new();
         let mut index_recycler = Recycler::new();
 
         let mut primary_memory_index = HashMap::new();
@@ -319,9 +321,7 @@ impl Drawer {
 
         let mut data_block_index = HashMap::new();
         for (data_offset, block_entry) in data_block_journal {
-            if block_entry.status == DATA_BLOCK_STATUS_DEAD {
-                data_recycler.register_free_slot(block_entry.size_class, data_offset);
-            } else {
+            if block_entry.status != DATA_BLOCK_STATUS_DEAD {
                 data_block_index.insert(data_offset, block_entry);
             }
         }
@@ -336,6 +336,7 @@ impl Drawer {
             data_reader,
             index_writer,
             data_recycler,
+            data_recycler_cache_initialized: false,
             index_recycler,
             primary_memory_index,
             secondary_memory_index,
@@ -346,6 +347,7 @@ impl Drawer {
             cascade_delete_rules,
             schema,
             record_count,
+            index_file_path,
             meta_file_path,
         };
 
@@ -654,6 +656,7 @@ impl Drawer {
         self.index_file_offsets = index_file_offsets;
         self.data_block_index = data_block_index;
         self.data_recycler = Recycler::new();
+        self.data_recycler_cache_initialized = true;
         self.index_recycler = Recycler::new();
         self.record_count = self.primary_memory_index.len();
         self.persist_metadata()?;
@@ -1209,6 +1212,8 @@ impl Drawer {
         serialized_record: &[u8],
         target_size_class: usize,
     ) -> std::io::Result<u64> {
+        self.ensure_data_recycler_cache()?;
+
         if let Some(recycled_offset) = self.data_recycler.pop_available_slot(target_size_class) {
             self.data_writer.overwrite_at_offset(
                 recycled_offset,
@@ -1220,6 +1225,47 @@ impl Drawer {
             self.data_writer
                 .append_record(serialized_record, target_size_class)
         }
+    }
+
+    fn ensure_data_recycler_cache(&mut self) -> std::io::Result<()> {
+        if self.data_recycler_cache_initialized {
+            return Ok(());
+        }
+
+        if self.index_writer.current_length()? == 0 {
+            self.data_recycler_cache_initialized = true;
+            return Ok(());
+        }
+
+        let index_reader = DatabaseReader::open_drawer(&self.index_file_path)?;
+        let mut data_block_journal = HashMap::new();
+        let mut index_lines = Vec::new();
+
+        index_reader.stream_with_offsets(|_offset, line| {
+            if !PlainTextJsonFormat::is_tombstone(line.as_bytes()) {
+                index_lines.push(line.to_string());
+            }
+        })?;
+
+        for line in index_lines {
+            if let Some(index_entry) = PlainTextJsonFormat::deserialize_record(line.as_bytes())? {
+                if let Some((data_offset, block_entry)) =
+                    DataBlockIndexEntry::from_index_entry(&index_entry)
+                {
+                    data_block_journal.insert(data_offset, block_entry);
+                }
+            }
+        }
+
+        for (data_offset, block_entry) in data_block_journal {
+            if block_entry.status == DATA_BLOCK_STATUS_DEAD {
+                self.data_recycler
+                    .register_free_slot(block_entry.size_class, data_offset);
+            }
+        }
+
+        self.data_recycler_cache_initialized = true;
+        Ok(())
     }
 
     fn write_data_block_status_log(

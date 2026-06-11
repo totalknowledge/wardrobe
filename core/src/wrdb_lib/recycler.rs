@@ -31,7 +31,9 @@ impl Recycler {
             .entry(slot_byte_size)
             .or_insert_with(Vec::new);
 
-        offset_stack.push(byte_offset);
+        if !offset_stack.contains(&byte_offset) {
+            offset_stack.push(byte_offset);
+        }
     }
 
     pub fn pop_available_slot(&mut self, target_byte_size: usize) -> Option<u64> {
