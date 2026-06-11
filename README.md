@@ -48,6 +48,7 @@ The main embedded entry points on `WardrobeEngine` are:
 - `delete`
 - `delete_by_id`
 - `vacuum_drawer`
+- `migrate_drawer`
 - `cached_drawer_count`
 - `execute`
 - `execute_in_scope`
@@ -158,6 +159,7 @@ cargo run -p basic-usage
 - Scoped storage routing across database, schema, and drawer isolation models
 - Write-ahead log recovery for incomplete upsert and delete operations
 - Explicit vacuum compaction for reclaiming fragmented drawer storage
+- Lazy and batch schema evolution for legacy drawer layout versions
 - Optional LRU drawer caching to bound open file handles and cached drawer state
 
 ## Tooling

@@ -220,6 +220,9 @@ pub enum Command {
     Vacuum {
         drawer_name: String,
     },
+    Migrate {
+        drawer_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +233,7 @@ pub enum CommandResult {
     Count(usize),
     Deleted(bool),
     Vacuumed(VacuumReport),
+    Migrated(VacuumReport),
 }
 
 enum SortableValue<'a> {
@@ -418,6 +422,10 @@ impl WardrobeEngine {
         Self::vacuum_drawer_in_database(&self.database_core, drawer_name, ExecutionContext::root())
     }
 
+    pub fn migrate_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
+        Self::migrate_drawer_in_database(&self.database_core, drawer_name, ExecutionContext::root())
+    }
+
     pub fn cached_drawer_count(&self) -> Result<usize> {
         Ok(Self::read_lock(&self.database_core)?.cached_drawer_count())
     }
@@ -491,6 +499,10 @@ impl WardrobeEngine {
             Command::Vacuum { drawer_name } => {
                 Self::vacuum_drawer_in_database(database, &drawer_name, context)
                     .map(CommandResult::Vacuumed)
+            }
+            Command::Migrate { drawer_name } => {
+                Self::migrate_drawer_in_database(database, &drawer_name, context)
+                    .map(CommandResult::Migrated)
             }
         }
     }
@@ -780,7 +792,7 @@ impl WardrobeEngine {
             "_id",
             Vec::new(),
         )? {
-            Self::read_lock(&drawer)?.find_all_records()?
+            Self::write_lock(&drawer)?.find_all_records_with_migration()?
         } else {
             Vec::new()
         };
@@ -813,7 +825,7 @@ impl WardrobeEngine {
             "_id",
             Vec::new(),
         )? {
-            Self::read_lock(&drawer)?.find_all_records()?
+            Self::write_lock(&drawer)?.find_all_records_with_migration()?
         } else {
             Vec::new()
         };
@@ -861,8 +873,8 @@ impl WardrobeEngine {
             "_id",
             Vec::new(),
         )? {
-            Self::read_lock(&drawer)?
-                .find_all_records()?
+            Self::write_lock(&drawer)?
+                .find_all_records_with_migration()?
                 .into_iter()
                 .filter(|record| Self::record_matches_filter(record, filter_map, context))
                 .count()
@@ -895,6 +907,28 @@ impl WardrobeEngine {
         Self::write_lock(&drawer)?.vacuum()
     }
 
+    fn migrate_drawer_in_database(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<VacuumReport> {
+        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{}' was not found", drawer_name),
+            ));
+        };
+
+        Self::write_lock(&drawer)?.migrate_all_records()
+    }
+
     fn find_by_id_in_database(
         database_core: &RwLock<Database>,
         pointer: &str,
@@ -909,7 +943,8 @@ impl WardrobeEngine {
             "_id",
             Vec::new(),
         )? {
-            let found_record = Self::read_lock(&drawer)?.find_by_primary_key(&record_key)?;
+            let found_record =
+                Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?;
             if let Some(mut record) = found_record {
                 let mut active_pointer_path = HashSet::from([physical_pointer]);
                 Self::hydrate_value(database_core, &mut record, false, &mut active_pointer_path)?;
@@ -999,9 +1034,9 @@ impl WardrobeEngine {
         };
 
         let (record, cascade_fields, inverse_delete_rules) = {
-            let drawer = Self::read_lock(&drawer)?;
+            let mut drawer = Self::write_lock(&drawer)?;
             (
-                drawer.find_by_primary_key(&record_key)?,
+                drawer.find_by_primary_key_with_migration(&record_key)?,
                 drawer.cascade_delete_fields(),
                 Self::inverse_delete_rules(
                     drawer.delete_rules(),
@@ -1211,8 +1246,8 @@ impl WardrobeEngine {
             return Ok(Vec::new());
         };
 
-        let records = Self::read_lock(&drawer)?
-            .find_all_records()?
+        let records = Self::write_lock(&drawer)?
+            .find_all_records_with_migration()?
             .into_iter()
             .filter(|record| {
                 record
@@ -1905,7 +1940,7 @@ impl WardrobeEngine {
             "_id",
             Vec::new(),
         )? {
-            Self::read_lock(&drawer)?.find_all_records()?
+            Self::write_lock(&drawer)?.find_all_records_with_migration()?
         } else {
             Vec::new()
         };
@@ -2049,7 +2084,7 @@ impl WardrobeEngine {
             "_id",
             Vec::new(),
         )? {
-            Self::read_lock(&drawer)?.find_by_primary_key(&record_key)?
+            Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?
         } else {
             None
         };

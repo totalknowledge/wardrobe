@@ -177,6 +177,7 @@ pub struct Drawer {
     cascade_delete_rules: BTreeMap<String, bool>,
     schema: Option<Value>,
     record_count: usize,
+    metadata_format_version: u8,
     index_file_path: PathBuf,
     meta_file_path: PathBuf,
 }
@@ -222,6 +223,12 @@ impl Drawer {
         let schema = existing_metadata
             .as_ref()
             .and_then(|metadata| metadata.schema.clone());
+        let metadata_format_version = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.format_version)
+            .unwrap_or(DRAWER_METADATA_FORMAT_VERSION);
+        let drawer_needs_format_migration =
+            existing_metadata.is_some() && metadata_format_version < DRAWER_METADATA_FORMAT_VERSION;
         let mut inferred_unique_constraints = if unique_constraints.is_empty() {
             existing_metadata
                 .as_ref()
@@ -292,7 +299,18 @@ impl Drawer {
 
                     if field == primary_key {
                         if let Some(data_offset) = data_offset_val.as_u64() {
-                            primary_memory_index.insert(key.to_string(), data_offset);
+                            let index_key = if drawer_needs_format_migration {
+                                Self::clean_legacy_identifier(key)
+                            } else {
+                                key.to_string()
+                            };
+                            primary_memory_index.insert(index_key, data_offset);
+                        } else if data_offset_val
+                            .as_array()
+                            .is_some_and(|offset_array| offset_array.is_empty())
+                        {
+                            primary_memory_index.remove(key);
+                            primary_memory_index.remove(&Self::clean_legacy_identifier(key));
                         }
                     } else {
                         if !inferred_unique_constraints.contains(&field.to_string()) {
@@ -347,11 +365,14 @@ impl Drawer {
             cascade_delete_rules,
             schema,
             record_count,
+            metadata_format_version,
             index_file_path,
             meta_file_path,
         };
 
-        drawer.persist_metadata()?;
+        if !drawer_needs_format_migration {
+            drawer.persist_metadata()?;
+        }
 
         Ok(drawer)
     }
@@ -492,6 +513,16 @@ impl Drawer {
     pub fn find_by_primary_key(&self, key: &str) -> std::io::Result<Option<Value>> {
         if let Some(&offset) = self.primary_memory_index.get(key) {
             return self.data_reader.read_record_at_offset(offset);
+        }
+        Ok(None)
+    }
+
+    pub fn find_by_primary_key_with_migration(
+        &mut self,
+        key: &str,
+    ) -> std::io::Result<Option<Value>> {
+        if let Some(&offset) = self.primary_memory_index.get(key) {
+            return self.read_record_at_offset_with_lazy_migration(offset);
         }
         Ok(None)
     }
@@ -674,6 +705,23 @@ impl Drawer {
             index_bytes_after,
             bytes_reclaimed: total_before.saturating_sub(total_after),
         })
+    }
+
+    pub fn migrate_all_records(&mut self) -> std::io::Result<VacuumReport> {
+        let mut live_offsets = self
+            .primary_memory_index
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        live_offsets.sort_unstable();
+        live_offsets.dedup();
+
+        for offset in live_offsets {
+            let _ = self.read_record_at_offset_with_lazy_migration(offset)?;
+        }
+
+        self.metadata_format_version = DRAWER_METADATA_FORMAT_VERSION;
+        self.vacuum()
     }
 
     pub fn record_count(&self) -> usize {
@@ -1147,6 +1195,182 @@ impl Drawer {
         (current_file_len - stale_offset) as usize
     }
 
+    fn read_record_at_offset_with_lazy_migration(
+        &mut self,
+        offset: u64,
+    ) -> std::io::Result<Option<Value>> {
+        let Some(record) = self.data_reader.read_record_at_offset(offset)? else {
+            return Ok(None);
+        };
+
+        if !self.needs_format_migration() {
+            return Ok(Some(record));
+        }
+
+        let mut migrated_record = record.clone();
+        if !self.migrate_legacy_record_value(&mut migrated_record) {
+            return Ok(Some(record));
+        }
+
+        self.write_migrated_record_at_offset(offset, &record, &migrated_record)?;
+        Ok(Some(migrated_record))
+    }
+
+    fn write_migrated_record_at_offset(
+        &mut self,
+        offset: u64,
+        old_record: &Value,
+        migrated_record: &Value,
+    ) -> std::io::Result<()> {
+        let old_primary_key_value = old_record
+            .get(&self.primary_key)
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Cannot migrate legacy record without primary key field: {}",
+                        self.primary_key
+                    ),
+                )
+            })?;
+        let new_primary_key_value = migrated_record
+            .get(&self.primary_key)
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Cannot migrate legacy record without primary key field: {}",
+                        self.primary_key
+                    ),
+                )
+            })?;
+
+        let Some((_old_offset, old_block)) =
+            self.historical_block_entry(offset, Some(old_record))?
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Cannot migrate legacy record because its block metadata is missing",
+            ));
+        };
+
+        let serialized_record = PlainTextJsonFormat::serialize_record(migrated_record)?;
+        if serialized_record.len() + 1 > old_block.size_class {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Cannot lazily migrate legacy record because the upgraded payload no longer fits its allocated block",
+            ));
+        }
+
+        let live_block = DataBlockIndexEntry::live(&serialized_record, old_block.size_class);
+        self.data_writer
+            .overwrite_at_offset(offset, &serialized_record, old_block.size_class)?;
+
+        if old_primary_key_value != new_primary_key_value {
+            self.write_index_log(
+                &self.primary_key.clone(),
+                old_primary_key_value,
+                Value::Array(Vec::new()),
+                None,
+            )?;
+            self.primary_memory_index.remove(old_primary_key_value);
+            self.primary_memory_index
+                .remove(&Self::clean_legacy_identifier(old_primary_key_value));
+        }
+
+        self.write_index_log(
+            &self.primary_key.clone(),
+            new_primary_key_value,
+            Value::from(offset),
+            Some(live_block),
+        )?;
+        self.primary_memory_index
+            .insert(new_primary_key_value.to_string(), offset);
+        self.data_block_index.insert(offset, live_block);
+        self.metadata_format_version = DRAWER_METADATA_FORMAT_VERSION;
+        self.persist_metadata()
+    }
+
+    fn needs_format_migration(&self) -> bool {
+        self.metadata_format_version < DRAWER_METADATA_FORMAT_VERSION
+    }
+
+    fn migrate_legacy_record_value(&self, record: &mut Value) -> bool {
+        Self::migrate_legacy_value(record, Some(&self.primary_key))
+    }
+
+    fn migrate_legacy_value(value: &mut Value, object_key: Option<&str>) -> bool {
+        match value {
+            Value::Object(map) => {
+                let mut changed = false;
+                for (key, child_value) in map.iter_mut() {
+                    changed |= Self::migrate_legacy_value(child_value, Some(key.as_str()));
+                }
+                changed
+            }
+            Value::Array(values) => values
+                .iter_mut()
+                .any(|item| Self::migrate_legacy_value(item, None)),
+            Value::String(string_value) => {
+                let migrated_value = if object_key == Some("_id") {
+                    Self::clean_legacy_identifier(string_value)
+                } else if let Some((drawer_name, record_key)) =
+                    Self::try_parse_legacy_pointer(string_value)
+                {
+                    Self::format_legacy_pointer(&drawer_name, &record_key)
+                } else {
+                    return false;
+                };
+
+                if migrated_value != *string_value {
+                    *string_value = migrated_value;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn clean_legacy_identifier(value: &str) -> String {
+        if let Some((_drawer_name, record_key)) = Self::try_parse_legacy_pointer(value) {
+            return record_key;
+        }
+
+        value
+            .trim_start_matches('@')
+            .strip_prefix("lnk_")
+            .unwrap_or_else(|| value.trim_start_matches('@'))
+            .to_string()
+    }
+
+    fn try_parse_legacy_pointer(value: &str) -> Option<(String, String)> {
+        let clean_pointer = value.strip_prefix('@')?;
+        let (drawer_name, record_key) = clean_pointer.split_once(':')?;
+        if drawer_name.is_empty() || record_key.is_empty() || record_key.contains(':') {
+            return None;
+        }
+
+        Some((
+            drawer_name.to_string(),
+            record_key
+                .strip_prefix("lnk_")
+                .unwrap_or(record_key)
+                .to_string(),
+        ))
+    }
+
+    fn format_legacy_pointer(drawer_name: &str, record_key: &str) -> String {
+        format!(
+            "@{}:{}",
+            drawer_name.trim_start_matches('@'),
+            Self::clean_legacy_identifier(record_key)
+        )
+    }
+
     fn write_index_log(
         &mut self,
         field: &str,
@@ -1348,6 +1572,29 @@ impl Drawer {
         for line in raw_lines {
             if let Some(record_value) = PlainTextJsonFormat::deserialize_record(line.as_bytes())? {
                 live_records.push(record_value);
+            }
+        }
+
+        Ok(live_records)
+    }
+
+    pub fn find_all_records_with_migration(&mut self) -> std::io::Result<Vec<Value>> {
+        if !self.needs_format_migration() {
+            return self.find_all_records();
+        }
+
+        let mut live_offsets = self
+            .primary_memory_index
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        live_offsets.sort_unstable();
+        live_offsets.dedup();
+
+        let mut live_records = Vec::new();
+        for offset in live_offsets {
+            if let Some(record) = self.read_record_at_offset_with_lazy_migration(offset)? {
+                live_records.push(record);
             }
         }
 

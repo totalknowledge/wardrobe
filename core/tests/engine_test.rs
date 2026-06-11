@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::{
-    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageLocator,
-    StorageScope, WardrobeEngine,
+    Command, CommandResult, DatabaseWriter, OrderDirection, PlainTextJsonFormat, QueryModifiers,
+    Recycler, StorageCoordinate, StorageFormat, StorageLocator, StorageScope, WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -40,6 +40,59 @@ fn write_drawer_metadata(database: &TempDatabase, drawer_name: &str, metadata: s
         serde_json::to_vec_pretty(&metadata).expect("metadata should serialize"),
     )
     .expect("metadata should write");
+}
+
+fn write_legacy_drawer_record(
+    database: &TempDatabase,
+    drawer_name: &str,
+    record: serde_json::Value,
+) {
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+
+    let data_path = database.path.join(format!("{drawer_name}.drw"));
+    let index_path = database.path.join(format!("{drawer_name}_index.drw"));
+    let serialized_record =
+        PlainTextJsonFormat::serialize_record(&record).expect("legacy record should serialize");
+    let data_size_class = Recycler::new().calculate_aligned_size(serialized_record.len());
+    let data_offset = DatabaseWriter::open_drawer(&data_path)
+        .expect("legacy data writer should open")
+        .append_record(&serialized_record, data_size_class)
+        .expect("legacy record should append");
+
+    let primary_key = record
+        .get("_id")
+        .and_then(|value| value.as_str())
+        .expect("legacy record should include string primary key");
+    let index_record = json!({
+        "f": "_id",
+        "k": primary_key,
+        "o": data_offset,
+        "len": serialized_record.len(),
+        "class": data_size_class,
+        "crc": 0,
+        "status": 1
+    });
+    let serialized_index =
+        PlainTextJsonFormat::serialize_record(&index_record).expect("index should serialize");
+    let index_size_class = Recycler::new().calculate_aligned_size(serialized_index.len());
+    DatabaseWriter::open_drawer(&index_path)
+        .expect("legacy index writer should open")
+        .append_aligned_index(&serialized_index, index_size_class)
+        .expect("legacy index should append");
+
+    write_drawer_metadata(
+        database,
+        drawer_name,
+        json!({
+            "format_version": 0,
+            "primary_key": "_id",
+            "record_count": 1,
+            "unique_constraints": [],
+            "relationship_constraints": {},
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
 }
 
 fn write_wal_record(database: &TempDatabase, record: serde_json::Value) {
@@ -2962,6 +3015,91 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
     };
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["element"], "Air");
+}
+
+#[test]
+fn us_044_find_all_lazily_migrates_legacy_record_layout() {
+    let database = TempDatabase::new("us_044_lazy_schema_evolution");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    write_legacy_drawer_record(
+        &database,
+        "gem",
+        json!({
+            "_id": "@gem:lnk_lazy_fire",
+            "element": "Fire",
+            "socket": "@socket:lnk_alpha"
+        }),
+    );
+
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+    let records = engine.find_all("gem").expect("legacy records should read");
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["_id"], "lazy_fire");
+    assert_eq!(records[0]["socket"], "@socket:alpha");
+
+    let data_contents =
+        fs::read_to_string(database.path.join("gem.drw")).expect("data should read");
+    assert!(data_contents.contains("\"_id\":\"lazy_fire\""));
+    assert!(data_contents.contains("\"socket\":\"@socket:alpha\""));
+    assert!(!data_contents.contains("lnk_lazy_fire"));
+    assert!(!data_contents.contains("lnk_alpha"));
+
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(database.path.join("gem_meta.drw")).expect("metadata should read"),
+    )
+    .expect("metadata should parse");
+    assert_eq!(metadata["format_version"], 1);
+
+    let restarted_engine =
+        WardrobeEngine::open(&database_directory).expect("engine should reopen after migration");
+    let migrated = restarted_engine
+        .find_by_id("@gem:lnk_lazy_fire")
+        .expect("legacy pointer lookup should parse")
+        .expect("migrated record should exist");
+    assert_eq!(migrated["element"], "Fire");
+    assert_eq!(migrated["socket"], "@socket:alpha");
+}
+
+#[test]
+fn us_044_batch_migration_rewrites_legacy_storage_partition() {
+    let database = TempDatabase::new("us_044_batch_schema_evolution");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    write_legacy_drawer_record(
+        &database,
+        "weapon",
+        json!({
+            "_id": "@weapon:lnk_batch_blade",
+            "name": "Batch Blade",
+            "gem": "@gem:lnk_batch_gem"
+        }),
+    );
+
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+    let report = engine
+        .migrate_drawer("weapon")
+        .expect("batch migration should succeed");
+
+    assert_eq!(report.records_rewritten, 1);
+
+    let data_contents =
+        fs::read_to_string(database.path.join("weapon.drw")).expect("data should read");
+    assert!(data_contents.contains("\"_id\":\"batch_blade\""));
+    assert!(data_contents.contains("\"gem\":\"@gem:batch_gem\""));
+    assert!(!data_contents.contains("lnk_batch"));
+
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(database.path.join("weapon_meta.drw")).expect("metadata should read"),
+    )
+    .expect("metadata should parse");
+    assert_eq!(metadata["format_version"], 1);
+
+    let migrated = engine
+        .find_by_id("@weapon:batch_blade")
+        .expect("migrated lookup should succeed")
+        .expect("migrated record should exist");
+    assert_eq!(migrated["name"], "Batch Blade");
+    assert_eq!(migrated["gem"], "@gem:batch_gem");
 }
 
 #[test]
