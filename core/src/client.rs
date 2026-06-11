@@ -51,6 +51,14 @@ impl WardrobeClient {
         self.target.driver_kind()
     }
 
+    pub fn requires_embedded_engine(&self) -> bool {
+        self.target.requires_embedded_engine()
+    }
+
+    pub fn uses_socket_transport(&self) -> bool {
+        self.target.uses_socket_transport()
+    }
+
     pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String> {
         match &self.driver {
             Driver::Embedded(engine) => engine.upsert(drawer_name, payload),

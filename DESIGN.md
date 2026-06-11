@@ -163,6 +163,9 @@ Client mode:
 - Uses TCP or Unix sockets to talk to a running Wardrobe server.
 - Does not touch local drawer files directly.
 - Good fit for shared server deployments and language runtimes that should not load the embedded engine.
+- Exposes `requires_embedded_engine()` and `uses_socket_transport()` through the connection and client APIs so bindings can choose network-only behavior before loading native embedded artifacts.
+
+The `bindings/README.md` file records this package rule for future JavaScript, Python, and other language integrations.
 
 ## Record Identity
 

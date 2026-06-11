@@ -10,6 +10,16 @@ pub enum DriverKind {
     UnixSocket,
 }
 
+impl DriverKind {
+    pub fn requires_embedded_engine(self) -> bool {
+        matches!(self, Self::Embedded)
+    }
+
+    pub fn uses_socket_transport(self) -> bool {
+        matches!(self, Self::Network | Self::UnixSocket)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionTarget {
     EmbeddedPath(PathBuf),
@@ -24,6 +34,14 @@ impl ConnectionTarget {
             Self::Network { .. } => DriverKind::Network,
             Self::UnixSocket { .. } => DriverKind::UnixSocket,
         }
+    }
+
+    pub fn requires_embedded_engine(&self) -> bool {
+        self.driver_kind().requires_embedded_engine()
+    }
+
+    pub fn uses_socket_transport(&self) -> bool {
+        self.driver_kind().uses_socket_transport()
     }
 
     pub fn parse(connection_string: &str) -> Result<Self> {

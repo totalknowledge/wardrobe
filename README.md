@@ -68,6 +68,8 @@ The lower-level exports remain available for advanced use cases such as custom s
 
 `WardrobeClient::open(...)` is the deployment-neutral client entrypoint inside `wardrobe-core`. It accepts a direct file-system path, an embedded URI, a TCP URI, or a Unix socket URI. Embedded paths delegate to the local engine immediately. TCP and Unix socket drivers are selected and typed now, but return `Unsupported` for operations until the server protocol is implemented.
 
+Future language bindings follow the same rule: one public package per ecosystem with internal driver selection from the connection string. Network and Unix socket targets report that they do not require the embedded storage engine artifact, allowing bindings to avoid loading native embedded code unless a local path or file URI is requested.
+
 ## Usage
 
 ### Embedded Quick Start
@@ -118,6 +120,8 @@ Supported connection shapes:
 - TCP URI: `wardrobe://localhost:24842`
 - TCP default port: `wardrobe://localhost` uses `24842`
 - Unix socket URI: `wardrobe+unix:///tmp/wardrobe.sock`
+
+Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_embedded_engine()` when a binding or host application needs to decide whether embedded native storage must be loaded.
 
 ### Filtering, Counting, and Pagination
 

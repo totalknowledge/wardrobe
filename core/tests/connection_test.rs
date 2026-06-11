@@ -30,13 +30,19 @@ fn local_file_uris_select_embedded_connection_target() {
 
 #[test]
 fn host_connection_uri_selects_network_target_with_default_or_explicit_port() {
+    let default_port_target =
+        ConnectionTarget::parse("wardrobe://localhost").expect("default port target should parse");
     assert_eq!(
-        ConnectionTarget::parse("wardrobe://localhost").expect("default port target should parse"),
+        default_port_target,
         ConnectionTarget::Network {
             host: "localhost".to_string(),
             port: DEFAULT_NETWORK_PORT
         }
     );
+    assert_eq!(default_port_target.driver_kind(), DriverKind::Network);
+    assert!(!default_port_target.requires_embedded_engine());
+    assert!(default_port_target.uses_socket_transport());
+
     assert_eq!(
         ConnectionTarget::parse("wardrobe://localhost:24842")
             .expect("explicit port target should parse"),
@@ -52,6 +58,8 @@ fn unix_socket_uris_select_socket_target() {
     let target =
         ConnectionTarget::parse("wardrobe+unix:///tmp/wardrobe.sock").expect("target should parse");
     assert_eq!(target.driver_kind(), DriverKind::UnixSocket);
+    assert!(!target.requires_embedded_engine());
+    assert!(target.uses_socket_transport());
 
     assert_eq!(
         ConnectionTarget::parse("wardrobe://unix/tmp/wardrobe.sock")
@@ -67,4 +75,13 @@ fn invalid_connection_strings_return_input_errors() {
     assert!(ConnectionTarget::parse("http://localhost").is_err());
     assert!(ConnectionTarget::parse("wardrobe://localhost:notaport").is_err());
     assert!(ConnectionTarget::parse("wardrobe://localhost:24842/path").is_err());
+}
+
+#[test]
+fn embedded_targets_report_embedded_engine_requirement() {
+    let target = ConnectionTarget::parse("./data").expect("embedded path should parse");
+
+    assert_eq!(target.driver_kind(), DriverKind::Embedded);
+    assert!(target.requires_embedded_engine());
+    assert!(!target.uses_socket_transport());
 }
