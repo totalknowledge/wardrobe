@@ -69,7 +69,7 @@ Supporting execution and routing types include:
 
 The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.
 
-`WardrobeClient::open(...)` is the deployment-neutral client entrypoint inside `wardrobe-core`. It accepts a direct file-system path, an embedded URI, a TCP URI, or a Unix socket URI. Embedded paths delegate to the local engine immediately. TCP and Unix socket drivers are selected and typed now, but return `Unsupported` for operations until the server protocol is implemented.
+`WardrobeClient::open(...)` is the deployment-neutral client entrypoint inside `wardrobe-core`. It accepts a direct file-system path, an embedded URI, a TCP URI, or a Unix socket URI. Embedded paths delegate to the local engine immediately. TCP and Unix socket drivers open their transport connection and exchange framed `Command` / `CommandResult` payloads using Wardrobe's binary protocol framing.
 
 Future language bindings follow the same rule: one public package per ecosystem with internal driver selection from the connection string. Network and Unix socket targets report that they do not require the embedded storage engine artifact, allowing bindings to avoid loading native embedded code unless a local path or file URI is requested.
 

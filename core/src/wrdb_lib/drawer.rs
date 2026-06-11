@@ -138,7 +138,7 @@ impl DataBlockIndexEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VacuumReport {
     pub records_rewritten: usize,
     pub data_bytes_before: u64,

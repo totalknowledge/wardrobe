@@ -28,7 +28,7 @@ Network mode should:
 - Use the host language's ordinary socket APIs.
 - Avoid loading embedded native storage artifacts.
 - Expose the same public client API as embedded mode where practical.
-- Serialize requests through the Wardrobe protocol once US-056 and US-057 are implemented.
+- Serialize requests through Wardrobe `ProtocolFrame` envelopes carrying `Command` and `CommandResult` payloads.
 
 The Rust `ConnectionTarget` and `WardrobeClient` APIs expose `requires_embedded_engine()` and `uses_socket_transport()` so bindings can decide whether a native embedded artifact is needed before loading it.
 
