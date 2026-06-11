@@ -14,18 +14,21 @@ fn direct_disk_path_selects_embedded_connection_target() {
 
 #[test]
 fn local_file_uris_select_embedded_connection_target() {
-    assert_eq!(
-        ConnectionTarget::parse("wardrobe://local/path/to/data").expect("local uri should parse"),
-        ConnectionTarget::EmbeddedPath(PathBuf::from("path/to/data"))
-    );
-    assert_eq!(
-        ConnectionTarget::parse("wardrobe+file://path/to/data").expect("file uri should parse"),
-        ConnectionTarget::EmbeddedPath(PathBuf::from("path/to/data"))
-    );
-    assert_eq!(
-        ConnectionTarget::parse("file://path/to/data").expect("plain file uri should parse"),
-        ConnectionTarget::EmbeddedPath(PathBuf::from("path/to/data"))
-    );
+    for connection_string in [
+        "wardrobe://local/path/to/data",
+        "wardrobe+file://path/to/data",
+        "file://path/to/data",
+    ] {
+        let target = ConnectionTarget::parse(connection_string).expect("file uri should parse");
+
+        assert_eq!(
+            target,
+            ConnectionTarget::EmbeddedPath(PathBuf::from("path/to/data"))
+        );
+        assert_eq!(target.driver_kind(), DriverKind::Embedded);
+        assert!(target.requires_embedded_engine());
+        assert!(!target.uses_socket_transport());
+    }
 }
 
 #[test]

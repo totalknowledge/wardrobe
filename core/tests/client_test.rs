@@ -39,6 +39,31 @@ fn client_local_uri_delegates_to_embedded_engine() {
     let client = WardrobeClient::open(&connection).expect("client should open");
 
     assert_eq!(client.driver_kind(), DriverKind::Embedded);
+    assert!(client.requires_embedded_engine());
+    assert!(!client.uses_socket_transport());
+}
+
+#[test]
+fn client_file_uri_delegates_to_embedded_engine() {
+    let database = TempDatabase::new("client_file_uri_embedded");
+    let connection = format!("wardrobe+file://{}", database.path.display());
+    let client = WardrobeClient::open(&connection).expect("client should open");
+
+    assert_eq!(client.driver_kind(), DriverKind::Embedded);
+    assert!(client.requires_embedded_engine());
+    assert!(!client.uses_socket_transport());
+
+    client
+        .upsert(
+            "gem",
+            json!({
+                "_id": "client_file_uri_gem",
+                "element": "Water"
+            }),
+        )
+        .expect("embedded file-uri upsert should write locally");
+
+    assert!(database.path.join("gem.drw").is_file());
 }
 
 #[test]

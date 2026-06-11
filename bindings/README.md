@@ -45,6 +45,24 @@ file://path/to/data
 
 Embedded mode should load the native storage engine artifact and execute directly in the caller's process.
 
+Embedded packages may carry one or more native binaries built from the Rust core crate, such as platform-specific Node-API, Python extension, `.dll`, `.so`, or `.dylib` artifacts.
+Those artifacts are internal packaging details; the public package name and public client API should remain the same as network mode.
+
+Recommended first binding track:
+
+- Start with one language ecosystem after the Rust protocol and client API stabilize.
+- Prefer Node.js with `napi-rs` for desktop and application runtime coverage, or Python if local scripting becomes the first priority.
+- Document the build matrix before publishing binaries, including operating system, CPU architecture, and runtime ABI.
+- Keep network mode usable without loading the embedded artifact whenever the host package manager and runtime allow lazy loading.
+
+Embedded mode is a good fit for:
+
+- Desktop apps.
+- Local automation.
+- Long-running services that need no external database daemon.
+- Electron and Tauri applications.
+- Test suites that need disposable local storage.
+
 ## Maintenance Guidance
 
 Do not create separate public packages for network-only and embedded-only usage unless there is a hard ecosystem constraint.

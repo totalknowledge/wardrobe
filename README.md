@@ -70,6 +70,8 @@ The lower-level exports remain available for advanced use cases such as custom s
 
 Future language bindings follow the same rule: one public package per ecosystem with internal driver selection from the connection string. Network and Unix socket targets report that they do not require the embedded storage engine artifact, allowing bindings to avoid loading native embedded code unless a local path or file URI is requested.
 
+Embedded language mode is the companion path: direct file-system paths and file-oriented URIs select the embedded driver and may load native binaries built from `wardrobe-core` behind the same public API. The intended package shape remains one public package per ecosystem, even if that package contains separate internal artifacts for embedded and socket-backed execution.
+
 ## Usage
 
 ### Embedded Quick Start

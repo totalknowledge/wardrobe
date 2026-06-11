@@ -157,6 +157,7 @@ Embedded mode:
 
 - Uses the local storage engine in-process.
 - Good fit for local-first apps, desktop software, background jobs, and tests.
+- Future language packages may bundle native binaries built from `wardrobe-core` for embedded mode while keeping those binaries hidden behind the same public package and API as network mode.
 
 Client mode:
 
