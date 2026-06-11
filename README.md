@@ -25,6 +25,9 @@ Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 - `ConnectionTarget`
 - `DriverKind`
 - `DEFAULT_NETWORK_PORT`
+- `ProtocolFrame`
+- `ProtocolOpcode`
+- `PROTOCOL_MAGIC`
 - `StorageCoordinate`
 - `StorageLocator`
 - `StorageScope`
