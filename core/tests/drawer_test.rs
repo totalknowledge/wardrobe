@@ -387,6 +387,84 @@ fn us_015_index_journal_tracks_blocks_and_rebuilds_recycler_on_open() {
 }
 
 #[test]
+fn us_046_upsert_reuses_recycler_slot_before_appending() {
+    let database_directory = TempDatabase::new("us_046_recycler_upsert_pipeline");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let data_path = database_directory.path.join("socks.drw");
+    let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+        .expect("drawer should open");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@socks:lnk_a",
+            "color": "Blue"
+        }))
+        .expect("first upsert should succeed")
+        .expect("record should validate");
+    let len_after_initial_append = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+    assert!(len_after_initial_append > 0);
+
+    drawer
+        .delete_by_primary_key("@socks:lnk_a")
+        .expect("delete should succeed")
+        .expect("record should exist");
+    let len_after_delete = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+
+    let deleted_offset = load_index_records(&database_directory, "socks")
+        .iter()
+        .find(|record| record["k"] == "@socks:lnk_a" && record["status"] == 0)
+        .and_then(|record| record["o"].as_u64())
+        .expect("dead index record should expose reusable offset");
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@socks:lnk_b",
+            "color": "Gold"
+        }))
+        .expect("second upsert should succeed")
+        .expect("record should validate");
+    let len_after_reuse = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+
+    assert_eq!(len_after_reuse, len_after_delete);
+    let reused_offset = load_index_records(&database_directory, "socks")
+        .iter()
+        .rev()
+        .find(|record| record["k"] == "@socks:lnk_b" && record["status"] == 1)
+        .and_then(|record| record["o"].as_u64())
+        .expect("new live index record should expose storage offset");
+    assert_eq!(reused_offset, deleted_offset);
+
+    assert_eq!(
+        drawer
+            .find_by_primary_key("@socks:lnk_b")
+            .expect("lookup should succeed")
+            .expect("reused record should exist")["color"],
+        "Gold"
+    );
+
+    drawer
+        .upsert_record(json!({
+            "_id": "@socks:lnk_c",
+            "color": "Violet",
+            "description": "larger payload forces append because no matching recycled slot remains"
+        }))
+        .expect("third upsert should succeed")
+        .expect("record should validate");
+    let len_after_append = fs::metadata(&data_path)
+        .expect("data metadata should read")
+        .len();
+
+    assert!(len_after_append > len_after_reuse);
+}
+
+#[test]
 fn upsert_record_rejects_missing_primary_key() {
     let database_directory = TempDatabase::new("drawer_missing_primary_key");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");

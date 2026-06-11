@@ -409,19 +409,7 @@ impl Drawer {
         let target_size_class = self.data_recycler.calculate_aligned_size(raw_len);
         let live_block = DataBlockIndexEntry::live(&serialized_record, target_size_class);
 
-        let data_offset = if let Some(recycled_offset) =
-            self.data_recycler.pop_available_slot(target_size_class)
-        {
-            self.data_writer.overwrite_at_offset(
-                recycled_offset,
-                &serialized_record,
-                target_size_class,
-            )?;
-            recycled_offset
-        } else {
-            self.data_writer
-                .append_record(&serialized_record, target_size_class)?
-        };
+        let data_offset = self.write_data_payload(&serialized_record, target_size_class)?;
 
         let primary_key_field_name = self.primary_key.clone();
         self.write_index_log(
@@ -1214,6 +1202,24 @@ impl Drawer {
         self.index_file_offsets
             .insert(map_key, (new_index_offset, target_size_class));
         Ok(())
+    }
+
+    fn write_data_payload(
+        &mut self,
+        serialized_record: &[u8],
+        target_size_class: usize,
+    ) -> std::io::Result<u64> {
+        if let Some(recycled_offset) = self.data_recycler.pop_available_slot(target_size_class) {
+            self.data_writer.overwrite_at_offset(
+                recycled_offset,
+                serialized_record,
+                target_size_class,
+            )?;
+            Ok(recycled_offset)
+        } else {
+            self.data_writer
+                .append_record(serialized_record, target_size_class)
+        }
     }
 
     fn write_data_block_status_log(
