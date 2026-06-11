@@ -197,6 +197,7 @@
       "weapon": {
         "damage": 35,
         "gem": {
+          "_id": "fa4033de79ee41b7b99b5a126b19811f",
           "element": "Lightning",
           "potency": 8100
         },

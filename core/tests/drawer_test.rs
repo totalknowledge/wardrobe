@@ -211,8 +211,14 @@ fn delete_by_primary_key_tombstones_record_and_evicts_indexes() {
         .expect("data file should be readable");
     assert!(data_contents.contains("!!DEAD!!"));
 
-    let index_records = load_index_records(&database_directory, "gem");
-    assert!(index_records.iter().any(|record| record["status"] == 0));
+    let index_contents = fs::read_to_string(database_directory.path.join("gem_index.drw"))
+        .expect("index file should be readable");
+    assert!(index_contents.contains("!!DEAD!!"));
+    assert!(
+        load_index_records(&database_directory, "gem")
+            .iter()
+            .all(|record| !(record["f"] == "_id" && record["k"] == "@gem:lnk_delete_me"))
+    );
 }
 
 #[test]
@@ -351,7 +357,10 @@ fn us_015_index_journal_tracks_blocks_and_reuses_dead_slots_after_reopen() {
             && record.get("class").is_some()
             && record.get("crc").is_some()
     }));
-    assert!(index_records.iter().any(|record| record["status"] == 0));
+    assert_eq!(index_records.len(), 1);
+    let index_contents = fs::read_to_string(database_directory.path.join("socks_index.drw"))
+        .expect("index file should be readable");
+    assert!(index_contents.contains("!!DEAD!!"));
 
     let data_path = database_directory.path.join("socks.drw");
     let len_after_update = fs::metadata(&data_path)
@@ -406,6 +415,11 @@ fn us_046_upsert_reuses_recycler_slot_before_appending() {
         .expect("data metadata should read")
         .len();
     assert!(len_after_initial_append > 0);
+    let deleted_offset = load_index_records(&database_directory, "socks")
+        .iter()
+        .find(|record| record["k"] == "@socks:lnk_a" && record["status"] == 1)
+        .and_then(|record| record["o"].as_u64())
+        .expect("live index record should expose reusable offset");
 
     drawer
         .delete_by_primary_key("@socks:lnk_a")
@@ -414,12 +428,9 @@ fn us_046_upsert_reuses_recycler_slot_before_appending() {
     let len_after_delete = fs::metadata(&data_path)
         .expect("data metadata should read")
         .len();
-
-    let deleted_offset = load_index_records(&database_directory, "socks")
-        .iter()
-        .find(|record| record["k"] == "@socks:lnk_a" && record["status"] == 0)
-        .and_then(|record| record["o"].as_u64())
-        .expect("dead index record should expose reusable offset");
+    let index_contents = fs::read_to_string(database_directory.path.join("socks_index.drw"))
+        .expect("index file should be readable");
+    assert!(index_contents.contains("!!DEAD!!"));
 
     drawer
         .upsert_record(json!({
@@ -530,6 +541,79 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
         .and_then(|record| record["o"].as_u64())
         .expect("live record should be written after lazy cache scan");
     assert_eq!(reused_offset, dead_offset);
+}
+
+#[test]
+fn bug_001_repeat_upserts_tombstone_stale_index_entries_and_reuse_after_reopen() {
+    let database_directory = TempDatabase::new("bug_001_index_recycler_repeat_upsert");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let index_path = database_directory.path.join("socks_index.drw");
+    let count_index_tombstones = || {
+        fs::read_to_string(&index_path)
+            .expect("index should read")
+            .lines()
+            .filter(|line| line.trim_start().starts_with("!!DEAD!!"))
+            .count()
+    };
+
+    {
+        let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+            .expect("drawer should open");
+
+        for color in ["Blue", "Gold"] {
+            drawer
+                .upsert_record(json!({
+                    "_id": format!("@socks:lnk_bug_001_{color}"),
+                    "color": color,
+                    "rerun": true
+                }))
+                .expect("initial upsert should succeed")
+                .expect("record should validate");
+        }
+
+        for color in ["Blue", "Gold"] {
+            drawer
+                .upsert_record(json!({
+                    "_id": format!("@socks:lnk_bug_001_{color}"),
+                    "color": color,
+                    "rerun": true
+                }))
+                .expect("repeat upsert should succeed")
+                .expect("record should validate");
+        }
+    }
+
+    assert_eq!(load_index_records(&database_directory, "socks").len(), 2);
+    assert_eq!(count_index_tombstones(), 2);
+    let index_len_after_tombstones = fs::metadata(&index_path)
+        .expect("index metadata should read")
+        .len();
+
+    {
+        let mut reopened = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
+            .expect("drawer should reopen");
+
+        for color in ["Blue", "Gold"] {
+            reopened
+                .upsert_record(json!({
+                    "_id": format!("@socks:lnk_bug_001_{color}"),
+                    "color": color,
+                    "rerun": true
+                }))
+                .expect("post-reopen upsert should succeed")
+                .expect("record should validate");
+        }
+    }
+
+    assert_eq!(load_index_records(&database_directory, "socks").len(), 2);
+    let tombstones_after_reuse = count_index_tombstones();
+    assert!(tombstones_after_reuse >= 2);
+    assert!(tombstones_after_reuse < 4);
+    let index_len_after_reuse = fs::metadata(&index_path)
+        .expect("index metadata should read")
+        .len();
+    assert!(index_len_after_reuse >= index_len_after_tombstones);
 }
 
 #[test]

@@ -4,7 +4,7 @@ use crate::wrdb_lib::storage_format::{PlainTextJsonFormat, StorageFormat};
 use crate::wrdb_lib::writer::DatabaseWriter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
@@ -119,13 +119,6 @@ impl DataBlockIndexEntry {
         }
     }
 
-    fn dead(self) -> Self {
-        Self {
-            status: DATA_BLOCK_STATUS_DEAD,
-            ..self
-        }
-    }
-
     fn from_index_entry(index_entry: &Value) -> Option<(u64, Self)> {
         let offset = index_entry.get("o").and_then(|value| value.as_u64())?;
         let payload_len = index_entry.get("len").and_then(|value| value.as_u64())? as usize;
@@ -197,7 +190,7 @@ impl Drawer {
 
         let data_writer = DatabaseWriter::open_drawer(&data_file_path)?;
         let data_reader = DatabaseReader::open_drawer(&data_file_path)?;
-        let index_writer = DatabaseWriter::open_drawer(&index_file_path)?;
+        let mut index_writer = DatabaseWriter::open_drawer(&index_file_path)?;
         let index_reader = DatabaseReader::open_drawer(&index_file_path)?;
 
         let data_recycler = Recycler::new();
@@ -286,6 +279,7 @@ impl Drawer {
                             primary_memory_index.remove(key);
                         }
                     }
+                    index_writer.write_tombstone_at_offset(current_offset, actual_slot_size)?;
                     continue;
                 }
 
@@ -295,7 +289,12 @@ impl Drawer {
                     index_entry.get("o"),
                 ) {
                     let map_key = format!("{}:{}", field, key);
-                    index_file_offsets.insert(map_key, (current_offset, actual_slot_size));
+                    if let Some((stale_index_offset, stale_slot_size)) =
+                        index_file_offsets.insert(map_key, (current_offset, actual_slot_size))
+                    {
+                        index_writer
+                            .write_tombstone_at_offset(stale_index_offset, stale_slot_size)?;
+                    }
 
                     if field == primary_key {
                         if let Some(data_offset) = data_offset_val.as_u64() {
@@ -491,11 +490,6 @@ impl Drawer {
             if stale_offset != data_offset {
                 self.data_writer
                     .write_tombstone_at_offset(stale_offset, old_block.size_class)?;
-                self.write_data_block_status_log(
-                    &primary_key_value,
-                    stale_offset,
-                    old_block.dead(),
-                )?;
                 self.data_block_index.remove(&stale_offset);
                 self.data_recycler
                     .register_free_slot(old_block.size_class, stale_offset);
@@ -560,7 +554,8 @@ impl Drawer {
 
         self.data_writer
             .write_tombstone_at_offset(stale_offset, old_block.size_class)?;
-        self.write_data_block_status_log(key, stale_offset, old_block.dead())?;
+        let primary_key_field_name = self.primary_key.clone();
+        self.tombstone_index_slot(&primary_key_field_name, key)?;
 
         self.primary_memory_index.remove(key);
         self.data_block_index.remove(&stale_offset);
@@ -1269,12 +1264,17 @@ impl Drawer {
             .overwrite_at_offset(offset, &serialized_record, old_block.size_class)?;
 
         if old_primary_key_value != new_primary_key_value {
-            self.write_index_log(
-                &self.primary_key.clone(),
-                old_primary_key_value,
-                Value::Array(Vec::new()),
-                None,
-            )?;
+            let primary_key_field_name = self.primary_key.clone();
+            if Self::clean_legacy_identifier(old_primary_key_value) == new_primary_key_value {
+                self.recycle_index_slot(&primary_key_field_name, old_primary_key_value)?;
+            } else {
+                self.write_index_log(
+                    &primary_key_field_name,
+                    old_primary_key_value,
+                    Value::Array(Vec::new()),
+                    None,
+                )?;
+            }
             self.primary_memory_index.remove(old_primary_key_value);
             self.primary_memory_index
                 .remove(&Self::clean_legacy_identifier(old_primary_key_value));
@@ -1397,23 +1397,7 @@ impl Drawer {
         let entry_raw_len = serialized_index.len();
         let target_size_class = self.index_recycler.calculate_aligned_size(entry_raw_len);
 
-        let new_index_offset = if block_entry.is_some() {
-            self.index_writer
-                .append_aligned_index(&serialized_index, target_size_class)?
-        } else {
-            if let Some(recycled_offset) = self.index_recycler.pop_available_slot(target_size_class)
-            {
-                self.index_writer.overwrite_at_offset(
-                    recycled_offset,
-                    &serialized_index,
-                    target_size_class,
-                )?;
-                recycled_offset
-            } else {
-                self.index_writer
-                    .append_aligned_index(&serialized_index, target_size_class)?
-            }
-        };
+        let new_index_offset = self.write_index_payload(&serialized_index, target_size_class)?;
 
         if let Some((old_index_offset, old_size_class)) =
             self.index_file_offsets.get(&map_key).copied()
@@ -1421,14 +1405,49 @@ impl Drawer {
             if old_index_offset != new_index_offset {
                 self.index_writer
                     .write_tombstone_at_offset(old_index_offset, old_size_class)?;
-                self.index_recycler
-                    .register_free_slot(old_size_class, old_index_offset);
             }
         }
 
         self.index_file_offsets
             .insert(map_key, (new_index_offset, target_size_class));
         Ok(())
+    }
+
+    fn write_index_payload(
+        &mut self,
+        serialized_index: &[u8],
+        target_size_class: usize,
+    ) -> std::io::Result<u64> {
+        if let Some(recycled_offset) = self.index_recycler.pop_available_slot(target_size_class) {
+            self.index_writer.overwrite_at_offset(
+                recycled_offset,
+                serialized_index,
+                target_size_class,
+            )?;
+            Ok(recycled_offset)
+        } else {
+            self.index_writer
+                .append_aligned_index(serialized_index, target_size_class)
+        }
+    }
+
+    fn recycle_index_slot(&mut self, field: &str, key: &str) -> std::io::Result<()> {
+        self.tombstone_index_slot(field, key).map(|_| ())
+    }
+
+    fn tombstone_index_slot(
+        &mut self,
+        field: &str,
+        key: &str,
+    ) -> std::io::Result<Option<(u64, usize)>> {
+        let map_key = format!("{}:{}", field, key);
+        if let Some((index_offset, size_class)) = self.index_file_offsets.remove(&map_key) {
+            self.index_writer
+                .write_tombstone_at_offset(index_offset, size_class)?;
+            Ok(Some((index_offset, size_class)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn write_data_payload(
@@ -1464,6 +1483,7 @@ impl Drawer {
         let index_reader = DatabaseReader::open_drawer(&self.index_file_path)?;
         let mut data_block_journal = HashMap::new();
         let mut index_lines = Vec::new();
+        let mut registered_data_slots = HashSet::new();
 
         index_reader.stream_with_offsets(|_offset, line| {
             if !PlainTextJsonFormat::is_tombstone(line.as_bytes()) {
@@ -1483,36 +1503,37 @@ impl Drawer {
 
         for (data_offset, block_entry) in data_block_journal {
             if block_entry.status == DATA_BLOCK_STATUS_DEAD {
+                registered_data_slots.insert((block_entry.size_class, data_offset));
                 self.data_recycler
                     .register_free_slot(block_entry.size_class, data_offset);
             }
         }
 
+        let mut data_slots = Vec::new();
+        self.data_reader.stream_with_offsets(|offset, line| {
+            data_slots.push((offset, PlainTextJsonFormat::is_tombstone(line.as_bytes())));
+        })?;
+
+        let total_data_file_len = self.data_writer.current_length()?;
+        for i in 0..data_slots.len() {
+            let (current_offset, is_dead) = data_slots[i];
+            if !is_dead {
+                continue;
+            }
+
+            let next_offset = if i + 1 < data_slots.len() {
+                data_slots[i + 1].0
+            } else {
+                total_data_file_len
+            };
+            let slot_size = (next_offset - current_offset) as usize;
+            if registered_data_slots.insert((slot_size, current_offset)) {
+                self.data_recycler
+                    .register_free_slot(slot_size, current_offset);
+            }
+        }
+
         self.data_recycler_cache_initialized = true;
-        Ok(())
-    }
-
-    fn write_data_block_status_log(
-        &mut self,
-        key: &str,
-        data_offset: u64,
-        block_entry: DataBlockIndexEntry,
-    ) -> std::io::Result<()> {
-        let index_entry = serde_json::json!({
-            "f": self.primary_key,
-            "k": key,
-            "o": data_offset,
-            "len": block_entry.payload_len,
-            "class": block_entry.size_class,
-            "crc": block_entry.crc,
-            "status": block_entry.status
-        });
-        let serialized_index = PlainTextJsonFormat::serialize_record(&index_entry)?;
-        let entry_raw_len = serialized_index.len();
-        let target_size_class = self.index_recycler.calculate_aligned_size(entry_raw_len);
-
-        self.index_writer
-            .append_aligned_index(&serialized_index, target_size_class)?;
         Ok(())
     }
 
