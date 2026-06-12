@@ -2080,6 +2080,99 @@ fn us_048_show_tenants_discovers_active_tenant_namespaces() {
 }
 
 #[test]
+fn us_049_show_databases_discovers_database_footprints_with_inventory() {
+    let database = TempDatabase::new("us_049_show_databases");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    engine
+        .execute_in_scope(
+            StorageScope::database("main_db"),
+            Command::Upsert {
+                drawer_name: "gem".to_string(),
+                payload: json!({
+                    "_id": "main_seed",
+                    "element": "Main"
+                }),
+            },
+        )
+        .expect("database-scoped upsert should succeed");
+
+    engine
+        .execute_in_scope(
+            StorageScope::schema("analytics_db", "tenant_schema"),
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "schema_seed",
+                    "name": "Schema Blade"
+                }),
+            },
+        )
+        .expect("schema-scoped upsert should succeed");
+
+    engine
+        .execute(
+            StorageCoordinate::new("tenant_alpha", "production", "core"),
+            Command::Upsert {
+                drawer_name: "character".to_string(),
+                payload: json!({
+                    "_id": "coordinate_seed",
+                    "name": "Routed Character"
+                }),
+            },
+        )
+        .expect("coordinate-scoped upsert should succeed");
+
+    fs::create_dir_all(database.path.join("empty_db")).expect("empty folder should be created");
+    fs::create_dir_all(database.path.join("metadata_only"))
+        .expect("metadata-only folder should be created");
+    fs::write(
+        database.path.join("metadata_only").join("orphan_meta.drw"),
+        "{}",
+    )
+    .expect("metadata-only file should write");
+
+    let databases = engine
+        .show_databases()
+        .expect("databases should be discovered");
+    let names: Vec<String> = databases
+        .iter()
+        .map(|inventory| inventory.name.clone())
+        .collect();
+
+    assert_eq!(
+        names,
+        vec![
+            "analytics_db".to_string(),
+            "main_db".to_string(),
+            "tenant_alpha/production".to_string()
+        ]
+    );
+
+    for expected_name in &names {
+        let inventory = databases
+            .iter()
+            .find(|inventory| &inventory.name == expected_name)
+            .expect("inventory should exist for database");
+        assert_eq!(inventory.record_count, 1);
+        assert!(
+            inventory.disk_size_bytes > 0,
+            "database should report disk usage for {expected_name}"
+        );
+        assert!(
+            inventory.register_file_count >= 3,
+            "database should report Wardrobe files for {expected_name}"
+        );
+    }
+
+    let command_result = engine
+        .execute_command(Command::ShowDatabases)
+        .expect("show databases command should succeed");
+    assert_eq!(command_result, CommandResult::Databases(databases));
+}
+
+#[test]
 fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targets() {
     let database = TempDatabase::new("us_037_relationship_cardinality");
     fs::create_dir_all(&database.path).expect("temp dir should create");

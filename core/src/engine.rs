@@ -25,6 +25,14 @@ pub struct QueryModifiers {
     pub offset: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageInventory {
+    pub name: String,
+    pub record_count: usize,
+    pub disk_size_bytes: u64,
+    pub register_file_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StorageCoordinate {
     tenant: String,
@@ -195,6 +203,7 @@ impl ExecutionContext<'_> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     ShowTenants,
+    ShowDatabases,
     Upsert {
         drawer_name: String,
         payload: Value,
@@ -237,6 +246,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandResult {
     Tenants(Vec<String>),
+    Databases(Vec<StorageInventory>),
     Pointer(String),
     Records(Vec<Value>),
     Record(Option<Value>),
@@ -448,6 +458,14 @@ impl WardrobeEngine {
         self.show_tenants()
     }
 
+    pub fn show_databases(&self) -> Result<Vec<StorageInventory>> {
+        Self::discover_databases(&self.root_directory)
+    }
+
+    pub fn list_databases(&self) -> Result<Vec<StorageInventory>> {
+        self.show_databases()
+    }
+
     pub fn execute(
         &self,
         coordinate: StorageCoordinate,
@@ -479,6 +497,7 @@ impl WardrobeEngine {
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
         match command {
             Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
+            Command::ShowDatabases => self.show_databases().map(CommandResult::Databases),
             Command::Execute {
                 coordinate,
                 command,
@@ -499,6 +518,10 @@ impl WardrobeEngine {
             Command::ShowTenants => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "Tenant discovery is only available at the WardrobeEngine boundary",
+            )),
+            Command::ShowDatabases => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Database discovery is only available at the WardrobeEngine boundary",
             )),
             Command::Upsert {
                 drawer_name,
@@ -630,6 +653,143 @@ impl WardrobeEngine {
         Ok(tenants.into_iter().collect())
     }
 
+    fn discover_databases(root_directory: &Path) -> Result<Vec<StorageInventory>> {
+        let mut database_paths = BTreeMap::new();
+
+        if !root_directory.exists() {
+            return Ok(Vec::new());
+        }
+
+        if Self::directory_has_drawer_files(root_directory)? {
+            database_paths.insert(
+                Self::database_inventory_name(root_directory, root_directory),
+                root_directory.to_path_buf(),
+            );
+        }
+
+        for top_level in Self::child_directories(root_directory)? {
+            if Self::directory_has_database_layout(&top_level)? {
+                database_paths.insert(
+                    Self::database_inventory_name(root_directory, &top_level),
+                    top_level,
+                );
+                continue;
+            }
+
+            for second_level in Self::child_directories(&top_level)? {
+                if Self::directory_has_database_layout(&second_level)? {
+                    database_paths.insert(
+                        Self::database_inventory_name(root_directory, &second_level),
+                        second_level,
+                    );
+                }
+            }
+        }
+
+        database_paths
+            .into_iter()
+            .map(|(name, path)| Self::storage_inventory(name, &path))
+            .collect()
+    }
+
+    fn directory_has_database_layout(directory: &Path) -> Result<bool> {
+        if Self::directory_has_drawer_files(directory)? {
+            return Ok(true);
+        }
+
+        for child in Self::child_directories(directory)? {
+            if Self::directory_has_drawer_files(&child)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn storage_inventory(name: String, path: &Path) -> Result<StorageInventory> {
+        let mut record_count = 0;
+        let mut disk_size_bytes = 0;
+        let mut register_file_count = 0;
+        Self::accumulate_storage_inventory(
+            path,
+            &mut record_count,
+            &mut disk_size_bytes,
+            &mut register_file_count,
+        )?;
+
+        Ok(StorageInventory {
+            name,
+            record_count,
+            disk_size_bytes,
+            register_file_count,
+        })
+    }
+
+    fn accumulate_storage_inventory(
+        path: &Path,
+        record_count: &mut usize,
+        disk_size_bytes: &mut u64,
+        register_file_count: &mut usize,
+    ) -> Result<()> {
+        if path.is_file() {
+            *disk_size_bytes += fs::metadata(path)?.len();
+            *register_file_count += 1;
+            if Self::is_metadata_file(path) {
+                *record_count += Self::metadata_record_count(path)?;
+            }
+            return Ok(());
+        }
+
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                Self::accumulate_storage_inventory(
+                    &entry?.path(),
+                    record_count,
+                    disk_size_bytes,
+                    register_file_count,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn metadata_record_count(path: &Path) -> Result<usize> {
+        let contents = fs::read_to_string(path)?;
+        let metadata: Value = serde_json::from_str(&contents).map_err(|error| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Failed to parse drawer metadata at {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+
+        Ok(metadata
+            .get("record_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize)
+    }
+
+    fn database_inventory_name(root_directory: &Path, database_path: &Path) -> String {
+        match database_path.strip_prefix(root_directory) {
+            Ok(relative_path) if relative_path.components().next().is_some() => relative_path
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(value) => value.to_str().map(ToOwned::to_owned),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/"),
+            _ => root_directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(".")
+                .to_string(),
+        }
+    }
+
     fn child_directories(directory: &Path) -> Result<Vec<PathBuf>> {
         if !directory.exists() {
             return Ok(Vec::new());
@@ -684,6 +844,15 @@ impl WardrobeEngine {
         }
 
         Ok(())
+    }
+
+    fn is_metadata_file(path: &Path) -> bool {
+        path.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("drw")
+            && path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.ends_with("_meta"))
     }
 
     fn drawer_name_from_file_path(path: &Path) -> Option<String> {

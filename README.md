@@ -29,6 +29,7 @@ Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 - `ProtocolOpcode`
 - `PROTOCOL_MAGIC`
 - `StorageCoordinate`
+- `StorageInventory`
 - `StorageLocator`
 - `StorageScope`
 - `QueryModifiers`
@@ -59,6 +60,8 @@ The main embedded entry points on `WardrobeEngine` are:
 - `cached_drawer_count`
 - `show_tenants`
 - `list_tenants`
+- `show_databases`
+- `list_databases`
 - `execute`
 - `execute_in_scope`
 
@@ -68,6 +71,7 @@ Supporting execution and routing types include:
 - `StorageCoordinate` for tenant/database/schema routing
 - `StorageScope` for database, schema, or drawer isolation modes
 - `show_tenants` / `list_tenants` for active tenant namespace discovery
+- `show_databases` / `list_databases` for database inventory discovery
 - `Command` and `CommandResult` for a command-driven execution surface
 
 The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.

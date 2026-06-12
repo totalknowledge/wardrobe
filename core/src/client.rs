@@ -1,6 +1,9 @@
 use crate::wrdb_lib::connection::{ConnectionTarget, DriverKind};
 use crate::wrdb_lib::protocol::{ProtocolFrame, ProtocolOpcode};
-use crate::{Command, CommandResult, QueryModifiers, StorageLocator, VacuumReport, WardrobeEngine};
+use crate::{
+    Command, CommandResult, QueryModifiers, StorageInventory, StorageLocator, VacuumReport,
+    WardrobeEngine,
+};
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::net::TcpStream;
@@ -211,6 +214,18 @@ impl WardrobeClient {
     pub fn list_tenants(&self) -> Result<Vec<String>> {
         self.show_tenants()
     }
+
+    pub fn show_databases(&self) -> Result<Vec<StorageInventory>> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.show_databases(),
+            Driver::Network(driver) => expect_databases(driver.execute(Command::ShowDatabases)?),
+            Driver::UnixSocket(driver) => expect_databases(driver.execute(Command::ShowDatabases)?),
+        }
+    }
+
+    pub fn list_databases(&self) -> Result<Vec<StorageInventory>> {
+        self.show_databases()
+    }
 }
 
 impl NetworkDriver {
@@ -391,6 +406,13 @@ fn expect_tenants(result: CommandResult) -> Result<Vec<String>> {
     match result {
         CommandResult::Tenants(tenants) => Ok(tenants),
         other => unexpected_result("tenants", other),
+    }
+}
+
+fn expect_databases(result: CommandResult) -> Result<Vec<StorageInventory>> {
+    match result {
+        CommandResult::Databases(databases) => Ok(databases),
+        other => unexpected_result("databases", other),
     }
 }
 

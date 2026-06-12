@@ -7,7 +7,7 @@ use std::path::Path;
 use std::thread::{self, JoinHandle};
 use wardrobe_core::{
     Command, CommandResult, DriverKind, OrderDirection, ProtocolFrame, ProtocolOpcode,
-    QueryModifiers, VacuumReport, WardrobeClient,
+    QueryModifiers, StorageInventory, VacuumReport, WardrobeClient,
 };
 
 #[cfg(unix)]
@@ -212,6 +212,15 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             Command::ShowTenants,
             CommandResult::Tenants(vec!["tenant_alpha".to_string()]),
         ),
+        (
+            Command::ShowDatabases,
+            CommandResult::Databases(vec![StorageInventory {
+                name: "main_db".to_string(),
+                record_count: 3,
+                disk_size_bytes: 4096,
+                register_file_count: 7,
+            }]),
+        ),
     ]);
 
     let client = WardrobeClient::open(connection).expect("client should open");
@@ -272,6 +281,17 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
     assert_eq!(
         client.show_tenants().expect("tenants should round trip"),
         vec!["tenant_alpha".to_string()]
+    );
+    assert_eq!(
+        client
+            .show_databases()
+            .expect("databases should round trip"),
+        vec![StorageInventory {
+            name: "main_db".to_string(),
+            record_count: 3,
+            disk_size_bytes: 4096,
+            register_file_count: 7,
+        }]
     );
 
     handle.join().expect("protocol server should finish");
