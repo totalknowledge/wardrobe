@@ -226,6 +226,22 @@ impl WardrobeClient {
     pub fn list_databases(&self) -> Result<Vec<StorageInventory>> {
         self.show_databases()
     }
+
+    pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.show_schemas(database_name),
+            Driver::Network(driver) => expect_schemas(driver.execute(Command::ShowSchemas {
+                database_name: database_name.to_string(),
+            })?),
+            Driver::UnixSocket(driver) => expect_schemas(driver.execute(Command::ShowSchemas {
+                database_name: database_name.to_string(),
+            })?),
+        }
+    }
+
+    pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>> {
+        self.show_schemas(database_name)
+    }
 }
 
 impl NetworkDriver {
@@ -413,6 +429,13 @@ fn expect_databases(result: CommandResult) -> Result<Vec<StorageInventory>> {
     match result {
         CommandResult::Databases(databases) => Ok(databases),
         other => unexpected_result("databases", other),
+    }
+}
+
+fn expect_schemas(result: CommandResult) -> Result<Vec<String>> {
+    match result {
+        CommandResult::Schemas(schemas) => Ok(schemas),
+        other => unexpected_result("schemas", other),
     }
 }
 

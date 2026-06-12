@@ -2173,6 +2173,91 @@ fn us_049_show_databases_discovers_database_footprints_with_inventory() {
 }
 
 #[test]
+fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
+    let database = TempDatabase::new("us_050_show_schemas");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    for schema_name in ["audit_schema", "tenant_schema"] {
+        engine
+            .execute_in_scope(
+                StorageScope::schema("main_db", schema_name),
+                Command::Upsert {
+                    drawer_name: "gem".to_string(),
+                    payload: json!({
+                        "_id": format!("{schema_name}_seed"),
+                        "element": schema_name
+                    }),
+                },
+            )
+            .expect("schema-scoped upsert should succeed");
+    }
+
+    engine
+        .execute_in_scope(
+            StorageScope::database("main_db"),
+            Command::Upsert {
+                drawer_name: "flat_schema.gem".to_string(),
+                payload: json!({
+                    "_id": "flat_seed",
+                    "element": "Flat"
+                }),
+            },
+        )
+        .expect("flat schema-prefixed drawer should upsert");
+
+    engine
+        .execute_in_scope(
+            StorageScope::database("main_db"),
+            Command::Upsert {
+                drawer_name: "loose_gem".to_string(),
+                payload: json!({
+                    "_id": "loose_seed",
+                    "element": "Loose"
+                }),
+            },
+        )
+        .expect("plain database drawer should upsert");
+
+    engine
+        .execute(
+            StorageCoordinate::new("tenant_alpha", "production", "core"),
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "coordinate_seed",
+                    "name": "Coordinate Blade"
+                }),
+            },
+        )
+        .expect("coordinate-scoped upsert should succeed");
+
+    let schemas = engine
+        .show_schemas("main_db")
+        .expect("schemas should be discovered");
+    assert_eq!(
+        schemas,
+        vec![
+            "audit_schema".to_string(),
+            "flat_schema".to_string(),
+            "tenant_schema".to_string()
+        ]
+    );
+
+    let routed_schemas = engine
+        .show_schemas("tenant_alpha/production")
+        .expect("routed schemas should be discovered");
+    assert_eq!(routed_schemas, vec!["core".to_string()]);
+
+    let command_result = engine
+        .execute_command(Command::ShowSchemas {
+            database_name: "main_db".to_string(),
+        })
+        .expect("show schemas command should succeed");
+    assert_eq!(command_result, CommandResult::Schemas(schemas));
+}
+
+#[test]
 fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targets() {
     let database = TempDatabase::new("us_037_relationship_cardinality");
     fs::create_dir_all(&database.path).expect("temp dir should create");

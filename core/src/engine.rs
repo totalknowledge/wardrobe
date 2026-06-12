@@ -204,6 +204,9 @@ impl ExecutionContext<'_> {
 pub enum Command {
     ShowTenants,
     ShowDatabases,
+    ShowSchemas {
+        database_name: String,
+    },
     Upsert {
         drawer_name: String,
         payload: Value,
@@ -247,6 +250,7 @@ pub enum Command {
 pub enum CommandResult {
     Tenants(Vec<String>),
     Databases(Vec<StorageInventory>),
+    Schemas(Vec<String>),
     Pointer(String),
     Records(Vec<Value>),
     Record(Option<Value>),
@@ -466,6 +470,15 @@ impl WardrobeEngine {
         self.show_databases()
     }
 
+    pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
+        let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
+        Self::discover_schemas(&database_path)
+    }
+
+    pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>> {
+        self.show_schemas(database_name)
+    }
+
     pub fn execute(
         &self,
         coordinate: StorageCoordinate,
@@ -498,6 +511,9 @@ impl WardrobeEngine {
         match command {
             Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
             Command::ShowDatabases => self.show_databases().map(CommandResult::Databases),
+            Command::ShowSchemas { database_name } => self
+                .show_schemas(&database_name)
+                .map(CommandResult::Schemas),
             Command::Execute {
                 coordinate,
                 command,
@@ -522,6 +538,10 @@ impl WardrobeEngine {
             Command::ShowDatabases => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "Database discovery is only available at the WardrobeEngine boundary",
+            )),
+            Command::ShowSchemas { .. } => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Schema discovery is only available at the WardrobeEngine boundary",
             )),
             Command::Upsert {
                 drawer_name,
@@ -692,6 +712,26 @@ impl WardrobeEngine {
             .collect()
     }
 
+    fn discover_schemas(database_path: &Path) -> Result<Vec<String>> {
+        let mut schemas = BTreeSet::new();
+
+        if !database_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        for child in Self::child_directories(database_path)? {
+            if Self::directory_has_drawer_files(&child)? {
+                if let Some(schema_name) = Self::file_name_to_string(&child) {
+                    schemas.insert(schema_name);
+                }
+            }
+        }
+
+        Self::collect_flat_schema_prefixes(database_path, &mut schemas)?;
+
+        Ok(schemas.into_iter().collect())
+    }
+
     fn directory_has_database_layout(directory: &Path) -> Result<bool> {
         if Self::directory_has_drawer_files(directory)? {
             return Ok(true);
@@ -723,6 +763,30 @@ impl WardrobeEngine {
             disk_size_bytes,
             register_file_count,
         })
+    }
+
+    fn database_path_from_name(root_directory: &Path, database_name: &str) -> Result<PathBuf> {
+        if database_name.trim().is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Database name cannot be empty",
+            ));
+        }
+
+        let mut database_path = root_directory.to_path_buf();
+        for component in Path::new(database_name).components() {
+            match component {
+                Component::Normal(value) => database_path.push(value),
+                _ => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "Database name must contain only normal path segments",
+                    ));
+                }
+            }
+        }
+
+        Ok(database_path)
     }
 
     fn accumulate_storage_inventory(
@@ -839,6 +903,30 @@ impl WardrobeEngine {
             if let Some((tenant_prefix, drawer_name)) = drawer_name.rsplit_once('_') {
                 if !tenant_prefix.is_empty() && !drawer_name.is_empty() {
                     tenants.insert(tenant_prefix.to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn collect_flat_schema_prefixes(
+        directory: &Path,
+        schemas: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if !directory.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let Some(drawer_name) = Self::drawer_name_from_file_path(&entry.path()) else {
+                continue;
+            };
+
+            if let Some((schema_name, drawer_name)) = drawer_name.split_once('.') {
+                if !schema_name.is_empty() && !drawer_name.is_empty() {
+                    schemas.insert(schema_name.to_string());
                 }
             }
         }

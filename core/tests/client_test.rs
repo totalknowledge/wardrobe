@@ -221,6 +221,12 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
                 register_file_count: 7,
             }]),
         ),
+        (
+            Command::ShowSchemas {
+                database_name: "main_db".to_string(),
+            },
+            CommandResult::Schemas(vec!["tenant_schema".to_string()]),
+        ),
     ]);
 
     let client = WardrobeClient::open(connection).expect("client should open");
@@ -292,6 +298,12 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             disk_size_bytes: 4096,
             register_file_count: 7,
         }]
+    );
+    assert_eq!(
+        client
+            .show_schemas("main_db")
+            .expect("schemas should round trip"),
+        vec!["tenant_schema".to_string()]
     );
 
     handle.join().expect("protocol server should finish");
