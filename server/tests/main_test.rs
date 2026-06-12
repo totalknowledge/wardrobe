@@ -9,7 +9,7 @@ use wardrobe_core::{
     Command, CommandResult, ProtocolFrame, ProtocolOpcode, StorageCoordinate, WardrobeClient,
     WardrobeEngine,
 };
-use wardrobe_server::serve_tcp_listener;
+use wardrobe_server::{ServerConfig, serve_tcp_listener};
 
 fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -17,6 +17,19 @@ fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
         .expect("system time should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("wardrobe_server_{test_name}_{nanos}"))
+}
+
+fn write_command(stream: &mut TcpStream, command: &Command) {
+    let payload = serde_json::to_vec(command).expect("command should serialize");
+    ProtocolFrame::new(ProtocolOpcode::Command, payload)
+        .write_to_stream(stream)
+        .expect("command frame should write");
+}
+
+fn read_result(stream: &mut TcpStream) -> CommandResult {
+    let response = ProtocolFrame::read_from_stream(stream).expect("result frame should read");
+    assert_eq!(response.opcode, ProtocolOpcode::Result);
+    serde_json::from_slice(&response.payload).expect("result should deserialize")
 }
 
 #[test]
@@ -233,15 +246,115 @@ fn malformed_frame_drops_only_that_client_channel() {
     let _ = std::fs::remove_dir_all(storage_directory);
 }
 
-fn write_command(stream: &mut TcpStream, command: &Command) {
-    let payload = serde_json::to_vec(command).expect("command should serialize");
-    ProtocolFrame::new(ProtocolOpcode::Command, payload)
-        .write_to_stream(stream)
-        .expect("command frame should write");
+#[test]
+fn tcp_bind_failure_is_reported() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let port = listener.local_addr().expect("local addr").port();
+    let args = vec!["--tcp-bind".to_string(), format!("127.0.0.1:{}", port)];
+    let cfg = ServerConfig::from_args(args).expect("cfg parse");
+    let res = wardrobe_server::run(cfg);
+    assert!(res.is_err());
 }
 
-fn read_result(stream: &mut TcpStream) -> CommandResult {
-    let response = ProtocolFrame::read_from_stream(stream).expect("result frame should read");
-    assert_eq!(response.opcode, ProtocolOpcode::Result);
-    serde_json::from_slice(&response.payload).expect("result should deserialize")
+#[test]
+fn handle_protocol_stream_tolerates_unexpected_eof_and_returns_ok() {
+    let storage_directory = temp_storage_directory("handle_unexpected_eof");
+    let engine =
+        Arc::new(WardrobeEngine::open(storage_directory.to_string_lossy().as_ref()).unwrap());
+    let partial = vec![0x57u8, 0x52, 0x44];
+    let mut cursor = std::io::Cursor::new(partial);
+    let res = wardrobe_server::handle_protocol_stream(engine, &mut cursor);
+    assert!(res.is_ok());
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn run_returns_error_when_no_listeners_enabled() {
+    let cfg = ServerConfig {
+        data_dir: "./wardrobe".to_string(),
+        check_only: false,
+        tcp_bind: None,
+        unix_socket: None,
+        max_connections: None,
+    };
+    let res = wardrobe_server::run(cfg);
+    assert!(res.is_err());
+}
+
+#[test]
+fn handle_protocol_stream_writes_error_frame_for_non_command_opcode() {
+    let storage_directory = temp_storage_directory("handle_non_command");
+    let engine =
+        Arc::new(WardrobeEngine::open(storage_directory.to_string_lossy().as_ref()).unwrap());
+
+    let payload = serde_json::to_vec(&CommandResult::Count(1)).expect("ser");
+    let mut data = Vec::new();
+    ProtocolFrame::new(ProtocolOpcode::Result, payload)
+        .write_to_stream(&mut data)
+        .expect("write");
+    let mut cursor = std::io::Cursor::new(data);
+
+    let res = wardrobe_server::handle_protocol_stream(engine, &mut cursor);
+    assert!(res.is_ok());
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn handle_protocol_stream_deserialization_failure_path() {
+    let storage_directory = temp_storage_directory("deserialization_failure");
+    let engine =
+        Arc::new(WardrobeEngine::open(storage_directory.to_string_lossy().as_ref()).unwrap());
+
+    let mut data = Vec::new();
+    ProtocolFrame::new(ProtocolOpcode::Command, b"invalid-json-structure".to_vec())
+        .write_to_stream(&mut data)
+        .unwrap();
+    let mut cursor = std::io::Cursor::new(data);
+
+    assert!(wardrobe_server::handle_protocol_stream(engine, &mut cursor).is_ok());
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn handle_protocol_stream_io_error_kinds() {
+    let storage_directory = temp_storage_directory("io_errors");
+    let engine =
+        Arc::new(WardrobeEngine::open(storage_directory.to_string_lossy().as_ref()).unwrap());
+
+    let mut data = Vec::new();
+    ProtocolFrame::new(ProtocolOpcode::Command, b"".to_vec())
+        .write_to_stream(&mut data)
+        .unwrap();
+    data.truncate(data.len() - 2);
+    let mut cursor = std::io::Cursor::new(data);
+
+    assert!(wardrobe_server::handle_protocol_stream(engine, &mut cursor).is_ok());
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn run_execution_with_check_only_flag() {
+    let storage_directory = temp_storage_directory("run_check_only");
+    let cfg = ServerConfig {
+        data_dir: storage_directory.to_string_lossy().to_string(),
+        check_only: true,
+        tcp_bind: None,
+        unix_socket: None,
+        max_connections: None,
+    };
+    assert!(wardrobe_server::run(cfg).is_ok());
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+#[cfg(not(unix))]
+fn run_execution_unsupported_unix_platform_guard() {
+    let cfg = ServerConfig {
+        data_dir: "./wardrobe".to_string(),
+        check_only: false,
+        tcp_bind: None,
+        unix_socket: Some(std::path::PathBuf::from("unsupported.sock")),
+        max_connections: None,
+    };
+    assert!(wardrobe_server::run(cfg).is_err());
 }

@@ -344,4 +344,28 @@ mod tests {
         assert_eq!(frame.opcode, ProtocolOpcode::Error);
         assert!(String::from_utf8_lossy(&frame.payload).contains("boom"));
     }
+
+    #[test]
+    fn server_config_from_args_unknown_arg_errors() {
+        let args = vec!["--no-such-arg".to_string()];
+        let res = ServerConfig::from_args(args);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn server_config_parse_max_connections_invalid_value() {
+        let args = vec!["--max-connections".to_string(), "not-a-number".to_string()];
+        let res = ServerConfig::from_args(args);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn server_config_unix_socket_requires_path() {
+        let args = vec!["--unix-socket".to_string()];
+        let res = ServerConfig::from_args(args);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+    }
 }
