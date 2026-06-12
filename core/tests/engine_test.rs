@@ -3642,3 +3642,17 @@ fn us_043_engine_rejects_zero_drawer_cache_limit() {
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+#[test]
+fn engine_appends_to_wal_on_write() -> std::io::Result<()> {
+    let database = TempDatabase::new("engine_wal");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine opens");
+    let _ = engine.upsert("character", json!({"name":"hero"}))?;
+    let wal_path = database.path.join("wardrobe.wal");
+    assert!(wal_path.exists());
+    let metadata = fs::metadata(&wal_path)?;
+    assert!(metadata.len() > 0);
+    Ok(())
+}

@@ -305,3 +305,43 @@ fn join_handlers(handlers: Vec<JoinHandle<io::Result<()>>>) -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::thread;
+
+    #[test]
+    fn server_config_from_args_defaults() {
+        let cfg = ServerConfig::from_args(Vec::<String>::new()).expect("should parse defaults");
+        assert_eq!(cfg.data_dir, "./wardrobe");
+        assert_eq!(cfg.tcp_bind.unwrap().starts_with("127.0.0.1"), true);
+        assert!(!cfg.check_only);
+    }
+
+    #[test]
+    fn server_config_invalid_max_connections_zero() {
+        let args = vec!["--max-connections".to_string(), "0".to_string()];
+        let res = ServerConfig::from_args(args);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn join_listener_handles_ok_result() {
+        let handle = thread::spawn(|| -> io::Result<()> { Ok(()) });
+        let res = join_listener(handle);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn write_error_frame_writes_error_opcode_and_message() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_error_frame(&mut buf, "boom").expect("write should succeed");
+        let mut cursor = Cursor::new(buf);
+        let frame = ProtocolFrame::read_from_stream(&mut cursor).expect("frame should parse");
+        assert_eq!(frame.opcode, ProtocolOpcode::Error);
+        assert!(String::from_utf8_lossy(&frame.payload).contains("boom"));
+    }
+}

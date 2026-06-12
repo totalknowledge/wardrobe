@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+﻿use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -32,6 +32,11 @@ impl DatabaseWriter {
         self.file_handle.flush()?;
         self.file_handle.sync_all()?;
 
+        Ok(())
+    }
+
+    pub fn sync_all(&mut self) -> std::io::Result<()> {
+        self.file_handle.sync_all()?;
         Ok(())
     }
 

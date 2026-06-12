@@ -247,6 +247,19 @@ fn delete_by_primary_key_tombstones_record_and_evicts_indexes() {
 }
 
 #[test]
+fn drawer_checkpoint_creates_meta_and_syncs() -> std::io::Result<()> {
+    let database_directory = TempDatabase::new("drawer_checkpoint");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+    let mut drawer = Drawer::open(&database_directory.path, "testdrawer", "_id", Vec::new())?;
+    drawer.checkpoint()?;
+    let meta_path = database_directory.path.join("testdrawer_meta.drw");
+    assert!(meta_path.exists());
+    let data_path = database_directory.path.join("testdrawer.drw");
+    let _ = fs::remove_file(&data_path);
+    let _ = fs::remove_file(&meta_path);
+    Ok(())
+}
+#[test]
 fn find_all_records_skips_tombstoned_lines() {
     let database_directory = TempDatabase::new("drawer_find_all_records");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");

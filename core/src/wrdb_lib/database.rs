@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+const DEFAULT_WAL_SIZE_THRESHOLD: u64 = 1_048_576;
+const DEFAULT_WAL_OPS_THRESHOLD: u64 = 1000;
+
 struct CachedDrawer {
     drawer: Arc<RwLock<Drawer>>,
     last_access_tick: AtomicU64,
@@ -32,9 +35,35 @@ pub struct Database {
     active_drawers: HashMap<String, CachedDrawer>,
     max_cached_drawers: Option<usize>,
     access_clock: AtomicU64,
+    wal_bytes_since_checkpoint: AtomicU64,
+    wal_ops_since_checkpoint: AtomicU64,
+    wal_size_threshold_bytes: u64,
+    wal_ops_threshold_count: u64,
 }
 
 impl Database {
+    pub fn record_wal_activity(&self, bytes: u64, ops: u64) {
+        self.wal_bytes_since_checkpoint
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.wal_ops_since_checkpoint
+            .fetch_add(ops, Ordering::Relaxed);
+    }
+
+    pub fn get_wal_counters(&self) -> (u64, u64) {
+        (
+            self.wal_bytes_since_checkpoint.load(Ordering::Relaxed),
+            self.wal_ops_since_checkpoint.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn reset_wal_counters(&self) {
+        self.wal_bytes_since_checkpoint.store(0, Ordering::Relaxed);
+        self.wal_ops_since_checkpoint.store(0, Ordering::Relaxed);
+    }
+
+    pub fn wal_thresholds(&self) -> (u64, u64) {
+        (self.wal_size_threshold_bytes, self.wal_ops_threshold_count)
+    }
     pub fn initialize<P: AsRef<Path>>(directory_path: P) -> std::io::Result<Self> {
         Self::initialize_with_cache_limit(directory_path, None)
     }
@@ -60,6 +89,10 @@ impl Database {
             active_drawers: HashMap::new(),
             max_cached_drawers,
             access_clock: AtomicU64::new(0),
+            wal_bytes_since_checkpoint: AtomicU64::new(0),
+            wal_ops_since_checkpoint: AtomicU64::new(0),
+            wal_size_threshold_bytes: DEFAULT_WAL_SIZE_THRESHOLD,
+            wal_ops_threshold_count: DEFAULT_WAL_OPS_THRESHOLD,
         })
     }
 

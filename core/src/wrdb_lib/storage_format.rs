@@ -218,3 +218,51 @@ fn trim_record_bytes(bytes: &[u8]) -> &[u8] {
     }
     &bytes[..end]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bson_frame_roundtrip_serialize_and_deserialize() {
+        let val = json!({"a": 1});
+        let encoded = BsonBinaryFormat::serialize_record(&val).expect("serialize");
+        assert!(BsonBinaryFormat::is_binary_frame(&encoded));
+        let decoded = BsonBinaryFormat::deserialize_record(&encoded).expect("deserialize");
+        assert_eq!(decoded.unwrap()["a"], 1);
+    }
+
+    #[test]
+    fn parse_slot_size_for_non_bson_returns_none() {
+        let bytes = b"not a frame".to_vec();
+        let slot = BsonBinaryFormat::parse_slot_size(&bytes).expect("parse should not fail");
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn with_slot_size_errors_for_non_bson_frame() {
+        let res = BsonBinaryFormat::with_slot_size(b"nope", 1024);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn tombstone_frame_is_detected_as_tombstone() {
+        // slot size must be at least header_len + payload_len per parse_frame logic
+        let slot = BsonBinaryFormat::frame_header_len() * 2;
+        let mut t = BsonBinaryFormat::tombstone_frame(slot).expect("tombstone should create");
+        // pad to declared slot size so parse_frame can validate bounds
+        if t.len() < slot {
+            t.resize(slot, 0);
+        }
+        assert!(BsonBinaryFormat::is_tombstone(&t));
+    }
+
+    #[test]
+    fn parse_frame_invalid_version_is_error() {
+        let mut frame = BsonBinaryFormat::serialize_record(&json!({"x":1})).expect("serialize");
+        frame[4] = 0xff; // bad version
+        let res = BsonBinaryFormat::parse_frame(&frame);
+        assert!(res.is_err());
+    }
+}

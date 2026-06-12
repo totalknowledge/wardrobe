@@ -1636,4 +1636,11 @@ impl Drawer {
         );
         metadata.persist(&self.meta_file_path)
     }
+
+    pub fn checkpoint(&mut self) -> std::io::Result<()> {
+        self.data_writer.sync_all()?;
+        self.index_writer.sync_all()?;
+        self.persist_metadata()?;
+        Ok(())
+    }
 }

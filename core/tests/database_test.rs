@@ -30,6 +30,26 @@ fn us_002_opening_a_drawer_creates_data_and_index_files() {
 }
 
 #[test]
+fn database_wal_counters_record_and_reset() {
+    let database = TempDatabase::new("us_wal_counters");
+    let db = Database::initialize(&database.path).expect("database should initialize");
+
+    db.record_wal_activity(512, 2);
+    let (bytes, ops) = db.get_wal_counters();
+    assert_eq!(bytes, 512);
+    assert_eq!(ops, 2);
+
+    db.reset_wal_counters();
+    let (b2, o2) = db.get_wal_counters();
+    assert_eq!(b2, 0);
+    assert_eq!(o2, 0);
+
+    let (threshold_bytes, threshold_ops) = db.wal_thresholds();
+    assert!(threshold_bytes > 0);
+    assert!(threshold_ops > 0);
+}
+
+#[test]
 fn us_012_indexes_rebuild_from_disk_after_restart() {
     let database = TempDatabase::new("us_012");
     let database_directory = database.path.to_string_lossy().into_owned();

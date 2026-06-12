@@ -11,6 +11,7 @@ use std::io::Write;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,7 +326,10 @@ enum WalRecord {
     Begin {
         tx_id: String,
         operation: WalOperation,
+        #[serde(default)]
+        ts: u64,
     },
+
     Commit {
         tx_id: String,
     },
@@ -1193,6 +1197,12 @@ impl WardrobeEngine {
         wal_file.write_all(&serialized)?;
         wal_file.write_all(b"\n")?;
         wal_file.sync_all()?;
+        let bytes_written = serialized.len() as u64 + 1;
+        {
+            let db = Self::read_lock(database_core)?;
+            db.record_wal_activity(bytes_written, 1);
+        }
+        Self::check_wal_thresholds(database_core)?;
         Ok(())
     }
 
@@ -1200,6 +1210,21 @@ impl WardrobeEngine {
         let wal_path = Self::wal_path(database_core)?;
         if !wal_path.exists() {
             return Ok(());
+        }
+
+        let checkpoint_path = wal_path.with_extension("wal.meta");
+        let mut last_checkpoint: u64 = 0;
+        let mut checkpoint_found = false;
+        if checkpoint_path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&checkpoint_path) {
+                if let Ok(value) = serde_json::from_str::<Value>(&contents) {
+                    last_checkpoint = value
+                        .get("last_checkpoint")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    checkpoint_found = true;
+                }
+            }
         }
 
         let contents = std::fs::read_to_string(wal_path)?;
@@ -1219,7 +1244,10 @@ impl WardrobeEngine {
             })?;
 
             match record {
-                WalRecord::Begin { tx_id, operation } => {
+                WalRecord::Begin { tx_id, operation, ts } => {
+                    if checkpoint_found && ts <= last_checkpoint {
+                        continue;
+                    }
                     begun_transactions.push((tx_id, operation));
                 }
                 WalRecord::Commit { tx_id } => {
@@ -1277,6 +1305,46 @@ impl WardrobeEngine {
         Ok(())
     }
 
+    fn check_wal_thresholds(database_core: &RwLock<Database>) -> Result<()> {
+        let (bytes, ops) = Self::read_lock(database_core)?.get_wal_counters();
+        let (threshold_bytes, threshold_ops) = Self::read_lock(database_core)?.wal_thresholds();
+        if bytes >= threshold_bytes || ops >= threshold_ops {
+            Self::flush_checkpoint(database_core)?;
+        }
+        Ok(())
+    }
+
+    fn flush_checkpoint(database_core: &RwLock<Database>) -> Result<()> {
+        let wal_path = Self::wal_path(database_core)?;
+        let wal_file = OpenOptions::new().write(true).open(&wal_path)?;
+        wal_file.sync_all()?;
+
+        let drawers = Self::read_lock(database_core)?.get_all_drawers();
+        for (_name, drawer) in drawers {
+            let mut guard = Self::write_lock(&drawer)?;
+            guard.checkpoint()?;
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let checkpoint_path = wal_path.with_extension("wal.meta");
+        let checkpoint_body = serde_json::json!({"last_checkpoint": now});
+        let serialized = serde_json::to_vec(&checkpoint_body)?;
+        std::fs::write(&checkpoint_path, &serialized)?;
+        let meta_f = OpenOptions::new().write(true).open(&checkpoint_path)?;
+        meta_f.sync_all()?;
+
+        let wal_handle = OpenOptions::new().write(true).open(&wal_path)?;
+        wal_handle.set_len(0)?;
+        wal_handle.sync_all()?;
+
+        Self::read_lock(database_core)?.reset_wal_counters();
+
+        Ok(())
+    }
+
     fn upsert_in_database(
         database_core: &RwLock<Database>,
         drawer_name: &str,
@@ -1290,11 +1358,16 @@ impl WardrobeEngine {
         };
         let tx_id = Uuid::new_v4().simple().to_string();
 
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         Self::append_wal_record(
             database_core,
             &WalRecord::Begin {
                 tx_id: tx_id.clone(),
                 operation,
+                ts: now,
             },
         )?;
         let result =
@@ -1565,11 +1638,16 @@ impl WardrobeEngine {
         };
         let tx_id = Uuid::new_v4().simple().to_string();
 
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         Self::append_wal_record(
             database_core,
             &WalRecord::Begin {
                 tx_id: tx_id.clone(),
                 operation,
+                ts: now,
             },
         )?;
         let result = Self::delete_by_id_in_database_unlogged(database_core, &pointer, context);

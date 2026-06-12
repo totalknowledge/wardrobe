@@ -480,3 +480,72 @@ fn unexpected_result<T>(expected: &str, actual: CommandResult) -> Result<T> {
         ),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Read, Write};
+    use std::sync::Mutex;
+
+    #[test]
+    fn clean_locator_id_variants() {
+        assert_eq!(clean_locator_id("@gem:lnk_hero"), "hero");
+        assert_eq!(clean_locator_id("@gem:hero"), "hero");
+        assert_eq!(clean_locator_id("plain"), "plain");
+    }
+
+    #[test]
+    fn locator_to_pointer_explicit_and_inline() {
+        let inline = StorageLocator::Inline("@gem:abc".to_string());
+        assert_eq!(locator_to_pointer(inline), "@gem:abc".to_string());
+
+        let explicit = StorageLocator::Explicit { drawer: "gem".to_string(), id: "lnk_abc".to_string() };
+        assert_eq!(locator_to_pointer(explicit), "@gem:abc".to_string());
+    }
+
+    #[test]
+    fn unexpected_result_returns_invaliddata() {
+        let res: Result<String> = unexpected_result("pointer", CommandResult::Count(5));
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().kind(), ErrorKind::InvalidData);
+    }
+
+    struct FakeStream {
+        read: Cursor<Vec<u8>>,
+        write: Vec<u8>,
+    }
+
+    impl Read for FakeStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buf)
+        }
+    }
+
+    impl Write for FakeStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.write.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn execute_on_stream_roundtrips_result() {
+        // Prepare a response frame containing a Count(3)
+        let payload = serde_json::to_vec(&CommandResult::Count(3)).expect("serialize");
+        let mut resp_bytes = Vec::new();
+        ProtocolFrame::new(ProtocolOpcode::Result, payload)
+            .write_to_stream(&mut resp_bytes)
+            .expect("frame write");
+
+        let stream = FakeStream { read: Cursor::new(resp_bytes), write: Vec::new() };
+        let mutex = Mutex::new(stream);
+
+        let cmd = Command::Count { drawer_name: "gem".to_string(), filter: None, modifiers: None };
+        let result = execute_on_stream(&mutex, cmd, "test-target".to_string()).expect("execute should succeed");
+        assert_eq!(result, CommandResult::Count(3));
+    }
+}

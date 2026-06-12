@@ -377,3 +377,60 @@ fn client_unix_socket_driver_sends_command_frames() {
     );
     handle.join().expect("protocol server should finish");
 }
+
+#[test]
+fn client_unexpected_result_paths_return_invaliddata() {
+    // Count command returns a Pointer -> expect_count should hit unexpected_result
+    let (connection, handle) = spawn_tcp_protocol_server(vec![(
+        Command::Count {
+            drawer_name: "gem".to_string(),
+            filter: None,
+            modifiers: None,
+        },
+        CommandResult::Pointer("@gem:wrong".to_string()),
+    )]);
+
+    let client = WardrobeClient::open(connection).expect("client should open");
+    match client.count("gem", None, None) {
+        Ok(_) => panic!("expected invalid data error from mismatched result"),
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+    }
+    handle.join().expect("protocol server should finish");
+}
+
+#[test]
+fn client_unexpected_result_on_upsert_returns_invaliddata() {
+    // Upsert command returns Records -> expect_pointer should hit unexpected_result
+    let (connection, handle) = spawn_tcp_protocol_server(vec![(
+        Command::Upsert {
+            drawer_name: "gem".to_string(),
+            payload: json!({"_id": "x"}),
+        },
+        CommandResult::Records(vec![json!({"element": "Fire"})]),
+    )]);
+
+    let client = WardrobeClient::open(connection).expect("client should open");
+    match client.upsert("gem", json!({"_id": "x"})) {
+        Ok(_) => panic!("expected invalid data error from mismatched result"),
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+    }
+    handle.join().expect("protocol server should finish");
+}
+
+#[test]
+fn client_unexpected_result_on_find_all_returns_invaliddata() {
+    // FindAll returns Count -> expect_records should hit unexpected_result
+    let (connection, handle) = spawn_tcp_protocol_server(vec![(
+        Command::FindAll {
+            drawer_name: "gem".to_string(),
+        },
+        CommandResult::Count(5),
+    )]);
+
+    let client = WardrobeClient::open(connection).expect("client should open");
+    match client.find_all("gem") {
+        Ok(_) => panic!("expected invalid data error from mismatched result"),
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+    }
+    handle.join().expect("protocol server should finish");
+}

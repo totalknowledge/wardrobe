@@ -112,3 +112,14 @@ fn tombstone_padding_preserves_exact_alignment_with_large_padding_span() {
 
     let _ = fs::remove_file(file_path);
 }
+
+#[test]
+fn sync_all_runs_without_error_and_file_exists() -> std::io::Result<()> {
+    let path = temp_file_path("writer_sync_all");
+    let _ = fs::remove_file(&path);
+    let mut writer = DatabaseWriter::open_drawer(&path)?;
+    writer.sync_all()?;
+    assert!(path.exists());
+    let _ = fs::remove_file(&path);
+    Ok(())
+}
