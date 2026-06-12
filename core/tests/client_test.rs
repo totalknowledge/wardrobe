@@ -282,6 +282,7 @@ fn client_unix_socket_driver_reports_unsupported_on_non_unix() {
 #[test]
 fn client_unix_socket_driver_sends_command_frames() {
     let database = TempDatabase::new("client_unix_socket_protocol");
+    std::fs::create_dir_all(&database.path).expect("test temp directory should be created");
     let socket_path = database.path.join("wardrobe.sock");
     let listener = UnixListener::bind(&socket_path).expect("unix listener should bind");
     let handle = thread::spawn(move || {
