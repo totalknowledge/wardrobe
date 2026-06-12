@@ -2,7 +2,7 @@
 
 Wardrobe is an embedded Rust document database for local-first applications, developer tooling, test environments, desktop software, and service backends that need structured storage without a separate database server in the hot path.
 
-Today, Wardrobe stores JSON-like records in flat files with file-backed indexes, relationship hydration, schema validation, scoped multi-tenant routing, write-ahead recovery, vacuum compaction, and bounded drawer caching. The long-term direction remains a binary storage engine, but the current API is already useful for a wide range of application workflows.
+Wardrobe stores JSON-like records in flat files with file-backed indexes, relationship hydration, schema validation, scoped multi-tenant routing, write-ahead recovery, vacuum compaction, and bounded drawer caching. The long-term direction remains a binary storage engine, but the current API is already useful for a wide range of application workflows.
 
 ## Workspace
 
@@ -10,7 +10,7 @@ Today, Wardrobe stores JSON-like records in flat files with file-backed indexes,
 wardrobe/
   core/                 Embedded engine library crate
   cli/                  Command-line inspection and diagnostics
-  server/               Standalone daemon scaffold
+  server/               Standalone network daemon
   samples/basic-usage/  End-to-end sample application
 ```
 
@@ -185,6 +185,22 @@ Run the basic sample crate to seed data from `core/tests/common/test_seed.json` 
 cargo run -p basic-usage
 ```
 
+### Server Daemon
+
+Run Wardrobe as a TCP-backed daemon:
+
+```text
+cargo run -p wardrobe-server -- --data-dir ./data --tcp-bind 127.0.0.1:24842
+```
+
+Useful server flags:
+
+- `--data-dir <path>` chooses the root storage directory.
+- `--tcp-bind <addr:port>` binds the TCP listener. The default is `127.0.0.1:24842`.
+- `--no-tcp` disables the TCP listener.
+- `--unix-socket <path>` binds a Unix domain socket listener on Unix platforms.
+- `--check` initializes the engine and exits without blocking.
+
 ## Current Capabilities
 
 - Flat-file drawer storage with separate data, index, and metadata sidecar files
@@ -205,7 +221,7 @@ cargo run -p basic-usage
 
 - `wardrobe-core`: embedded library crate
 - `wardrobe-cli`: local inspection and diagnostics
-- `wardrobe-server`: standalone daemon scaffold
+- `wardrobe-server`: standalone daemon with TCP protocol handling
 - `basic-usage`: practical sample application
 
 Run the test suite with:

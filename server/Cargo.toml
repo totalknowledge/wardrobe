@@ -8,4 +8,5 @@ name = "wardrobe-server"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1.0"
 wardrobe-core = { path = "../core" }

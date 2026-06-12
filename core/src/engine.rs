@@ -25,7 +25,7 @@ pub struct QueryModifiers {
     pub offset: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StorageCoordinate {
     tenant: String,
     database: String,
@@ -129,7 +129,7 @@ impl From<(&str, &str)> for StorageLocator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StorageScope {
     Database { database: String },
     Schema { database: String, schema: String },
@@ -222,6 +222,14 @@ pub enum Command {
     },
     Migrate {
         drawer_name: String,
+    },
+    Execute {
+        coordinate: StorageCoordinate,
+        command: Box<Command>,
+    },
+    ExecuteInScope {
+        scope: StorageScope,
+        command: Box<Command>,
     },
 }
 
@@ -458,6 +466,17 @@ impl WardrobeEngine {
         }
     }
 
+    pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
+        match command {
+            Command::Execute {
+                coordinate,
+                command,
+            } => self.execute(coordinate, *command),
+            Command::ExecuteInScope { scope, command } => self.execute_in_scope(scope, *command),
+            command => Self::execute_in_database(&self.database_core, command, None),
+        }
+    }
+
     fn execute_in_database(
         database: &RwLock<Database>,
         command: Command,
@@ -504,6 +523,10 @@ impl WardrobeEngine {
                 Self::migrate_drawer_in_database(database, &drawer_name, context)
                     .map(CommandResult::Migrated)
             }
+            Command::Execute { .. } | Command::ExecuteInScope { .. } => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Scoped command routing is only available at the WardrobeEngine boundary",
+            )),
         }
     }
 

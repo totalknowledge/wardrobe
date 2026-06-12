@@ -104,9 +104,9 @@ The driver-selection API belongs inside the core crate as an internal module bou
 
 ### Server Crate
 
-The `server` crate should be a standalone daemon that depends on the core crate. It should expose Wardrobe over a protocol boundary such as TCP or IPC.
+The `server` crate is a standalone daemon that depends on the core crate. It exposes Wardrobe over TCP today and can bind Unix domain sockets on Unix platforms.
 
-The server should own network lifecycle, request handling, protocol framing, and process-level operational concerns. It should not duplicate storage logic from the core crate.
+The server owns network lifecycle, request handling, protocol framing, and process-level operational concerns. It does not duplicate storage logic from the core crate. Incoming `ProtocolFrame` command payloads are decoded into `Command` values, executed against a shared `WardrobeEngine`, and returned as framed `CommandResult` payloads.
 
 ### CLI Crate
 
