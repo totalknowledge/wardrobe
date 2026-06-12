@@ -207,6 +207,10 @@ pub enum Command {
     ShowSchemas {
         database_name: String,
     },
+    ShowDrawers {
+        database_name: String,
+        schema_name: String,
+    },
     Upsert {
         drawer_name: String,
         payload: Value,
@@ -251,6 +255,7 @@ pub enum CommandResult {
     Tenants(Vec<String>),
     Databases(Vec<StorageInventory>),
     Schemas(Vec<String>),
+    Drawers(Vec<StorageInventory>),
     Pointer(String),
     Records(Vec<Value>),
     Record(Option<Value>),
@@ -479,6 +484,23 @@ impl WardrobeEngine {
         self.show_schemas(database_name)
     }
 
+    pub fn show_drawers(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> Result<Vec<StorageInventory>> {
+        let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
+        Self::discover_drawers(&database_path, schema_name)
+    }
+
+    pub fn list_drawers(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> Result<Vec<StorageInventory>> {
+        self.show_drawers(database_name, schema_name)
+    }
+
     pub fn execute(
         &self,
         coordinate: StorageCoordinate,
@@ -514,6 +536,12 @@ impl WardrobeEngine {
             Command::ShowSchemas { database_name } => self
                 .show_schemas(&database_name)
                 .map(CommandResult::Schemas),
+            Command::ShowDrawers {
+                database_name,
+                schema_name,
+            } => self
+                .show_drawers(&database_name, &schema_name)
+                .map(CommandResult::Drawers),
             Command::Execute {
                 coordinate,
                 command,
@@ -542,6 +570,10 @@ impl WardrobeEngine {
             Command::ShowSchemas { .. } => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "Schema discovery is only available at the WardrobeEngine boundary",
+            )),
+            Command::ShowDrawers { .. } => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Drawer discovery is only available at the WardrobeEngine boundary",
             )),
             Command::Upsert {
                 drawer_name,
@@ -732,6 +764,63 @@ impl WardrobeEngine {
         Ok(schemas.into_iter().collect())
     }
 
+    fn discover_drawers(database_path: &Path, schema_name: &str) -> Result<Vec<StorageInventory>> {
+        StorageCoordinate::validate_component("schema", schema_name)?;
+        let mut drawer_paths = BTreeMap::new();
+
+        let nested_schema_path = database_path.join(schema_name);
+        if nested_schema_path.exists() {
+            Self::collect_drawers_in_directory(&nested_schema_path, None, &mut drawer_paths)?;
+        }
+
+        Self::collect_drawers_in_directory(database_path, Some(schema_name), &mut drawer_paths)?;
+
+        drawer_paths
+            .into_iter()
+            .map(|(name, (directory, physical_drawer_name))| {
+                Self::drawer_inventory(name, &directory, &physical_drawer_name)
+            })
+            .collect()
+    }
+
+    fn collect_drawers_in_directory(
+        directory: &Path,
+        flat_schema_name: Option<&str>,
+        drawer_paths: &mut BTreeMap<String, (PathBuf, String)>,
+    ) -> Result<()> {
+        if !directory.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let Some(physical_drawer_name) = Self::drawer_name_from_file_path(&entry.path()) else {
+                continue;
+            };
+
+            let logical_drawer_name = if let Some(schema_name) = flat_schema_name {
+                let Some((prefix, drawer_name)) = physical_drawer_name.split_once('.') else {
+                    continue;
+                };
+
+                if prefix != schema_name || drawer_name.is_empty() {
+                    continue;
+                }
+
+                drawer_name.to_string()
+            } else {
+                physical_drawer_name.clone()
+            };
+
+            drawer_paths.insert(
+                logical_drawer_name,
+                (directory.to_path_buf(), physical_drawer_name),
+            );
+        }
+
+        Ok(())
+    }
+
     fn directory_has_database_layout(directory: &Path) -> Result<bool> {
         if Self::directory_has_drawer_files(directory)? {
             return Ok(true);
@@ -763,6 +852,92 @@ impl WardrobeEngine {
             disk_size_bytes,
             register_file_count,
         })
+    }
+
+    fn drawer_inventory(
+        name: String,
+        directory: &Path,
+        physical_drawer_name: &str,
+    ) -> Result<StorageInventory> {
+        let data_path = directory.join(format!("{physical_drawer_name}.drw"));
+        let index_path = directory.join(format!("{physical_drawer_name}_index.drw"));
+        let meta_path = directory.join(format!("{physical_drawer_name}_meta.drw"));
+        let companion_paths = [data_path, index_path.clone(), meta_path.clone()];
+
+        let mut disk_size_bytes = 0;
+        let mut register_file_count = 0;
+        for path in companion_paths {
+            if path.exists() {
+                disk_size_bytes += fs::metadata(path)?.len();
+                register_file_count += 1;
+            }
+        }
+
+        let record_count = Self::drawer_record_count_from_index(&index_path)?
+            .or_else(|| Self::metadata_record_count(&meta_path).ok())
+            .unwrap_or_default();
+
+        Ok(StorageInventory {
+            name,
+            record_count,
+            disk_size_bytes,
+            register_file_count,
+        })
+    }
+
+    fn drawer_record_count_from_index(index_path: &Path) -> Result<Option<usize>> {
+        if !index_path.exists() {
+            return Ok(None);
+        }
+
+        let contents = fs::read_to_string(index_path)?;
+        let mut live_primary_keys = BTreeSet::new();
+        let mut saw_primary_key_rows = false;
+
+        for line in contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if line.starts_with("!!DEAD!!") {
+                continue;
+            }
+
+            let index_entry: Value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            if index_entry.get("f").and_then(Value::as_str) != Some("_id") {
+                continue;
+            }
+
+            let Some(primary_key) = index_entry.get("k").and_then(Value::as_str) else {
+                continue;
+            };
+            saw_primary_key_rows = true;
+
+            let is_deleted = index_entry
+                .get("status")
+                .and_then(Value::as_u64)
+                .is_some_and(|status| status == 0)
+                || index_entry
+                    .get("o")
+                    .and_then(Value::as_array)
+                    .is_some_and(|offsets| offsets.is_empty());
+
+            if is_deleted {
+                live_primary_keys.remove(primary_key);
+            } else if index_entry.get("o").and_then(Value::as_u64).is_some() {
+                live_primary_keys.insert(primary_key.to_string());
+            }
+        }
+
+        if saw_primary_key_rows {
+            Ok(Some(live_primary_keys.len()))
+        } else {
+            Ok(None)
+        }
     }
 
     fn database_path_from_name(root_directory: &Path, database_name: &str) -> Result<PathBuf> {

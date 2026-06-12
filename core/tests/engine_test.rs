@@ -2258,6 +2258,127 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
 }
 
 #[test]
+fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
+    let database = TempDatabase::new("us_051_show_drawers");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+    let schema_scope = StorageScope::schema("main_db", "tenant_schema");
+
+    for (id, element) in [
+        ("schema_gem_live", "Live"),
+        ("schema_gem_deleted", "Deleted"),
+    ] {
+        engine
+            .execute_in_scope(
+                schema_scope.clone(),
+                Command::Upsert {
+                    drawer_name: "gem".to_string(),
+                    payload: json!({
+                        "_id": id,
+                        "element": element
+                    }),
+                },
+            )
+            .expect("schema gem should upsert");
+    }
+
+    engine
+        .execute_in_scope(
+            schema_scope.clone(),
+            Command::Delete {
+                pointer: "@gem:schema_gem_deleted".to_string(),
+            },
+        )
+        .expect("schema gem should delete");
+
+    engine
+        .execute_in_scope(
+            schema_scope,
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "schema_weapon",
+                    "name": "Schema Blade"
+                }),
+            },
+        )
+        .expect("schema weapon should upsert");
+
+    engine
+        .execute_in_scope(
+            StorageScope::database("main_db"),
+            Command::Upsert {
+                drawer_name: "flat_schema.artifact".to_string(),
+                payload: json!({
+                    "_id": "flat_artifact",
+                    "kind": "Flat"
+                }),
+            },
+        )
+        .expect("flat schema drawer should upsert");
+
+    engine
+        .execute(
+            StorageCoordinate::new("tenant_alpha", "production", "core"),
+            Command::Upsert {
+                drawer_name: "character".to_string(),
+                payload: json!({
+                    "_id": "routed_character",
+                    "name": "Routed"
+                }),
+            },
+        )
+        .expect("routed drawer should upsert");
+
+    let drawers = engine
+        .show_drawers("main_db", "tenant_schema")
+        .expect("schema drawers should be discovered");
+    let drawer_names: Vec<String> = drawers
+        .iter()
+        .map(|inventory| inventory.name.clone())
+        .collect();
+
+    assert_eq!(drawer_names, vec!["gem".to_string(), "weapon".to_string()]);
+
+    let gem_inventory = drawers
+        .iter()
+        .find(|inventory| inventory.name == "gem")
+        .expect("gem drawer should be inventoried");
+    assert_eq!(gem_inventory.record_count, 1);
+    assert!(gem_inventory.disk_size_bytes > 0);
+    assert_eq!(gem_inventory.register_file_count, 3);
+
+    let weapon_inventory = drawers
+        .iter()
+        .find(|inventory| inventory.name == "weapon")
+        .expect("weapon drawer should be inventoried");
+    assert_eq!(weapon_inventory.record_count, 1);
+    assert_eq!(weapon_inventory.register_file_count, 3);
+
+    let flat_drawers = engine
+        .show_drawers("main_db", "flat_schema")
+        .expect("flat schema drawers should be discovered");
+    assert_eq!(flat_drawers.len(), 1);
+    assert_eq!(flat_drawers[0].name, "artifact");
+    assert_eq!(flat_drawers[0].record_count, 1);
+
+    let routed_drawers = engine
+        .show_drawers("tenant_alpha/production", "core")
+        .expect("routed drawers should be discovered");
+    assert_eq!(routed_drawers.len(), 1);
+    assert_eq!(routed_drawers[0].name, "character");
+    assert_eq!(routed_drawers[0].record_count, 1);
+
+    let command_result = engine
+        .execute_command(Command::ShowDrawers {
+            database_name: "main_db".to_string(),
+            schema_name: "tenant_schema".to_string(),
+        })
+        .expect("show drawers command should succeed");
+    assert_eq!(command_result, CommandResult::Drawers(drawers));
+}
+
+#[test]
 fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targets() {
     let database = TempDatabase::new("us_037_relationship_cardinality");
     fs::create_dir_all(&database.path).expect("temp dir should create");

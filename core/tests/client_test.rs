@@ -227,6 +227,18 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             },
             CommandResult::Schemas(vec!["tenant_schema".to_string()]),
         ),
+        (
+            Command::ShowDrawers {
+                database_name: "main_db".to_string(),
+                schema_name: "tenant_schema".to_string(),
+            },
+            CommandResult::Drawers(vec![StorageInventory {
+                name: "gem".to_string(),
+                record_count: 2,
+                disk_size_bytes: 2048,
+                register_file_count: 3,
+            }]),
+        ),
     ]);
 
     let client = WardrobeClient::open(connection).expect("client should open");
@@ -304,6 +316,17 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             .show_schemas("main_db")
             .expect("schemas should round trip"),
         vec!["tenant_schema".to_string()]
+    );
+    assert_eq!(
+        client
+            .show_drawers("main_db", "tenant_schema")
+            .expect("drawers should round trip"),
+        vec![StorageInventory {
+            name: "gem".to_string(),
+            record_count: 2,
+            disk_size_bytes: 2048,
+            register_file_count: 3,
+        }]
     );
 
     handle.join().expect("protocol server should finish");

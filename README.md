@@ -64,6 +64,8 @@ The main embedded entry points on `WardrobeEngine` are:
 - `list_databases`
 - `show_schemas`
 - `list_schemas`
+- `show_drawers`
+- `list_drawers`
 - `execute`
 - `execute_in_scope`
 
@@ -75,6 +77,7 @@ Supporting execution and routing types include:
 - `show_tenants` / `list_tenants` for active tenant namespace discovery
 - `show_databases` / `list_databases` for database inventory discovery
 - `show_schemas` / `list_schemas` for schema namespace discovery
+- `show_drawers` / `list_drawers` for scoped drawer inventory discovery
 - `Command` and `CommandResult` for a command-driven execution surface
 
 The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.
