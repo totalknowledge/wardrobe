@@ -1,6 +1,6 @@
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::recycler::Recycler;
-use crate::wrdb_lib::storage_format::{PlainTextJsonFormat, StorageFormat};
+use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use crate::wrdb_lib::writer::DatabaseWriter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -237,11 +237,7 @@ impl Drawer {
 
         let mut index_entries = Vec::new();
         index_reader.stream_with_offsets(|offset, line| {
-            index_entries.push((
-                offset,
-                PlainTextJsonFormat::is_tombstone(line.as_bytes()),
-                line.to_string(),
-            ));
+            index_entries.push((offset, BsonBinaryFormat::is_tombstone(line), line.to_vec()));
         })?;
 
         let total_index_file_len = index_writer.current_length()?;
@@ -256,9 +252,7 @@ impl Drawer {
 
             if is_dead {
                 index_recycler.register_free_slot(actual_slot_size, current_offset);
-            } else if let Some(index_entry) =
-                PlainTextJsonFormat::deserialize_record(line_content.as_bytes())?
-            {
+            } else if let Some(index_entry) = BsonBinaryFormat::deserialize_record(line_content)? {
                 if let Some((data_offset, block_entry)) =
                     DataBlockIndexEntry::from_index_entry(&index_entry)
                 {
@@ -426,7 +420,7 @@ impl Drawer {
             }
         }
 
-        let serialized_record = PlainTextJsonFormat::serialize_record(&record)?;
+        let serialized_record = BsonBinaryFormat::serialize_record(&record)?;
         let raw_len = serialized_record.len();
         let target_size_class = self.data_recycler.calculate_aligned_size(raw_len);
         let live_block = DataBlockIndexEntry::live(&serialized_record, target_size_class);
@@ -625,10 +619,10 @@ impl Drawer {
                         format!("Missing primary key field: {}", self.primary_key),
                     )
                 })?;
-            let serialized_record = PlainTextJsonFormat::serialize_record(record)?;
+            let serialized_record = BsonBinaryFormat::serialize_record(record)?;
             let data_offset = Self::append_compact_payload(&mut compact_data, &serialized_record);
             let block_entry =
-                DataBlockIndexEntry::live(&serialized_record, serialized_record.len() + 1);
+                DataBlockIndexEntry::live(&serialized_record, serialized_record.len());
 
             let primary_index_entry = Self::index_entry_value(
                 &self.primary_key,
@@ -1154,10 +1148,10 @@ impl Drawer {
 
         let size_class = self.estimate_data_slot_size(stale_offset, current_file_len);
         let (payload_len, crc) = if let Some(record) = old_record {
-            let serialized_record = PlainTextJsonFormat::serialize_record(record)?;
+            let serialized_record = BsonBinaryFormat::serialize_record(record)?;
             (serialized_record.len(), crc32(&serialized_record))
         } else {
-            (size_class.saturating_sub(1), 0)
+            (size_class, 0)
         };
 
         Ok(Some((
@@ -1251,17 +1245,28 @@ impl Drawer {
             ));
         };
 
-        let serialized_record = PlainTextJsonFormat::serialize_record(migrated_record)?;
-        if serialized_record.len() + 1 > old_block.size_class {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Cannot lazily migrate legacy record because the upgraded payload no longer fits its allocated block",
-            ));
-        }
-
-        let live_block = DataBlockIndexEntry::live(&serialized_record, old_block.size_class);
-        self.data_writer
-            .overwrite_at_offset(offset, &serialized_record, old_block.size_class)?;
+        let serialized_record = BsonBinaryFormat::serialize_record(migrated_record)?;
+        let (resolved_offset, resolved_size_class) =
+            if serialized_record.len() <= old_block.size_class {
+                self.data_writer.overwrite_at_offset(
+                    offset,
+                    &serialized_record,
+                    old_block.size_class,
+                )?;
+                (offset, old_block.size_class)
+            } else {
+                let target_size_class = self
+                    .data_recycler
+                    .calculate_aligned_size(serialized_record.len());
+                let new_offset = self.write_data_payload(&serialized_record, target_size_class)?;
+                self.data_writer
+                    .write_tombstone_at_offset(offset, old_block.size_class)?;
+                self.data_block_index.remove(&offset);
+                self.data_recycler
+                    .register_free_slot(old_block.size_class, offset);
+                (new_offset, target_size_class)
+            };
+        let live_block = DataBlockIndexEntry::live(&serialized_record, resolved_size_class);
 
         if old_primary_key_value != new_primary_key_value {
             let primary_key_field_name = self.primary_key.clone();
@@ -1283,12 +1288,12 @@ impl Drawer {
         self.write_index_log(
             &self.primary_key.clone(),
             new_primary_key_value,
-            Value::from(offset),
+            Value::from(resolved_offset),
             Some(live_block),
         )?;
         self.primary_memory_index
-            .insert(new_primary_key_value.to_string(), offset);
-        self.data_block_index.insert(offset, live_block);
+            .insert(new_primary_key_value.to_string(), resolved_offset);
+        self.data_block_index.insert(resolved_offset, live_block);
         self.metadata_format_version = DRAWER_METADATA_FORMAT_VERSION;
         self.persist_metadata()
     }
@@ -1393,7 +1398,7 @@ impl Drawer {
             index_entry["status"] = Value::from(block_entry.status as u64);
         }
 
-        let serialized_index = PlainTextJsonFormat::serialize_record(&index_entry)?;
+        let serialized_index = BsonBinaryFormat::serialize_record(&index_entry)?;
         let entry_raw_len = serialized_index.len();
         let target_size_class = self.index_recycler.calculate_aligned_size(entry_raw_len);
 
@@ -1486,13 +1491,13 @@ impl Drawer {
         let mut registered_data_slots = HashSet::new();
 
         index_reader.stream_with_offsets(|_offset, line| {
-            if !PlainTextJsonFormat::is_tombstone(line.as_bytes()) {
-                index_lines.push(line.to_string());
+            if !BsonBinaryFormat::is_tombstone(line) {
+                index_lines.push(line.to_vec());
             }
         })?;
 
         for line in index_lines {
-            if let Some(index_entry) = PlainTextJsonFormat::deserialize_record(line.as_bytes())? {
+            if let Some(index_entry) = BsonBinaryFormat::deserialize_record(&line)? {
                 if let Some((data_offset, block_entry)) =
                     DataBlockIndexEntry::from_index_entry(&index_entry)
                 {
@@ -1511,7 +1516,7 @@ impl Drawer {
 
         let mut data_slots = Vec::new();
         self.data_reader.stream_with_offsets(|offset, line| {
-            data_slots.push((offset, PlainTextJsonFormat::is_tombstone(line.as_bytes())));
+            data_slots.push((offset, BsonBinaryFormat::is_tombstone(line)));
         })?;
 
         let total_data_file_len = self.data_writer.current_length()?;
@@ -1562,7 +1567,6 @@ impl Drawer {
     fn append_compact_payload(target: &mut Vec<u8>, payload: &[u8]) -> u64 {
         let starting_offset = target.len() as u64;
         target.extend_from_slice(payload);
-        target.push(b'\n');
         starting_offset
     }
 
@@ -1571,27 +1575,25 @@ impl Drawer {
         index_entry: &Value,
     ) -> std::io::Result<(u64, usize)> {
         let starting_offset = target.len() as u64;
-        let serialized_index = PlainTextJsonFormat::serialize_record(index_entry)?;
+        let serialized_index = BsonBinaryFormat::serialize_record(index_entry)?;
         target.extend_from_slice(&serialized_index);
-        target.push(b'\n');
 
-        Ok((starting_offset, serialized_index.len() + 1))
+        Ok((starting_offset, serialized_index.len()))
     }
 
     pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {
         let mut live_records = Vec::new();
-        let mut raw_lines = Vec::new();
+        let mut raw_slots = Vec::new();
 
         self.data_reader
             .stream_with_offsets(|_offset, line_content| {
-                let trimmed = line_content.trim();
-                if !trimmed.is_empty() && !PlainTextJsonFormat::is_tombstone(trimmed.as_bytes()) {
-                    raw_lines.push(trimmed.to_string());
+                if !line_content.is_empty() && !BsonBinaryFormat::is_tombstone(line_content) {
+                    raw_slots.push(line_content.to_vec());
                 }
             })?;
 
-        for line in raw_lines {
-            if let Some(record_value) = PlainTextJsonFormat::deserialize_record(line.as_bytes())? {
+        for slot in raw_slots {
+            if let Some(record_value) = BsonBinaryFormat::deserialize_record(&slot)? {
                 live_records.push(record_value);
             }
         }

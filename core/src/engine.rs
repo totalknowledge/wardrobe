@@ -1,5 +1,7 @@
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
+use crate::wrdb_lib::reader::DatabaseReader;
+use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
@@ -890,22 +892,20 @@ impl WardrobeEngine {
             return Ok(None);
         }
 
-        let contents = fs::read_to_string(index_path)?;
         let mut live_primary_keys = BTreeSet::new();
         let mut saw_primary_key_rows = false;
+        let reader = DatabaseReader::open_drawer(index_path)?;
 
-        for line in contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            if line.starts_with("!!DEAD!!") {
-                continue;
+        let mut index_entries = Vec::new();
+        reader.stream_with_offsets(|_offset, slot| {
+            if !BsonBinaryFormat::is_tombstone(slot) {
+                index_entries.push(slot.to_vec());
             }
+        })?;
 
-            let index_entry: Value = match serde_json::from_str(line) {
-                Ok(value) => value,
-                Err(_) => continue,
+        for slot in index_entries {
+            let Some(index_entry) = BsonBinaryFormat::deserialize_record(&slot)? else {
+                continue;
             };
 
             if index_entry.get("f").and_then(Value::as_str) != Some("_id") {

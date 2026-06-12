@@ -3,7 +3,9 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::fs;
-use wardrobe_core::{DatabaseWriter, Drawer, PlainTextJsonFormat, Recycler, StorageFormat};
+use wardrobe_core::{
+    BsonBinaryFormat, DatabaseReader, DatabaseWriter, Drawer, Recycler, StorageFormat,
+};
 
 fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_json::Value {
     let metadata_path = database_directory
@@ -35,19 +37,44 @@ fn load_index_records(
     let index_path = database_directory
         .path
         .join(format!("{}_index.drw", drawer_name));
-    let index_contents = fs::read_to_string(index_path).expect("index file should be readable");
-
-    index_contents
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("!!DEAD!!") {
-                None
-            } else {
-                serde_json::from_str(trimmed).ok()
+    let index_reader = DatabaseReader::open_drawer(index_path).expect("index reader should open");
+    let mut records = Vec::new();
+    index_reader
+        .stream_with_offsets(|_offset, slot| {
+            if !BsonBinaryFormat::is_tombstone(slot) {
+                if let Ok(Some(value)) = BsonBinaryFormat::deserialize_record(slot) {
+                    records.push(value);
+                }
             }
         })
-        .collect()
+        .expect("index should stream");
+    records
+}
+
+fn count_tombstones(path: &std::path::Path) -> usize {
+    let reader = DatabaseReader::open_drawer(path).expect("reader should open");
+    let mut count = 0usize;
+    reader
+        .stream_with_offsets(|_offset, slot| {
+            if BsonBinaryFormat::is_tombstone(slot) {
+                count += 1;
+            }
+        })
+        .expect("stream should succeed");
+    count
+}
+
+fn reopened_records_from_file(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let reader = DatabaseReader::open_drawer(path).expect("reader should open");
+    let mut records = Vec::new();
+    reader
+        .stream_with_offsets(|_offset, slot| {
+            if let Ok(Some(record)) = BsonBinaryFormat::deserialize_record(slot) {
+                records.push(record);
+            }
+        })
+        .expect("stream should succeed");
+    records
 }
 
 #[test]
@@ -207,13 +234,11 @@ fn delete_by_primary_key_tombstones_record_and_evicts_indexes() {
             .is_empty()
     );
 
-    let data_contents = fs::read_to_string(database_directory.path.join("gem.drw"))
-        .expect("data file should be readable");
-    assert!(data_contents.contains("!!DEAD!!"));
-
-    let index_contents = fs::read_to_string(database_directory.path.join("gem_index.drw"))
-        .expect("index file should be readable");
-    assert!(index_contents.contains("!!DEAD!!"));
+    assert_eq!(
+        count_tombstones(&database_directory.path.join("gem.drw")),
+        1
+    );
+    assert!(count_tombstones(&database_directory.path.join("gem_index.drw")) >= 1);
     assert!(
         load_index_records(&database_directory, "gem")
             .iter()
@@ -358,9 +383,7 @@ fn us_015_index_journal_tracks_blocks_and_reuses_dead_slots_after_reopen() {
             && record.get("crc").is_some()
     }));
     assert_eq!(index_records.len(), 1);
-    let index_contents = fs::read_to_string(database_directory.path.join("socks_index.drw"))
-        .expect("index file should be readable");
-    assert!(index_contents.contains("!!DEAD!!"));
+    assert!(count_tombstones(&database_directory.path.join("socks_index.drw")) >= 1);
 
     let data_path = database_directory.path.join("socks.drw");
     let len_after_update = fs::metadata(&data_path)
@@ -383,15 +406,13 @@ fn us_015_index_journal_tracks_blocks_and_reuses_dead_slots_after_reopen() {
     let len_after_reuse = fs::metadata(&data_path)
         .expect("data file metadata should read")
         .len();
-    let data_contents = fs::read_to_string(&data_path).expect("data file should be readable");
+    let records_after_reuse = reopened_records_from_file(&data_path);
 
     assert_eq!(len_after_reuse, len_after_update);
     assert!(
-        data_contents
-            .lines()
-            .next()
-            .expect("first data line should exist")
-            .contains("@socks:lnk_b")
+        records_after_reuse
+            .iter()
+            .any(|record| record["_id"] == "@socks:lnk_b")
     );
 }
 
@@ -428,9 +449,7 @@ fn us_046_upsert_reuses_recycler_slot_before_appending() {
     let len_after_delete = fs::metadata(&data_path)
         .expect("data metadata should read")
         .len();
-    let index_contents = fs::read_to_string(database_directory.path.join("socks_index.drw"))
-        .expect("index file should be readable");
-    assert!(index_contents.contains("!!DEAD!!"));
+    assert!(count_tombstones(&database_directory.path.join("socks_index.drw")) >= 1);
 
     drawer
         .upsert_record(json!({
@@ -487,7 +506,7 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
         "color": "Gold"
     });
     let serialized_record =
-        PlainTextJsonFormat::serialize_record(&reclaimed_record).expect("record should serialize");
+        BsonBinaryFormat::serialize_record(&reclaimed_record).expect("record should serialize");
     let target_size_class = Recycler::new().calculate_aligned_size(serialized_record.len());
     let dead_offset = {
         let mut data_writer =
@@ -517,7 +536,7 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
         "status": 0
     });
     let serialized_index =
-        PlainTextJsonFormat::serialize_record(&dead_index_entry).expect("index should serialize");
+        BsonBinaryFormat::serialize_record(&dead_index_entry).expect("index should serialize");
     let index_size_class = Recycler::new().calculate_aligned_size(serialized_index.len());
     DatabaseWriter::open_drawer(&index_path)
         .expect("index writer should open")
@@ -549,13 +568,7 @@ fn bug_001_repeat_upserts_tombstone_stale_index_entries_and_reuse_after_reopen()
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
     let index_path = database_directory.path.join("socks_index.drw");
-    let count_index_tombstones = || {
-        fs::read_to_string(&index_path)
-            .expect("index should read")
-            .lines()
-            .filter(|line| line.trim_start().starts_with("!!DEAD!!"))
-            .count()
-    };
+    let count_index_tombstones = || count_tombstones(&index_path);
 
     {
         let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
@@ -667,8 +680,7 @@ fn update_same_primary_key_rewrites_the_record() {
     assert_eq!(records.len(), 1);
 
     let data_file = database_directory.path.join("weapon.drw");
-    let data_contents = fs::read_to_string(&data_file).expect("data file should be readable");
-    assert!(data_contents.contains("!!DEAD!!"));
+    assert!(count_tombstones(&data_file) >= 1);
 }
 
 #[test]
@@ -947,15 +959,13 @@ fn us_042_vacuum_compacts_live_records_and_rebuilds_indexes() {
         .expect("delete should succeed")
         .expect("record should delete");
 
-    let before_contents = fs::read_to_string(&data_path).expect("data file should read");
     let before_len = fs::metadata(&data_path)
         .expect("data metadata should read")
         .len();
-    assert!(before_contents.contains("!!DEAD!!"));
+    assert!(count_tombstones(&data_path) >= 1);
 
     let report = drawer.vacuum().expect("vacuum should succeed");
 
-    let after_contents = fs::read_to_string(&data_path).expect("data file should read");
     let after_len = fs::metadata(&data_path)
         .expect("data metadata should read")
         .len();
@@ -965,8 +975,7 @@ fn us_042_vacuum_compacts_live_records_and_rebuilds_indexes() {
     assert_eq!(report.data_bytes_after, after_len);
     assert!(report.bytes_reclaimed > 0);
     assert!(after_len < before_len);
-    assert!(!after_contents.contains("!!DEAD!!"));
-    assert!(after_contents.lines().all(|line| line == line.trim_end()));
+    assert_eq!(count_tombstones(&data_path), 0);
 
     assert_eq!(
         drawer
