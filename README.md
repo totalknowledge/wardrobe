@@ -233,9 +233,41 @@ Useful server flags:
 ## Tooling
 
 - `wardrobe-core`: embedded library crate
-- `wardrobe-cli`: local inspection and diagnostics
+- `wardrobe-cli`: local inspection and diagnostics (see CLI Usage below)
 - `wardrobe-server`: standalone daemon with TCP protocol handling
 - `basic-usage`: practical sample application
+
+CLI Usage
+
+Run the CLI binary (defaults to embedded ./wardrobe):
+
+```text
+cargo run -p wardrobe-cli -- --target <connection> [--pretty] <command> [args]
+```
+
+Examples:
+
+- Run a single command against an embedded store:
+  cargo run -p wardrobe-cli -- --target ./data records weapon
+- Pipe a command via stdin (scripting):
+  echo "records weapon" | cargo run -p wardrobe-cli -- --target ./data
+- Start an interactive REPL against a network daemon:
+  cargo run -p wardrobe-cli -- --target "wardrobe://localhost:24842"
+
+Flags and commands
+
+- --target <connection>   Wardrobe connection string (default: ./wardrobe)
+- --pretty                Pretty-print JSON output
+
+Common commands:
+- records <drawer>
+- upsert <drawer> '<json>'
+- delete-by-id <pointer>
+- show-databases
+- show-schemas <database>
+- show-drawers <database> <schema>
+- drawers, diagnose, inspect <drawer>  (embedded-only)
+
 
 Run the test suite with:
 

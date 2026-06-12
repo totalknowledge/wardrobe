@@ -8,5 +8,7 @@ name = "wardrobe-cli"
 path = "src/main.rs"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 wardrobe-core = { path = "../core" }
+atty = "0.2"
