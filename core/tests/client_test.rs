@@ -208,6 +208,10 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             },
             CommandResult::Migrated(report.clone()),
         ),
+        (
+            Command::ShowTenants,
+            CommandResult::Tenants(vec!["tenant_alpha".to_string()]),
+        ),
     ]);
 
     let client = WardrobeClient::open(connection).expect("client should open");
@@ -264,6 +268,10 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             .migrate_drawer("gem")
             .expect("migration should round trip"),
         report
+    );
+    assert_eq!(
+        client.show_tenants().expect("tenants should round trip"),
+        vec!["tenant_alpha".to_string()]
     );
 
     handle.join().expect("protocol server should finish");

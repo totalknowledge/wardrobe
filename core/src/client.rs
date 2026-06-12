@@ -199,6 +199,18 @@ impl WardrobeClient {
             })?),
         }
     }
+
+    pub fn show_tenants(&self) -> Result<Vec<String>> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.show_tenants(),
+            Driver::Network(driver) => expect_tenants(driver.execute(Command::ShowTenants)?),
+            Driver::UnixSocket(driver) => expect_tenants(driver.execute(Command::ShowTenants)?),
+        }
+    }
+
+    pub fn list_tenants(&self) -> Result<Vec<String>> {
+        self.show_tenants()
+    }
 }
 
 impl NetworkDriver {
@@ -372,6 +384,13 @@ fn expect_migrated(result: CommandResult) -> Result<VacuumReport> {
     match result {
         CommandResult::Migrated(report) => Ok(report),
         other => unexpected_result("migration report", other),
+    }
+}
+
+fn expect_tenants(result: CommandResult) -> Result<Vec<String>> {
+    match result {
+        CommandResult::Tenants(tenants) => Ok(tenants),
+        other => unexpected_result("tenants", other),
     }
 }
 

@@ -2002,6 +2002,84 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
 }
 
 #[test]
+fn us_048_show_tenants_discovers_active_tenant_namespaces() {
+    let database = TempDatabase::new("us_048_show_tenants");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    for coordinate in [
+        StorageCoordinate::new("tenant_alpha", "production", "core"),
+        StorageCoordinate::new("tenant_beta", "production", "core"),
+    ] {
+        engine
+            .execute(
+                coordinate,
+                Command::Upsert {
+                    drawer_name: "gem".to_string(),
+                    payload: json!({
+                        "_id": "route_seed",
+                        "element": "Routed"
+                    }),
+                },
+            )
+            .expect("coordinate-scoped upsert should succeed");
+    }
+
+    engine
+        .execute_in_scope(
+            StorageScope::schema("main_db", "tenant_schema"),
+            Command::Upsert {
+                drawer_name: "weapon".to_string(),
+                payload: json!({
+                    "_id": "schema_seed",
+                    "name": "Schema Blade"
+                }),
+            },
+        )
+        .expect("schema-scoped upsert should succeed");
+
+    engine
+        .execute_in_scope(
+            StorageScope::drawer("tenant_drawer"),
+            Command::Upsert {
+                drawer_name: "character".to_string(),
+                payload: json!({
+                    "_id": "drawer_seed",
+                    "name": "Drawer Tenant"
+                }),
+            },
+        )
+        .expect("drawer-scoped upsert should succeed");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "root_seed",
+                "element": "Root"
+            }),
+        )
+        .expect("unscoped root drawer should not create a tenant namespace");
+
+    let tenants = engine.show_tenants().expect("tenants should be discovered");
+
+    assert_eq!(
+        tenants,
+        vec![
+            "tenant_alpha".to_string(),
+            "tenant_beta".to_string(),
+            "tenant_drawer".to_string(),
+            "tenant_schema".to_string()
+        ]
+    );
+
+    let command_result = engine
+        .execute_command(Command::ShowTenants)
+        .expect("show tenants command should succeed");
+    assert_eq!(command_result, CommandResult::Tenants(tenants));
+}
+
+#[test]
 fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targets() {
     let database = TempDatabase::new("us_037_relationship_cardinality");
     fs::create_dir_all(&database.path).expect("temp dir should create");

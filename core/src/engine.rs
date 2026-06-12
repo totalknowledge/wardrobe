@@ -3,8 +3,8 @@ use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::OpenOptions;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
@@ -194,6 +194,7 @@ impl ExecutionContext<'_> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
+    ShowTenants,
     Upsert {
         drawer_name: String,
         payload: Value,
@@ -235,6 +236,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandResult {
+    Tenants(Vec<String>),
     Pointer(String),
     Records(Vec<Value>),
     Record(Option<Value>),
@@ -438,6 +440,14 @@ impl WardrobeEngine {
         Ok(Self::read_lock(&self.database_core)?.cached_drawer_count())
     }
 
+    pub fn show_tenants(&self) -> Result<Vec<String>> {
+        Self::discover_tenants(&self.root_directory)
+    }
+
+    pub fn list_tenants(&self) -> Result<Vec<String>> {
+        self.show_tenants()
+    }
+
     pub fn execute(
         &self,
         coordinate: StorageCoordinate,
@@ -468,6 +478,7 @@ impl WardrobeEngine {
 
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
         match command {
+            Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
             Command::Execute {
                 coordinate,
                 command,
@@ -485,6 +496,10 @@ impl WardrobeEngine {
         let context = ExecutionContext { drawer_namespace };
 
         match command {
+            Command::ShowTenants => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Tenant discovery is only available at the WardrobeEngine boundary",
+            )),
             Command::Upsert {
                 drawer_name,
                 payload,
@@ -569,6 +584,125 @@ impl WardrobeEngine {
                 "Failed to acquire routed database handle",
             )
         })
+    }
+
+    fn discover_tenants(root_directory: &Path) -> Result<Vec<String>> {
+        let mut tenants = BTreeSet::new();
+
+        if !root_directory.exists() {
+            return Ok(Vec::new());
+        }
+
+        Self::collect_drawer_prefix_tenants(root_directory, &mut tenants)?;
+
+        for top_level in Self::child_directories(root_directory)? {
+            let Some(top_level_name) = Self::file_name_to_string(&top_level) else {
+                continue;
+            };
+
+            if Self::directory_has_drawer_files(&top_level)? {
+                tenants.insert(top_level_name.clone());
+                Self::collect_drawer_prefix_tenants(&top_level, &mut tenants)?;
+            }
+
+            let mut has_coordinate_storage = false;
+            for second_level in Self::child_directories(&top_level)? {
+                if Self::directory_has_drawer_files(&second_level)? {
+                    if let Some(schema_name) = Self::file_name_to_string(&second_level) {
+                        tenants.insert(schema_name);
+                    }
+                    Self::collect_drawer_prefix_tenants(&second_level, &mut tenants)?;
+                }
+
+                for third_level in Self::child_directories(&second_level)? {
+                    if Self::directory_has_drawer_files(&third_level)? {
+                        has_coordinate_storage = true;
+                        Self::collect_drawer_prefix_tenants(&third_level, &mut tenants)?;
+                    }
+                }
+            }
+
+            if has_coordinate_storage {
+                tenants.insert(top_level_name);
+            }
+        }
+
+        Ok(tenants.into_iter().collect())
+    }
+
+    fn child_directories(directory: &Path) -> Result<Vec<PathBuf>> {
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut directories = Vec::new();
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            }
+        }
+        directories.sort();
+        Ok(directories)
+    }
+
+    fn directory_has_drawer_files(directory: &Path) -> Result<bool> {
+        if !directory.exists() {
+            return Ok(false);
+        }
+
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if Self::drawer_name_from_file_path(&entry.path()).is_some() {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn collect_drawer_prefix_tenants(
+        directory: &Path,
+        tenants: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if !directory.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let Some(drawer_name) = Self::drawer_name_from_file_path(&entry.path()) else {
+                continue;
+            };
+
+            if let Some((tenant_prefix, drawer_name)) = drawer_name.rsplit_once('_') {
+                if !tenant_prefix.is_empty() && !drawer_name.is_empty() {
+                    tenants.insert(tenant_prefix.to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn drawer_name_from_file_path(path: &Path) -> Option<String> {
+        if !path.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("drw")
+        {
+            return None;
+        }
+
+        let stem = path.file_stem()?.to_str()?;
+        if stem.ends_with("_index") || stem.ends_with("_meta") {
+            return None;
+        }
+
+        Some(stem.to_string())
+    }
+
+    fn file_name_to_string(path: &Path) -> Option<String> {
+        path.file_name()?.to_str().map(ToOwned::to_owned)
     }
 
     fn read_lock<T>(lock: &RwLock<T>) -> Result<RwLockReadGuard<'_, T>> {

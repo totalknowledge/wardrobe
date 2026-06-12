@@ -57,6 +57,8 @@ The main embedded entry points on `WardrobeEngine` are:
 - `vacuum_drawer`
 - `migrate_drawer`
 - `cached_drawer_count`
+- `show_tenants`
+- `list_tenants`
 - `execute`
 - `execute_in_scope`
 
@@ -65,6 +67,7 @@ Supporting execution and routing types include:
 - `QueryModifiers` and `OrderDirection` for sorting and pagination
 - `StorageCoordinate` for tenant/database/schema routing
 - `StorageScope` for database, schema, or drawer isolation modes
+- `show_tenants` / `list_tenants` for active tenant namespace discovery
 - `Command` and `CommandResult` for a command-driven execution surface
 
 The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.
