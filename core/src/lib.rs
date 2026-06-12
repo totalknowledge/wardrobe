@@ -17,5 +17,5 @@ pub use wrdb_lib::drawer::{Drawer, VacuumReport};
 pub use wrdb_lib::protocol::{PROTOCOL_MAGIC, ProtocolFrame, ProtocolOpcode};
 pub use wrdb_lib::reader::DatabaseReader;
 pub use wrdb_lib::recycler::Recycler;
-pub use wrdb_lib::storage_format::{PlainTextJsonFormat, StorageFormat};
+pub use wrdb_lib::storage_format::{BsonBinaryFormat, PlainTextJsonFormat, StorageFormat};
 pub use wrdb_lib::writer::DatabaseWriter;

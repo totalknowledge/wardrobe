@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe_core::{DatabaseReader, DatabaseWriter, PlainTextJsonFormat, StorageFormat};
+use wardrobe_core::{BsonBinaryFormat, DatabaseReader, DatabaseWriter, StorageFormat};
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -14,48 +14,45 @@ fn temp_file_path(test_name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn plaintext_json_format_round_trips_records() {
+fn bson_binary_format_round_trips_records() {
     let record = json!({
         "_id": "@gem:lnk_a",
         "element": "Fire",
         "potency": 8800
     });
 
-    let serialized =
-        PlainTextJsonFormat::serialize_record(&record).expect("record should serialize");
+    let serialized = BsonBinaryFormat::serialize_record(&record).expect("record should serialize");
     let deserialized =
-        PlainTextJsonFormat::deserialize_record(&serialized).expect("record should deserialize");
+        BsonBinaryFormat::deserialize_record(&serialized).expect("record should deserialize");
 
     assert_eq!(deserialized, Some(record));
-    assert!(!serialized.ends_with(b"\n"));
+    assert!(BsonBinaryFormat::is_binary_frame(&serialized));
 }
 
 #[test]
-fn plaintext_json_format_handles_padding_tombstones_empty_and_invalid_records() {
-    let padded_record = PlainTextJsonFormat::deserialize_record(br#"{"_id":"@gem:lnk_a"}       "#)
-        .expect("padded record should parse");
+fn bson_binary_format_handles_legacy_plaintext_tombstones_empty_and_invalid_records() {
+    let padded_record = BsonBinaryFormat::deserialize_record(br#"{"_id":"@gem:lnk_a"}       "#)
+        .expect("legacy padded record should parse");
     assert_eq!(padded_record, Some(json!({"_id": "@gem:lnk_a"})));
 
-    let tombstone = PlainTextJsonFormat::deserialize_record(b"!!DEAD!!       \n")
+    let tombstone = BsonBinaryFormat::deserialize_record(b"!!DEAD!!       \n")
         .expect("tombstone should decode cleanly");
     assert!(tombstone.is_none());
-    assert!(PlainTextJsonFormat::is_tombstone(b"!!DEAD!!       "));
+    assert!(BsonBinaryFormat::is_tombstone(b"!!DEAD!!       "));
 
-    let empty =
-        PlainTextJsonFormat::deserialize_record(b"     \n").expect("empty should decode cleanly");
+    let empty = BsonBinaryFormat::deserialize_record(b"     \n").expect("empty should decode");
     assert!(empty.is_none());
 
-    let invalid = PlainTextJsonFormat::deserialize_record(b"not json")
-        .expect("invalid text should decode cleanly");
+    let invalid = BsonBinaryFormat::deserialize_record(b"not json").expect("invalid decode");
     assert!(invalid.is_none());
 }
 
 #[test]
-fn us_016_plaintext_storage_format_preserves_reader_writer_flow() {
-    let file_path = temp_file_path("us_016_reader_writer_format_flow");
+fn us_045_bson_storage_format_preserves_reader_writer_flow() {
+    let file_path = temp_file_path("us_045_reader_writer_format_flow");
     let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
     let record = json!({"_id": "@gem:lnk_a", "element": "Fire"});
-    let payload = PlainTextJsonFormat::serialize_record(&record).expect("record should serialize");
+    let payload = BsonBinaryFormat::serialize_record(&record).expect("record should serialize");
 
     let offset = writer
         .append_record(&payload, 8)
@@ -69,6 +66,33 @@ fn us_016_plaintext_storage_format_preserves_reader_writer_flow() {
     assert_eq!(decoded, Some(record));
 
     let raw_contents = fs::read(&file_path).expect("file should be readable");
-    assert!(raw_contents.ends_with(b"\n"));
-    assert!(raw_contents.starts_with(b"{"));
+    assert!(raw_contents.starts_with(b"WRDB"));
+}
+
+#[test]
+fn us_045_bson_binary_layout_uses_big_endian_slot_and_payload_lengths() {
+    let record = json!({"_id": "@gem:lnk_a", "power": 10});
+    let payload = BsonBinaryFormat::serialize_record(&record).expect("serialize");
+    let framed = BsonBinaryFormat::with_slot_size(&payload, 64).expect("slot rewrite");
+
+    let payload_len = u32::from_be_bytes(framed[8..12].try_into().expect("payload length bytes"));
+    let slot_len = u32::from_be_bytes(framed[12..16].try_into().expect("slot length bytes"));
+
+    assert_eq!(
+        payload_len as usize + BsonBinaryFormat::frame_header_len(),
+        payload.len()
+    );
+    assert_eq!(slot_len, 64);
+}
+
+#[test]
+fn us_045_bson_binary_rejects_invalid_slot_mutations() {
+    let record = json!({"_id": "@gem:lnk_a"});
+    let payload = BsonBinaryFormat::serialize_record(&record).expect("serialize");
+
+    let too_small = BsonBinaryFormat::with_slot_size(&payload, payload.len() - 1);
+    assert!(too_small.is_err());
+
+    let invalid_header = BsonBinaryFormat::with_slot_size(b"{}", 32);
+    assert!(invalid_header.is_err());
 }

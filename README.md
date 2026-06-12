@@ -42,6 +42,7 @@ Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 - `Recycler`
 - `StorageFormat`
 - `PlainTextJsonFormat`
+- `BsonBinaryFormat`
 
 The main embedded entry points on `WardrobeEngine` are:
 
@@ -217,6 +218,7 @@ Useful server flags:
 ## Current Capabilities
 
 - Flat-file drawer storage with separate data, index, and metadata sidecar files
+- Big-endian BSON-framed binary serialization for drawer data and index payloads
 - Primary-key indexing and secondary unique-field indexing
 - Upsert semantics with tombstoning and size-class slot recycling
 - Recursive record hydration across drawers without unsafe code

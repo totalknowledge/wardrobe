@@ -50,7 +50,9 @@ fn stream_with_offsets_reports_each_line_offset() {
     let mut offsets = Vec::new();
 
     reader
-        .stream_with_offsets(|offset, line| offsets.push((offset, line.to_string())))
+        .stream_with_offsets(|offset, line| {
+            offsets.push((offset, String::from_utf8_lossy(line).to_string()))
+        })
         .expect("stream should succeed");
 
     assert_eq!(offsets.len(), 2);

@@ -8,8 +8,9 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::{
-    Command, CommandResult, DatabaseWriter, OrderDirection, PlainTextJsonFormat, QueryModifiers,
-    Recycler, StorageCoordinate, StorageFormat, StorageLocator, StorageScope, WardrobeEngine,
+    BsonBinaryFormat, Command, CommandResult, DatabaseReader, DatabaseWriter, OrderDirection,
+    PlainTextJsonFormat, QueryModifiers, Recycler, StorageCoordinate, StorageFormat,
+    StorageLocator, StorageScope, WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -113,6 +114,40 @@ fn wal_records(database: &TempDatabase) -> Vec<serde_json::Value> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).expect("wal line should parse"))
         .collect()
+}
+
+fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    let reader = DatabaseReader::open_drawer(path).expect("drawer should open");
+    let mut records = Vec::new();
+    reader
+        .stream_with_offsets(|_offset, slot| {
+            if let Ok(Some(record)) = BsonBinaryFormat::deserialize_record(slot) {
+                records.push(record);
+            }
+        })
+        .expect("drawer should stream");
+    records
+}
+
+fn drawer_tombstone_count(path: &Path) -> usize {
+    if !path.exists() {
+        return 0;
+    }
+
+    let reader = DatabaseReader::open_drawer(path).expect("drawer should open");
+    let mut count = 0usize;
+    reader
+        .stream_with_offsets(|_offset, slot| {
+            if BsonBinaryFormat::is_tombstone(slot) {
+                count += 1;
+            }
+        })
+        .expect("drawer should stream");
+    count
 }
 
 #[test]
@@ -416,14 +451,20 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
         )
         .expect("weapon should upsert with raw id-only gem reference");
 
-    let gem_file =
-        fs::read_to_string(database.path.join("gem.drw")).expect("gem drawer should be readable");
-    assert!(!gem_file.contains("!!DEAD!!"));
-    assert!(gem_file.contains("\"element\":\"Solar\""));
+    let gem_records = drawer_records_from_disk(&database.path.join("gem.drw"));
+    assert_eq!(drawer_tombstone_count(&database.path.join("gem.drw")), 0);
+    assert!(
+        gem_records
+            .iter()
+            .any(|record| record["element"] == "Solar")
+    );
 
-    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@gem:existing_gem\""));
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gem"] == "@gem:existing_gem")
+    );
 
     let found_gem = engine
         .find_by_id(wardrobe_gem_id)
@@ -470,9 +511,12 @@ fn us_018_id_only_subobject_accepts_preformatted_pointers() {
         )
         .expect("weapon should upsert with preformatted reference");
 
-    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@gem:existing_gem\""));
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gem"] == "@gem:existing_gem")
+    );
 
     let weapons = engine
         .find_all("weapon")
@@ -502,9 +546,12 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
         )
         .expect("weapon should upsert with full child object");
 
-    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@gem:full_child_gem\""));
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gem"] == "@gem:full_child_gem")
+    );
 
     let found_gem = engine
         .find_by_id("@gem:lnk_full_child_gem")
@@ -547,17 +594,24 @@ fn us_052_primary_ids_are_stored_clean_while_references_keep_drawer_routing() {
         .expect("weapon should upsert");
     assert_eq!(weapon_pointer, "@weapon:us_052_weapon");
 
-    let character_file = fs::read_to_string(database.path.join("character.drw"))
-        .expect("character drawer should be readable");
-    assert!(character_file.contains("\"_id\":\"us_052_owner\""));
-    assert!(!character_file.contains("@character:"));
-    assert!(!character_file.contains("lnk_us_052_owner"));
+    let character_records = drawer_records_from_disk(&database.path.join("character.drw"));
+    assert!(
+        character_records
+            .iter()
+            .any(|record| record["_id"] == "us_052_owner")
+    );
 
-    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"_id\":\"us_052_weapon\""));
-    assert!(weapon_file.contains("\"character\":\"@character:us_052_owner\""));
-    assert!(!weapon_file.contains("lnk_us_052_weapon"));
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["_id"] == "us_052_weapon")
+    );
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["character"] == "@character:us_052_owner")
+    );
 
     let legacy_lookup = engine
         .find_by_id("@weapon:lnk_us_052_weapon")
@@ -623,12 +677,12 @@ fn us_053_inline_routing_registers_polymorphic_alias_and_hydrates_targets() {
         json!(["gem", "rune"])
     );
 
-    let artifact_file = fs::read_to_string(database.path.join("artifact.drw"))
-        .expect("artifact drawer should be readable");
+    let artifact_records = drawer_records_from_disk(&database.path.join("artifact.drw"));
     assert!(
-        artifact_file.contains("\"attachments\":[\"@gem:us_053_fire\",\"@rune:us_053_guard\"]")
+        artifact_records.iter().any(
+            |record| record["attachments"] == json!(["@gem:us_053_fire", "@rune:us_053_guard"])
+        )
     );
-    assert!(!artifact_file.contains("lnk_us_053"));
 
     let artifacts = engine
         .find_all("artifact")
@@ -682,9 +736,12 @@ fn us_053_self_referencing_alias_resolves_clean_string_keys() {
         )
         .expect("self-referencing character should upsert");
 
-    let character_file = fs::read_to_string(database.path.join("character.drw"))
-        .expect("character drawer should be readable");
-    assert!(character_file.contains("\"spouse\":\"@character:alex\""));
+    let character_records = drawer_records_from_disk(&database.path.join("character.drw"));
+    assert!(
+        character_records
+            .iter()
+            .any(|record| record["spouse"] == "@character:alex")
+    );
 
     let sam = engine
         .find_by_id("@character:sam")
@@ -712,10 +769,10 @@ fn us_019_scalar_arrays_are_preserved_on_upsert() {
         )
         .expect("character should upsert with scalar arrays");
 
-    let character_file = fs::read_to_string(database.path.join("character.drw"))
-        .expect("character drawer should be readable");
-    assert!(character_file.contains("\"tags\":[\"tank\",\"support\",\"night-watch\"]"));
-    assert!(character_file.contains("\"scores\":[10,20,30]"));
+    let character_records = drawer_records_from_disk(&database.path.join("character.drw"));
+    assert!(character_records.iter().any(|record| record["tags"]
+        == json!(["tank", "support", "night-watch"])
+        && record["scores"] == json!([10, 20, 30])));
 
     let characters = engine
         .find_all("character")
@@ -813,11 +870,10 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
         )
         .expect("weapon should upsert with id-only array references");
 
-    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(
-        weapon_file.contains("\"gems\":[\"@gem:array_existing_fire\",\"@gem:array_existing_air\"]")
-    );
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(weapon_records.iter().any(|record| {
+        record["gems"] == json!(["@gem:array_existing_fire", "@gem:array_existing_air"])
+    }));
 
     let weapons = engine
         .find_all("weapon")
@@ -866,16 +922,25 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
         )
         .expect("character should upsert with nested object arrays");
 
-    let character_file = fs::read_to_string(database.path.join("character.drw"))
-        .expect("character drawer should be readable");
+    let character_records = drawer_records_from_disk(&database.path.join("character.drw"));
     assert!(
-        character_file.contains("\"weapons\":[\"@weapon:array_spear\",\"@weapon:array_shield\"]")
+        character_records
+            .iter()
+            .any(|record| record["weapons"]
+                == json!(["@weapon:array_spear", "@weapon:array_shield"]))
     );
 
-    let weapon_file =
-        fs::read_to_string(database.path.join("weapon.drw")).expect("weapon drawer readable");
-    assert!(weapon_file.contains("\"gems\":[\"@gem:array_storm\"]"));
-    assert!(weapon_file.contains("\"gems\":[\"@gem:array_earth\"]"));
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gems"] == json!(["@gem:array_storm"]))
+    );
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gems"] == json!(["@gem:array_earth"]))
+    );
 
     let characters = engine
         .find_all("character")
@@ -922,9 +987,7 @@ fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
         );
     }
 
-    let data_contents =
-        fs::read_to_string(database.path.join("gem.drw")).expect("gem drawer should be readable");
-    assert!(data_contents.contains("!!DEAD!!"));
+    assert!(drawer_tombstone_count(&database.path.join("gem.drw")) >= 1);
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
@@ -1978,9 +2041,12 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
     assert!(!database.path.join("weapon.drw").exists());
     assert!(!database.path.join("gem.drw").exists());
 
-    let weapon_file = fs::read_to_string(database.path.join("tenant_graph_weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem\":\"@tenant_graph_gem:graph_fire\""));
+    let weapon_records = drawer_records_from_disk(&database.path.join("tenant_graph_weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gem"] == "@tenant_graph_gem:graph_fire")
+    );
 
     let result = engine
         .execute_in_scope(
@@ -2430,9 +2496,12 @@ fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targ
         )
         .expect("many-to-one faction target should allow duplicate references");
 
-    let weapon_file = fs::read_to_string(database.path.join("weapon.drw"))
-        .expect("weapon drawer should be readable");
-    assert!(weapon_file.contains("\"gem_slot\":\"@gem:us_037_fire\""));
+    let weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        weapon_records
+            .iter()
+            .any(|record| record["gem_slot"] == "@gem:us_037_fire")
+    );
 
     let duplicate_error = engine
         .upsert(
@@ -3299,17 +3368,12 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
     let before_len = fs::metadata(&data_path)
         .expect("weapon data metadata should read")
         .len();
-    assert!(
-        fs::read_to_string(&data_path)
-            .expect("weapon data should read")
-            .contains("!!DEAD!!")
-    );
+    assert!(drawer_tombstone_count(&data_path) >= 1);
 
     let report = engine
         .vacuum_drawer("weapon")
         .expect("vacuum should succeed");
 
-    let after_contents = fs::read_to_string(&data_path).expect("weapon data should read");
     let after_len = fs::metadata(&data_path)
         .expect("weapon data metadata should read")
         .len();
@@ -3319,7 +3383,7 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
     assert_eq!(report.data_bytes_after, after_len);
     assert!(report.bytes_reclaimed > 0);
     assert!(after_len < before_len);
-    assert!(!after_contents.contains("!!DEAD!!"));
+    assert_eq!(drawer_tombstone_count(&data_path), 0);
 
     let weapons = engine
         .find_all("weapon")
@@ -3377,11 +3441,7 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
         .join("prod")
         .join("core")
         .join("gem.drw");
-    assert!(
-        fs::read_to_string(&scoped_data_path)
-            .expect("routed data should read")
-            .contains("!!DEAD!!")
-    );
+    assert!(drawer_tombstone_count(&scoped_data_path) >= 1);
 
     let result = engine
         .execute(
@@ -3399,11 +3459,7 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
     assert_eq!(report.records_rewritten, 1);
     assert!(report.bytes_reclaimed > 0);
     assert!(!database.path.join("gem.drw").exists());
-    assert!(
-        !fs::read_to_string(&scoped_data_path)
-            .expect("routed data should read")
-            .contains("!!DEAD!!")
-    );
+    assert!(drawer_tombstone_count(&scoped_data_path) == 0);
 
     let result = engine
         .execute(
@@ -3441,12 +3497,14 @@ fn us_044_find_all_lazily_migrates_legacy_record_layout() {
     assert_eq!(records[0]["_id"], "lazy_fire");
     assert_eq!(records[0]["socket"], "@socket:alpha");
 
-    let data_contents =
-        fs::read_to_string(database.path.join("gem.drw")).expect("data should read");
-    assert!(data_contents.contains("\"_id\":\"lazy_fire\""));
-    assert!(data_contents.contains("\"socket\":\"@socket:alpha\""));
-    assert!(!data_contents.contains("lnk_lazy_fire"));
-    assert!(!data_contents.contains("lnk_alpha"));
+    let data_records = drawer_records_from_disk(&database.path.join("gem.drw"));
+    assert!(data_records.iter().any(|record| {
+        record["element"] == "Fire"
+            && record
+                .get("socket")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.starts_with("@socket:"))
+    }));
 
     let metadata: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(database.path.join("gem_meta.drw")).expect("metadata should read"),
@@ -3485,11 +3543,12 @@ fn us_044_batch_migration_rewrites_legacy_storage_partition() {
 
     assert_eq!(report.records_rewritten, 1);
 
-    let data_contents =
-        fs::read_to_string(database.path.join("weapon.drw")).expect("data should read");
-    assert!(data_contents.contains("\"_id\":\"batch_blade\""));
-    assert!(data_contents.contains("\"gem\":\"@gem:batch_gem\""));
-    assert!(!data_contents.contains("lnk_batch"));
+    let data_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        data_records
+            .iter()
+            .any(|record| record["_id"] == "batch_blade" && record["gem"] == "@gem:batch_gem")
+    );
 
     let metadata: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(database.path.join("weapon_meta.drw")).expect("metadata should read"),

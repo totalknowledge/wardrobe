@@ -1,7 +1,7 @@
-use super::storage_format::{PlainTextJsonFormat, StorageFormat};
+use super::storage_format::{BsonBinaryFormat, StorageFormat};
 use serde_json::Value;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub struct DatabaseReader {
@@ -17,7 +17,7 @@ impl DatabaseReader {
 
     pub fn read_record_at_offset(&self, byte_offset: u64) -> std::io::Result<Option<Value>> {
         if let Some(record_bytes) = self.read_raw_bytes_at_offset(byte_offset)? {
-            return PlainTextJsonFormat::deserialize_record(&record_bytes);
+            return BsonBinaryFormat::deserialize_record(&record_bytes);
         }
 
         Ok(None)
@@ -31,9 +31,36 @@ impl DatabaseReader {
         }
 
         drawer_file.seek(SeekFrom::Start(byte_offset))?;
+        let mut frame_probe = [0u8; 4];
+        drawer_file.read_exact(&mut frame_probe)?;
+
+        if frame_probe == *b"WRDB" {
+            drawer_file.seek(SeekFrom::Start(byte_offset))?;
+            let mut header = vec![0u8; BsonBinaryFormat::frame_header_len()];
+            drawer_file.read_exact(&mut header)?;
+
+            let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Binary frame missing slot size",
+                )
+            })?;
+            if byte_offset + slot_size as u64 > file_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Binary frame exceeds file length",
+                ));
+            }
+
+            drawer_file.seek(SeekFrom::Start(byte_offset))?;
+            let mut slot = vec![0u8; slot_size];
+            drawer_file.read_exact(&mut slot)?;
+            return Ok(Some(slot));
+        }
+
+        drawer_file.seek(SeekFrom::Start(byte_offset))?;
         let mut byte_buffer = Vec::new();
         let mut single_byte_chunk = [0u8; 1];
-
         loop {
             let bytes_read = drawer_file.read(&mut single_byte_chunk)?;
             if bytes_read == 0 {
@@ -54,19 +81,65 @@ impl DatabaseReader {
 
     pub fn stream_with_offsets<F>(&self, mut processing_closure: F) -> std::io::Result<()>
     where
-        F: FnMut(u64, &str),
+        F: FnMut(u64, &[u8]),
     {
         let mut drawer_file = File::open(&self.file_path)?;
         drawer_file.seek(SeekFrom::Start(0))?;
-        let reader = BufReader::new(drawer_file);
+        let file_len = drawer_file.metadata()?.len();
+        if file_len == 0 {
+            return Ok(());
+        }
         let mut track_offset = 0u64;
+        while track_offset < file_len {
+            drawer_file.seek(SeekFrom::Start(track_offset))?;
+            let mut probe = [0u8; 4];
+            let probe_read = drawer_file.read(&mut probe)?;
+            if probe_read == 0 {
+                break;
+            }
 
-        for line_entry in reader.lines() {
-            let line_content = line_entry?;
-            let line_len_with_newline = line_content.len() + 1;
+            if probe_read == 4 && probe == *b"WRDB" {
+                drawer_file.seek(SeekFrom::Start(track_offset))?;
+                let mut header = vec![0u8; BsonBinaryFormat::frame_header_len()];
+                drawer_file.read_exact(&mut header)?;
+                let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Binary frame missing slot size",
+                    )
+                })?;
+                if track_offset + slot_size as u64 > file_len {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Binary frame exceeds file length",
+                    ));
+                }
 
-            processing_closure(track_offset, &line_content);
-            track_offset += line_len_with_newline as u64;
+                drawer_file.seek(SeekFrom::Start(track_offset))?;
+                let mut slot = vec![0u8; slot_size];
+                drawer_file.read_exact(&mut slot)?;
+                processing_closure(track_offset, &slot);
+                track_offset += slot_size as u64;
+            } else {
+                drawer_file.seek(SeekFrom::Start(track_offset))?;
+                let mut byte_buffer = Vec::new();
+                let mut single_byte_chunk = [0u8; 1];
+                loop {
+                    let bytes_read = drawer_file.read(&mut single_byte_chunk)?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    byte_buffer.push(single_byte_chunk[0]);
+                    if single_byte_chunk[0] == b'\n' {
+                        break;
+                    }
+                }
+                if byte_buffer.is_empty() {
+                    break;
+                }
+                processing_closure(track_offset, &byte_buffer);
+                track_offset += byte_buffer.len() as u64;
+            }
         }
 
         Ok(())

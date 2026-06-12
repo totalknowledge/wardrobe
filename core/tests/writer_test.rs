@@ -1,6 +1,6 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe_core::{DatabaseWriter, PlainTextJsonFormat, StorageFormat};
+use wardrobe_core::{BsonBinaryFormat, DatabaseReader, DatabaseWriter, Recycler, StorageFormat};
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -17,7 +17,8 @@ fn append_overwrite_and_tombstone_work() {
     let file_path = temp_file_path("writer_append_overwrite_tombstone");
     let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
     let first_payload =
-        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
+        BsonBinaryFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
+    let slot_size = Recycler::new().calculate_aligned_size(first_payload.len());
 
     let first_offset = writer
         .append_record(&first_payload, 8)
@@ -25,17 +26,20 @@ fn append_overwrite_and_tombstone_work() {
     assert_eq!(first_offset, 0);
 
     let replacement_payload =
-        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 2})).expect("serialize");
+        BsonBinaryFormat::serialize_record(&serde_json::json!({"a": 2})).expect("serialize");
     writer
         .overwrite_at_offset(first_offset, &replacement_payload, 8)
         .expect("overwrite should succeed");
 
     writer
-        .write_tombstone_at_offset(first_offset, 16)
+        .write_tombstone_at_offset(first_offset, slot_size)
         .expect("tombstone should succeed");
 
-    let contents = fs::read_to_string(&file_path).expect("file should be readable");
-    assert!(contents.starts_with("!!DEAD!!"));
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let decoded = reader
+        .read_record_at_offset(first_offset)
+        .expect("read should succeed");
+    assert!(decoded.is_none());
 }
 
 #[test]
@@ -48,15 +52,18 @@ fn append_aligned_index_writes_data_and_reports_length() {
 
     let mut writer = writer;
     let index_payload =
-        PlainTextJsonFormat::serialize_record(&serde_json::json!({"f": "_id", "k": "@x", "o": 0}))
+        BsonBinaryFormat::serialize_record(&serde_json::json!({"f": "_id", "k": "@x", "o": 0}))
             .expect("serialize");
     let offset = writer
         .append_aligned_index(&index_payload, 16)
         .expect("append should succeed");
     assert_eq!(offset, 0);
 
-    let contents = fs::read_to_string(&file_path).expect("file should be readable");
-    assert!(contents.contains(r#""f":"_id""#));
+    let contents = fs::read(&file_path).expect("file should be readable");
+    let decoded = BsonBinaryFormat::deserialize_record(&contents)
+        .expect("decode should succeed")
+        .expect("record should exist");
+    assert_eq!(decoded["f"], "_id");
 }
 
 #[test]
@@ -64,7 +71,7 @@ fn append_record_pads_to_exact_alignment_with_large_padding_span() {
     let file_path = temp_file_path("writer_append_exact_alignment");
     let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
     let payload =
-        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
+        BsonBinaryFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
 
     writer
         .append_record(&payload, 1024)
@@ -72,9 +79,14 @@ fn append_record_pads_to_exact_alignment_with_large_padding_span() {
 
     let bytes = fs::read(&file_path).expect("file should be readable");
     assert_eq!(bytes.len(), 1024);
-    assert_eq!(&bytes[..payload.len()], payload.as_slice());
-    assert!(bytes[payload.len()..1023].iter().all(|byte| *byte == b' '));
-    assert_eq!(bytes[1023], b'\n');
+    let slot_len =
+        u32::from_be_bytes(bytes[12..16].try_into().expect("slot length bytes")) as usize;
+    assert_eq!(slot_len, 1024);
+    let decoded = BsonBinaryFormat::deserialize_record(&bytes)
+        .expect("decode should succeed")
+        .expect("record should exist");
+    assert_eq!(decoded["a"], 1);
+    assert!(bytes[payload.len()..1024].iter().all(|byte| *byte == 0));
 
     let _ = fs::remove_file(file_path);
 }
@@ -84,7 +96,7 @@ fn tombstone_padding_preserves_exact_alignment_with_large_padding_span() {
     let file_path = temp_file_path("writer_tombstone_exact_alignment");
     let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
     let payload =
-        PlainTextJsonFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
+        BsonBinaryFormat::serialize_record(&serde_json::json!({"a": 1})).expect("serialize");
 
     let offset = writer
         .append_record(&payload, 1024)
@@ -94,15 +106,9 @@ fn tombstone_padding_preserves_exact_alignment_with_large_padding_span() {
         .expect("tombstone should succeed");
 
     let bytes = fs::read(&file_path).expect("file should be readable");
-    let tombstone = PlainTextJsonFormat::tombstone_marker();
     assert_eq!(bytes.len(), 1024);
-    assert_eq!(&bytes[..tombstone.len()], tombstone);
-    assert!(
-        bytes[tombstone.len()..1023]
-            .iter()
-            .all(|byte| *byte == b' ')
-    );
-    assert_eq!(bytes[1023], b'\n');
+    assert!(BsonBinaryFormat::is_tombstone(&bytes));
+    assert!(bytes[16..1024].iter().all(|byte| *byte == 0));
 
     let _ = fs::remove_file(file_path);
 }
