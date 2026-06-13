@@ -11,7 +11,7 @@ wardrobe/
   core/                 Embedded engine library crate
   cli/                  Command-line inspection and diagnostics
   server/               Standalone network daemon
-  samples/basic-usage/  End-to-end sample application
+  samples/basic-usage/  Sample application using embedded engine
 ```
 
 ## Current Public API
@@ -69,6 +69,30 @@ The main embedded entry points on `WardrobeEngine` are:
 - `list_drawers`
 - `execute`
 - `execute_in_scope`
+
+### WardrobeEngine Method Guide
+
+| Method | What it does | Notes |
+| --- | --- | --- |
+| `open(path)` | Opens or initializes an embedded wardrobe store at `path`. | Primary constructor for local embedded usage. |
+| `open_with_drawer_cache_limit(path, limit)` | Opens with an explicit LRU drawer cache limit. | Use when you need bounded open-drawer memory/file-handle usage. |
+| `new(path)` | Compatibility alias for `open`. | Deprecated alias retained for older code. |
+| `upsert(drawer, payload)` | Inserts or updates a record and returns the record pointer. | Requires an object payload. Handles ID normalization and relationship pointer normalization. |
+| `find_all(drawer)` | Returns all live records in a drawer. | Hydrates linked records where relationship metadata applies. |
+| `find_by_filter(drawer, filter, modifiers)` | Returns records matching an object filter. | Supports wildcard string matching (`%`) plus ordering/pagination via `QueryModifiers`. |
+| `count(drawer, filter, modifiers)` | Returns the number of records matching a filter. | When no filter is supplied, can use metadata/index fast paths. |
+| `find_by_id(pointer)` | Fetches one record by pointer (for example `@gem:lnk_fire`). | Returns `Option<Value>` (`None` when not found). |
+| `delete(locator)` | Deletes by `StorageLocator` (`Inline` or `Explicit`). | Useful when caller works with structured locator values. |
+| `delete_by_id(pointer_or_tuple)` | Deletes by pointer-compatible identifier. | Accepts inline pointer forms and tuple-convertible locators. |
+| `vacuum_drawer(drawer)` | Compacts drawer storage and rebuilds internals for live data. | Returns `VacuumReport`. |
+| `migrate_drawer(drawer)` | Migrates legacy drawer layout/state to current format. | Returns `VacuumReport` describing migration/compaction work. |
+| `cached_drawer_count()` | Returns current in-memory cached drawer count. | Useful for cache diagnostics and tuning. |
+| `show_tenants()` / `list_tenants()` | Lists active tenant namespaces discovered in storage. | `list_*` variants are aliases of `show_*`. |
+| `show_databases()` / `list_databases()` | Lists discovered databases with inventory stats. | Returns `Vec<StorageInventory>`. |
+| `show_schemas(database)` / `list_schemas(database)` | Lists schemas under a database footprint. | Supports nested and flat schema namespace discovery. |
+| `show_drawers(database, schema)` / `list_drawers(database, schema)` | Lists drawers in a scoped database/schema with counts/sizes. | Returns `Vec<StorageInventory>` including record counts and file metrics. |
+| `execute(coordinate, command)` | Executes a `Command` routed by `StorageCoordinate`. | For tenant/database/schema routed execution in one call. |
+| `execute_in_scope(scope, command)` | Executes a command within a database/schema/drawer `StorageScope`. | Useful for scoped routing without full coordinate construction. |
 
 Supporting execution and routing types include:
 
@@ -193,7 +217,15 @@ fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
 
 ### Sample Application
 
-Run the basic sample crate to seed data from `core/tests/common/test_seed.json` and print hydrated drawers:
+Run the basic sample crate to execute an end-to-end integration flow that:
+
+- Opens a local embedded engine against `./wardrobe`
+- Uses `show_drawers("main", "public")` for drawer metadata enumeration
+- Upserts a `public.user` parent with multiple `public.gem` children and a `public.weapon` child
+- Exercises three relation links: gem→user, weapon→user, and weapon→gem
+- Filters by array tags and owner via `find_by_filter`
+- Cleans up by querying related gems and deleting each via `delete_by_id`
+- Prints a seven-phase walkthrough of the full lifecycle
 
 ```text
 cargo run -p basic-usage
@@ -280,5 +312,3 @@ cargo test --workspace
 For a coverage summary, install `cargo-llvm-cov` and run:
 
 ```text
-cargo coverage-summary
-```
