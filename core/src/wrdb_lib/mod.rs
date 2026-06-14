@@ -6,4 +6,5 @@ pub mod reader;
 pub mod registry;
 pub mod recycler;
 pub mod storage_format;
+pub mod wal;
 pub mod writer;

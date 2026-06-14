@@ -227,6 +227,18 @@ impl WardrobeClient {
         self.show_databases()
     }
 
+    pub fn verify_wal(&self, database_name: Option<&str>) -> Result<crate::WalVerification> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.verify_wal(database_name),
+            Driver::Network(driver) => expect_wal_verification(driver.execute(Command::VerifyWal {
+                database_name: database_name.map(ToOwned::to_owned),
+            })?),
+            Driver::UnixSocket(driver) => expect_wal_verification(driver.execute(Command::VerifyWal {
+                database_name: database_name.map(ToOwned::to_owned),
+            })?),
+        }
+    }
+
     pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
         match &self.driver {
             Driver::Embedded(engine) => engine.show_schemas(database_name),
@@ -469,6 +481,13 @@ fn expect_drawers(result: CommandResult) -> Result<Vec<StorageInventory>> {
     match result {
         CommandResult::Drawers(drawers) => Ok(drawers),
         other => unexpected_result("drawers", other),
+    }
+}
+
+fn expect_wal_verification(result: CommandResult) -> Result<crate::WalVerification> {
+    match result {
+        CommandResult::WalVerification(verification) => Ok(verification),
+        other => unexpected_result("wal verification", other),
     }
 }
 

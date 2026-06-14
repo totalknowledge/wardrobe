@@ -2,6 +2,7 @@ use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::reader::DatabaseReader;
+use crate::wrdb_lib::wal::{WalJournal, WalOperation, WalVerification};
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -221,6 +222,9 @@ impl ExecutionContext<'_> {
 pub enum Command {
     ShowTenants,
     ShowDatabases,
+    VerifyWal {
+        database_name: Option<String>,
+    },
     ShowSchemas {
         database_name: String,
     },
@@ -295,6 +299,7 @@ pub enum CommandResult {
     StorageInventory(StorageInventory),
     Tenants(Vec<String>),
     Databases(Vec<StorageInventory>),
+    WalVerification(WalVerification),
     Schemas(Vec<String>),
     Drawers(Vec<StorageInventory>),
     Pointer(String),
@@ -562,6 +567,50 @@ impl WardrobeEngine {
         self.show_databases()
     }
 
+    pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
+        let database_path = match database_name {
+            Some(database_name) => Self::database_path_from_name(&self.root_directory, database_name)?,
+            None => self.root_directory.clone(),
+        };
+        WalJournal::at_database_path(database_path).verify()
+    }
+
+    fn append_wal_for_command(
+        database_path: &Path,
+        schema_name: Option<&str>,
+        command: &Command,
+    ) -> Result<()> {
+        let Some(operation) = Self::wal_operation(command) else {
+            return Ok(());
+        };
+
+        let scope = schema_name
+            .map(|schema_name| format!("schema:{schema_name}"))
+            .unwrap_or_else(|| "database".to_string());
+        let payload = serde_json::to_vec(command).map_err(|error| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Failed to serialize WAL command payload: {error}"),
+            )
+        })?;
+
+        WalJournal::at_database_path(database_path).append(operation, &scope, &payload)?;
+        Ok(())
+    }
+
+    fn wal_operation(command: &Command) -> Option<WalOperation> {
+        match command {
+            Command::Upsert { .. } => Some(WalOperation::Upsert),
+            Command::Delete { .. } => Some(WalOperation::Delete),
+            Command::Vacuum { .. } | Command::Migrate { .. } => Some(WalOperation::Maintenance),
+            Command::DefineDatabase { .. }
+            | Command::DefineSchema { .. }
+            | Command::DefineDrawer { .. }
+            | Command::DefineTenantRoute { .. } => Some(WalOperation::Define),
+            _ => None,
+        }
+    }
+
     pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
         let registry = Self::read_lock(&self.registry)?;
         if !registry.is_empty() {
@@ -612,6 +661,8 @@ impl WardrobeEngine {
             coordinate.schema(),
             &command,
         )?;
+        let database_path = coordinate.path_under(&self.root_directory);
+        Self::append_wal_for_command(&database_path, Some(coordinate.schema()), &command)?;
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
         Self::execute_in_database(&database, command, None)
     }
@@ -629,15 +680,21 @@ impl WardrobeEngine {
                 schema,
             } => self.execute_for_tenant(&tenant_id, &database, &schema, command),
             StorageScope::Database { database } => {
+                let database_path = Self::database_path_from_name(&self.root_directory, &database)?;
+                Self::append_wal_for_command(&database_path, None, &command)?;
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
                 Self::execute_in_database(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
+                let database_path =
+                    Self::database_path_from_name(&self.root_directory, &format!("{database}/{schema}"))?;
+                Self::append_wal_for_command(&database_path, Some(&schema), &command)?;
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
                 Self::execute_in_database(&database, command, None)
             }
             StorageScope::Drawer { namespace } => {
+                Self::append_wal_for_command(&self.root_directory, Some(&namespace), &command)?;
                 Self::execute_in_database(&self.database_core, command, Some(namespace.as_str()))
             }
         }
@@ -645,6 +702,13 @@ impl WardrobeEngine {
 
     pub fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
         Self::validate_database_name(database_name)?;
+        Self::append_wal_for_command(
+            &self.root_directory,
+            None,
+            &Command::DefineDatabase {
+                database_name: database_name.to_string(),
+            },
+        )?;
         let database_path = self.database_path_from_name(database_name);
         std::fs::create_dir_all(&database_path)?;
 
@@ -660,6 +724,14 @@ impl WardrobeEngine {
     pub fn create_schema(&self, database_name: &str, schema_name: &str) -> Result<StorageInventory> {
         Self::validate_database_name(database_name)?;
         Self::validate_catalog_token(schema_name, "schema")?;
+        Self::append_wal_for_command(
+            &self.root_directory,
+            None,
+            &Command::DefineSchema {
+                database_name: database_name.to_string(),
+                schema_name: schema_name.to_string(),
+            },
+        )?;
 
         {
             let registry = Self::read_lock(&self.registry)?;
@@ -692,6 +764,15 @@ impl WardrobeEngine {
         Self::validate_database_name(database_name)?;
         Self::validate_catalog_token(schema_name, "schema")?;
         Self::validate_catalog_token(drawer_name, "drawer")?;
+        Self::append_wal_for_command(
+            &self.root_directory,
+            None,
+            &Command::DefineDrawer {
+                database_name: database_name.to_string(),
+                schema_name: schema_name.to_string(),
+                drawer_name: drawer_name.to_string(),
+            },
+        )?;
 
         {
             let registry = Self::read_lock(&self.registry)?;
@@ -739,6 +820,15 @@ impl WardrobeEngine {
         Self::validate_catalog_token(tenant_id, "tenant")?;
         Self::validate_database_name(database_name)?;
         Self::validate_catalog_location(location)?;
+        Self::append_wal_for_command(
+            &self.root_directory,
+            None,
+            &Command::DefineTenantRoute {
+                tenant_id: tenant_id.to_string(),
+                database_name: database_name.to_string(),
+                location: location.to_string(),
+            },
+        )?;
 
         let route_path = self.catalog_location_path(location);
         std::fs::create_dir_all(&route_path)?;
@@ -785,6 +875,7 @@ impl WardrobeEngine {
         self.validate_command_against_registry(database_name, schema_name, &command)?;
 
         let route_path = self.catalog_location_path(&tenant_route.location);
+        Self::append_wal_for_command(&route_path, Some(schema_name), &command)?;
         let routed_database =
             RwLock::new(Database::initialize_with_cache_limit(&route_path, self.max_cached_drawers)?);
         Self::recover_database(&routed_database)?;
@@ -792,9 +883,21 @@ impl WardrobeEngine {
     }
 
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
+        if !matches!(
+            &command,
+            Command::DefineDatabase { .. }
+                | Command::DefineSchema { .. }
+                | Command::DefineDrawer { .. }
+                | Command::DefineTenantRoute { .. }
+        ) {
+            Self::append_wal_for_command(&self.root_directory, None, &command)?;
+        }
         match command {
             Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
             Command::ShowDatabases => self.show_databases().map(CommandResult::Databases),
+            Command::VerifyWal { database_name } => self
+                .verify_wal(database_name.as_deref())
+                .map(CommandResult::WalVerification),
             Command::ShowSchemas { database_name } => self
                 .show_schemas(&database_name)
                 .map(CommandResult::Schemas),
@@ -857,6 +960,10 @@ impl WardrobeEngine {
             Command::ShowDatabases => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "Database discovery is only available at the WardrobeEngine boundary",
+            )),
+            Command::VerifyWal { .. } => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "WAL verification is only available at the WardrobeEngine boundary",
             )),
             Command::ShowSchemas { .. } => Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -1069,6 +1176,7 @@ impl WardrobeEngine {
             | Command::ExecuteForTenant { .. }
             | Command::ShowTenants
             | Command::ShowDatabases
+            | Command::VerifyWal { .. }
             | Command::ShowSchemas { .. }
             | Command::ShowDrawers { .. } => None,
         }

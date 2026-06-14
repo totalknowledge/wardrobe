@@ -63,6 +63,7 @@ The main embedded entry points on `WardrobeEngine` are:
 - `list_tenants`
 - `show_databases`
 - `list_databases`
+- `verify_wal`
 - `show_schemas`
 - `list_schemas`
 - `show_drawers`

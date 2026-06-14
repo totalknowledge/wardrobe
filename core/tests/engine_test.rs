@@ -3898,3 +3898,66 @@ fn us_065_logical_tenant_routes_to_catalog_defined_location() {
         .expect_err("missing tenant should fail");
     assert_eq!(missing_tenant.kind(), std::io::ErrorKind::NotFound);
 }
+
+#[test]
+fn us_066_binary_wal_logs_mutating_commands() {
+    let database = TempDatabase::new("us_066_binary_wal");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    let empty_verification = engine.verify_wal(None).expect("empty wal should verify");
+    assert_eq!(empty_verification.entry_count, 0);
+    assert_eq!(empty_verification.last_sequence, None);
+
+    let result = engine
+        .execute_command(Command::Upsert {
+            drawer_name: "gem".to_string(),
+            payload: json!({
+                "_id": "wal_fire",
+                "element": "Fire"
+            }),
+        })
+        .expect("upsert command should succeed");
+    assert!(matches!(result, CommandResult::Pointer(pointer) if pointer == "@gem:wal_fire"));
+
+    let root_wal = database.path.join(".wal");
+    assert!(root_wal.exists());
+
+    let verification = engine.verify_wal(None).expect("wal should verify");
+    assert_eq!(verification.entry_count, 1);
+    assert_eq!(verification.last_sequence, Some(1));
+
+    let command_result = engine
+        .execute_command(Command::VerifyWal {
+            database_name: None,
+        })
+        .expect("wal verification command should succeed");
+    assert_eq!(command_result, CommandResult::WalVerification(verification));
+
+    engine
+        .execute(
+            StorageCoordinate::new("tenant_wal", "production", "core"),
+            Command::Upsert {
+                drawer_name: "gem".to_string(),
+                payload: json!({
+                    "_id": "tenant_wal_fire",
+                    "element": "Routed Fire"
+                }),
+            },
+        )
+        .expect("coordinate upsert should succeed");
+
+    let routed_wal = database
+        .path
+        .join("tenant_wal")
+        .join("production")
+        .join("core")
+        .join(".wal");
+    assert!(routed_wal.exists());
+
+    let routed_verification = engine
+        .verify_wal(Some("tenant_wal/production/core"))
+        .expect("routed wal should verify");
+    assert_eq!(routed_verification.entry_count, 1);
+    assert_eq!(routed_verification.last_sequence, Some(1));
+}

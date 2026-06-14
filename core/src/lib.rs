@@ -19,4 +19,5 @@ pub use wrdb_lib::reader::DatabaseReader;
 pub use wrdb_lib::registry::{CatalogEntry, CatalogRegistry, CatalogTenantRoute, CATALOG_FILE_NAME};
 pub use wrdb_lib::recycler::Recycler;
 pub use wrdb_lib::storage_format::{BsonBinaryFormat, PlainTextJsonFormat, StorageFormat};
+pub use wrdb_lib::wal::{WalEntry, WalJournal, WalOperation, WalVerification, WAL_FILE_NAME};
 pub use wrdb_lib::writer::DatabaseWriter;
