@@ -1,5 +1,6 @@
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
+use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use serde::{Deserialize, Serialize};
@@ -351,6 +352,7 @@ impl SortableValue<'_> {
 
 pub struct WardrobeEngine {
     root_directory: PathBuf,
+    registry: RwLock<CatalogRegistry>,
     database_core: RwLock<Database>,
     routed_databases: RwLock<HashMap<DatabaseRoute, Arc<RwLock<Database>>>>,
     max_cached_drawers: Option<usize>,
@@ -372,11 +374,15 @@ impl WardrobeEngine {
         directory: &str,
         max_cached_drawers: Option<usize>,
     ) -> Result<Self> {
-        let database_core = Database::initialize_with_cache_limit(directory, max_cached_drawers)?;
+        let root_directory = PathBuf::from(directory);
+        let registry = CatalogRegistry::open_or_initialize(&root_directory)?;
+        let database_core =
+            Database::initialize_with_cache_limit(&root_directory, max_cached_drawers)?;
         let database_core = RwLock::new(database_core);
         Self::recover_database(&database_core)?;
         Ok(Self {
-            root_directory: PathBuf::from(directory),
+            root_directory,
+            registry: RwLock::new(registry),
             database_core,
             routed_databases: RwLock::new(HashMap::new()),
             max_cached_drawers,
@@ -466,6 +472,19 @@ impl WardrobeEngine {
     }
 
     pub fn show_tenants(&self) -> Result<Vec<String>> {
+        let registry = Self::read_lock(&self.registry)?;
+        if !registry.is_empty() {
+            let mut tenants = BTreeSet::new();
+            for database_name in registry.database_names() {
+                if let Some((tenant_name, _)) = database_name.split_once('/') {
+                    tenants.insert(tenant_name.to_string());
+                } else {
+                    tenants.insert(database_name);
+                }
+            }
+            return Ok(tenants.into_iter().collect());
+        }
+
         Self::discover_tenants(&self.root_directory)
     }
 
@@ -474,6 +493,27 @@ impl WardrobeEngine {
     }
 
     pub fn show_databases(&self) -> Result<Vec<StorageInventory>> {
+        let registry = Self::read_lock(&self.registry)?;
+        if !registry.is_empty() {
+            return registry
+                .database_names()
+                .into_iter()
+                .map(|name| {
+                    let path = Self::database_path_from_name(&self.root_directory, &name)?;
+                    if path.exists() {
+                        Self::storage_inventory(name, &path)
+                    } else {
+                        Ok(StorageInventory {
+                            name,
+                            record_count: 0,
+                            disk_size_bytes: 0,
+                            register_file_count: 0,
+                        })
+                    }
+                })
+                .collect();
+        }
+
         Self::discover_databases(&self.root_directory)
     }
 
@@ -482,6 +522,11 @@ impl WardrobeEngine {
     }
 
     pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
+        let registry = Self::read_lock(&self.registry)?;
+        if !registry.is_empty() {
+            return Ok(registry.schema_names(database_name));
+        }
+
         let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
         Self::discover_schemas(&database_path)
     }
@@ -495,6 +540,15 @@ impl WardrobeEngine {
         database_name: &str,
         schema_name: &str,
     ) -> Result<Vec<StorageInventory>> {
+        let registry = Self::read_lock(&self.registry)?;
+        if !registry.is_empty() {
+            return registry
+                .drawer_entries(database_name, schema_name)
+                .iter()
+                .map(Self::catalog_drawer_inventory)
+                .collect();
+        }
+
         let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
         Self::discover_drawers(&database_path, schema_name)
     }
@@ -512,12 +566,20 @@ impl WardrobeEngine {
         coordinate: StorageCoordinate,
         command: Command,
     ) -> Result<CommandResult> {
+        self.validate_command_against_registry(
+            &format!("{}/{}", coordinate.tenant(), coordinate.database()),
+            coordinate.schema(),
+            &command,
+        )?;
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
         Self::execute_in_database(&database, command, None)
     }
 
     pub fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult> {
         scope.validate()?;
+        if let StorageScope::Schema { database, schema } = &scope {
+            self.validate_command_against_registry(database, schema, &command)?;
+        }
 
         match scope {
             StorageScope::Database { database } => {
@@ -662,9 +724,88 @@ impl WardrobeEngine {
         routed_databases.get(&route).cloned().ok_or_else(|| {
             Error::new(
                 ErrorKind::NotFound,
-                "Failed to acquire routed database handle",
+            "Failed to acquire routed database handle",
             )
         })
+    }
+
+    fn validate_command_against_registry(
+        &self,
+        database: &str,
+        schema: &str,
+        command: &Command,
+    ) -> Result<()> {
+        let registry = Self::read_lock(&self.registry)?;
+        if registry.is_empty() {
+            return Ok(());
+        }
+
+        let Some(drawer_name) = Self::command_drawer_name(command) else {
+            return Ok(());
+        };
+
+        if registry.contains_drawer(database, schema, &drawer_name) {
+            return Ok(());
+        }
+
+        Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "InvalidLocation: drawer '{}' is not registered for database '{}' schema '{}'",
+                drawer_name, database, schema
+            ),
+        ))
+    }
+
+    fn command_drawer_name(command: &Command) -> Option<String> {
+        match command {
+            Command::Upsert { drawer_name, .. }
+            | Command::FindAll { drawer_name }
+            | Command::FindByFilter { drawer_name, .. }
+            | Command::Count { drawer_name, .. }
+            | Command::Vacuum { drawer_name }
+            | Command::Migrate { drawer_name } => Some(drawer_name.clone()),
+            Command::FindById { pointer } | Command::Delete { pointer } => {
+                Self::try_parse_pointer(pointer).map(|(drawer_name, _)| drawer_name)
+            }
+            Command::Execute { command, .. } | Command::ExecuteInScope { command, .. } => {
+                Self::command_drawer_name(command)
+            }
+            Command::ShowTenants
+            | Command::ShowDatabases
+            | Command::ShowSchemas { .. }
+            | Command::ShowDrawers { .. } => None,
+        }
+    }
+
+    fn catalog_drawer_inventory(entry: &CatalogEntry) -> Result<StorageInventory> {
+        let location = PathBuf::from(&entry.location);
+        let (directory, physical_drawer_name) =
+            if location.extension().and_then(|extension| extension.to_str()) == Some("drw") {
+                let directory = location
+                    .parent()
+                    .map(|path| path.to_path_buf())
+                    .unwrap_or_else(PathBuf::new);
+                let physical_drawer_name = location
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(entry.drawer.as_str())
+                    .to_string();
+                (directory, physical_drawer_name)
+            } else {
+                (location, entry.drawer.clone())
+            };
+
+        if !directory.exists() {
+            return Ok(StorageInventory {
+                name: entry.drawer.clone(),
+                record_count: 0,
+                disk_size_bytes: 0,
+                register_file_count: 0,
+            });
+        }
+
+        Self::drawer_inventory(entry.drawer.clone(), &directory, &physical_drawer_name)
     }
 
     fn discover_tenants(root_directory: &Path) -> Result<Vec<String>> {
@@ -1130,7 +1271,7 @@ impl WardrobeEngine {
         }
 
         let stem = path.file_stem()?.to_str()?;
-        if stem.ends_with("_index") || stem.ends_with("_meta") {
+        if stem == ".catalog" || stem.ends_with("_index") || stem.ends_with("_meta") {
             return None;
         }
 

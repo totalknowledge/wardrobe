@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
     BsonBinaryFormat, Command, CommandResult, DatabaseReader, DatabaseWriter, OrderDirection,
     PlainTextJsonFormat, QueryModifiers, Recycler, StorageCoordinate, StorageFormat,
@@ -2442,6 +2443,87 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
         })
         .expect("show drawers command should succeed");
     assert_eq!(command_result, CommandResult::Drawers(drawers));
+}
+
+#[test]
+fn us_063_engine_bootstraps_registry_from_catalog_and_validates_locations() {
+    let database = TempDatabase::new("us_063_catalog_bootstrap");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+
+    let mut registry = CatalogRegistry::new();
+    registry.register_drawer(
+        "catalog_db",
+        "core",
+        "gem",
+        database
+            .path
+            .join("catalog_db")
+            .join("core")
+            .join("gem.drw")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    registry.register_drawer(
+        "tenant_alpha/production",
+        "inventory",
+        "weapon",
+        database
+            .path
+            .join("tenant_alpha")
+            .join("production")
+            .join("inventory")
+            .join("weapon.drw")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    registry
+        .persist_to_root(&database.path)
+        .expect("catalog should persist");
+
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
+
+    let databases = engine
+        .show_databases()
+        .expect("catalog databases should load");
+    let database_names: Vec<String> = databases
+        .iter()
+        .map(|inventory| inventory.name.clone())
+        .collect();
+    assert_eq!(
+        database_names,
+        vec![
+            "catalog_db".to_string(),
+            "tenant_alpha/production".to_string()
+        ]
+    );
+
+    assert_eq!(
+        engine
+            .show_schemas("catalog_db")
+            .expect("catalog schemas should load"),
+        vec!["core".to_string()]
+    );
+    assert_eq!(
+        engine
+            .show_drawers("catalog_db", "core")
+            .expect("catalog drawers should load")
+            .into_iter()
+            .map(|inventory| inventory.name)
+            .collect::<Vec<_>>(),
+        vec!["gem".to_string()]
+    );
+
+    let error = engine
+        .execute_in_scope(
+            StorageScope::schema("catalog_db", "core"),
+            Command::FindAll {
+                drawer_name: "missing".to_string(),
+            },
+        )
+        .expect_err("unregistered drawer should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(error.to_string().contains("InvalidLocation"));
 }
 
 #[test]

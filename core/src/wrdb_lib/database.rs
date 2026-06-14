@@ -179,7 +179,10 @@ impl Database {
                 continue;
             };
 
-            if !drawer_name.ends_with("_index") && !drawer_name.ends_with("_meta") {
+            if drawer_name != ".catalog"
+                && !drawer_name.ends_with("_index")
+                && !drawer_name.ends_with("_meta")
+            {
                 drawer_names.push(drawer_name.to_string());
             }
         }
