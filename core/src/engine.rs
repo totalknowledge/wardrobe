@@ -244,6 +244,18 @@ pub enum Command {
     Migrate {
         drawer_name: String,
     },
+    DefineDatabase {
+        database_name: String,
+    },
+    DefineSchema {
+        database_name: String,
+        schema_name: String,
+    },
+    DefineDrawer {
+        database_name: String,
+        schema_name: String,
+        drawer_name: String,
+    },
     Execute {
         coordinate: StorageCoordinate,
         command: Box<Command>,
@@ -256,6 +268,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandResult {
+    StorageInventory(StorageInventory),
     Tenants(Vec<String>),
     Databases(Vec<StorageInventory>),
     Schemas(Vec<String>),
@@ -597,6 +610,93 @@ impl WardrobeEngine {
         }
     }
 
+    pub fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
+        Self::validate_database_name(database_name)?;
+        let database_path = self.database_path_from_name(database_name);
+        std::fs::create_dir_all(&database_path)?;
+
+        {
+            let mut registry = Self::write_lock(&self.registry)?;
+            registry.register_database(database_name);
+            registry.persist_to_root(&self.root_directory)?;
+        }
+
+        Self::storage_inventory(database_name.to_string(), &database_path)
+    }
+
+    pub fn create_schema(&self, database_name: &str, schema_name: &str) -> Result<StorageInventory> {
+        Self::validate_database_name(database_name)?;
+        Self::validate_catalog_token(schema_name, "schema")?;
+
+        {
+            let registry = Self::read_lock(&self.registry)?;
+            if !registry.contains_database(database_name) {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!("Database '{database_name}' is not registered in the catalog"),
+                ));
+            }
+        }
+
+        let schema_path = self.database_path_from_name(database_name).join(schema_name);
+        std::fs::create_dir_all(&schema_path)?;
+
+        {
+            let mut registry = Self::write_lock(&self.registry)?;
+            registry.register_schema(database_name, schema_name);
+            registry.persist_to_root(&self.root_directory)?;
+        }
+
+        Self::storage_inventory(schema_name.to_string(), &schema_path)
+    }
+
+    pub fn create_drawer(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+        drawer_name: &str,
+    ) -> Result<StorageInventory> {
+        Self::validate_database_name(database_name)?;
+        Self::validate_catalog_token(schema_name, "schema")?;
+        Self::validate_catalog_token(drawer_name, "drawer")?;
+
+        {
+            let registry = Self::read_lock(&self.registry)?;
+            if !registry.contains_schema(database_name, schema_name) {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "Schema '{schema_name}' is not registered for database '{database_name}'"
+                    ),
+                ));
+            }
+        }
+
+        let schema_path = self.database_path_from_name(database_name).join(schema_name);
+        std::fs::create_dir_all(&schema_path)?;
+        let drawer_path = schema_path.join(format!("{drawer_name}.drw"));
+        if !drawer_path.exists() {
+            std::fs::File::create(&drawer_path)?;
+        }
+        let index_path = schema_path.join(format!("{drawer_name}_index.drw"));
+        if !index_path.exists() {
+            std::fs::File::create(&index_path)?;
+        }
+
+        {
+            let mut registry = Self::write_lock(&self.registry)?;
+            registry.register_drawer(
+                database_name,
+                schema_name,
+                drawer_name,
+                drawer_path.to_string_lossy().into_owned(),
+            );
+            registry.persist_to_root(&self.root_directory)?;
+        }
+
+        Self::drawer_inventory(drawer_name.to_string(), &schema_path, drawer_name)
+    }
+
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
         match command {
             Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
@@ -610,6 +710,22 @@ impl WardrobeEngine {
             } => self
                 .show_drawers(&database_name, &schema_name)
                 .map(CommandResult::Drawers),
+            Command::DefineDatabase { database_name } => self
+                .create_database(&database_name)
+                .map(CommandResult::StorageInventory),
+            Command::DefineSchema {
+                database_name,
+                schema_name,
+            } => self
+                .create_schema(&database_name, &schema_name)
+                .map(CommandResult::StorageInventory),
+            Command::DefineDrawer {
+                database_name,
+                schema_name,
+                drawer_name,
+            } => self
+                .create_drawer(&database_name, &schema_name, &drawer_name)
+                .map(CommandResult::StorageInventory),
             Command::Execute {
                 coordinate,
                 command,
@@ -681,11 +797,54 @@ impl WardrobeEngine {
                 Self::migrate_drawer_in_database(database, &drawer_name, context)
                     .map(CommandResult::Migrated)
             }
-            Command::Execute { .. } | Command::ExecuteInScope { .. } => Err(Error::new(
+            Command::DefineDatabase { .. }
+            | Command::DefineSchema { .. }
+            | Command::DefineDrawer { .. }
+            | Command::Execute { .. }
+            | Command::ExecuteInScope { .. } => Err(Error::new(
                 ErrorKind::InvalidInput,
-                "Scoped command routing is only available at the WardrobeEngine boundary",
+                "Catalog and scoped command routing is only available at the WardrobeEngine boundary",
             )),
         }
+    }
+
+    fn validate_database_name(database_name: &str) -> Result<()> {
+        let trimmed = database_name.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('/')
+            || trimmed.starts_with('\\')
+            || trimmed.contains('\\')
+            || trimmed.split('/').any(|segment| {
+                segment.is_empty() || segment == "." || segment == ".." || segment == ".catalog"
+            })
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Invalid database name: {database_name}"),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_catalog_token(value: &str, label: &str) -> Result<()> {
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed == "."
+            || trimmed == ".."
+            || trimmed == ".catalog"
+            || trimmed.ends_with("_index")
+            || trimmed.ends_with("_meta")
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Invalid {label} name: {value}"),
+            ));
+        }
+
+        Ok(())
     }
 
     fn database_for_route(&self, route: DatabaseRoute) -> Result<Arc<RwLock<Database>>> {
@@ -771,7 +930,10 @@ impl WardrobeEngine {
             Command::Execute { command, .. } | Command::ExecuteInScope { command, .. } => {
                 Self::command_drawer_name(command)
             }
-            Command::ShowTenants
+            Command::DefineDatabase { .. }
+            | Command::DefineSchema { .. }
+            | Command::DefineDrawer { .. }
+            | Command::ShowTenants
             | Command::ShowDatabases
             | Command::ShowSchemas { .. }
             | Command::ShowDrawers { .. } => None,

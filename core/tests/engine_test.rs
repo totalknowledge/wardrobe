@@ -3738,3 +3738,76 @@ fn engine_appends_to_wal_on_write() -> std::io::Result<()> {
     assert!(metadata.len() > 0);
     Ok(())
 }
+#[test]
+fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
+    let database = TempDatabase::new("us_064_managed_lifecycle");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
+
+    let database_inventory = engine
+        .create_database("managed_db")
+        .expect("database should be created");
+    assert_eq!(database_inventory.name, "managed_db");
+    assert!(database.path.join("managed_db").exists());
+
+    let missing_parent = engine
+        .create_schema("missing_db", "core")
+        .expect_err("schema creation should require a registered database");
+    assert_eq!(missing_parent.kind(), std::io::ErrorKind::NotFound);
+
+    let schema_inventory = engine
+        .create_schema("managed_db", "core")
+        .expect("schema should be created");
+    assert_eq!(schema_inventory.name, "core");
+    assert!(database.path.join("managed_db").join("core").exists());
+
+    let drawer_inventory = engine
+        .create_drawer("managed_db", "core", "gem")
+        .expect("drawer should be created");
+    assert_eq!(drawer_inventory.name, "gem");
+    assert!(database
+        .path
+        .join("managed_db")
+        .join("core")
+        .join("gem.drw")
+        .exists());
+
+    let command_result = engine
+        .execute_command(Command::DefineDrawer {
+            database_name: "managed_db".to_string(),
+            schema_name: "core".to_string(),
+            drawer_name: "weapon".to_string(),
+        })
+        .expect("define drawer command should route through engine boundary");
+    assert!(matches!(
+        command_result,
+        CommandResult::StorageInventory(inventory) if inventory.name == "weapon"
+    ));
+
+    let reopened = WardrobeEngine::open(&storage_pool).expect("engine should reopen");
+    let databases = reopened
+        .show_databases()
+        .expect("catalog databases should load");
+    assert_eq!(
+        databases
+            .iter()
+            .map(|inventory| inventory.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["managed_db"]
+    );
+    assert_eq!(
+        reopened
+            .show_schemas("managed_db")
+            .expect("catalog schemas should load"),
+        vec!["core".to_string()]
+    );
+    assert_eq!(
+        reopened
+            .show_drawers("managed_db", "core")
+            .expect("catalog drawers should load")
+            .iter()
+            .map(|inventory| inventory.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gem", "weapon"]
+    );
+}

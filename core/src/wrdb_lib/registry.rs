@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
@@ -17,6 +17,10 @@ pub struct CatalogEntry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogRegistry {
+    #[serde(default)]
+    databases: BTreeSet<String>,
+    #[serde(default)]
+    schemas: BTreeSet<String>,
     entries: BTreeMap<String, CatalogEntry>,
 }
 
@@ -53,7 +57,16 @@ impl CatalogRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.databases.is_empty() && self.schemas.is_empty() && self.entries.is_empty()
+    }
+
+    pub fn register_database(&mut self, database: &str) {
+        self.databases.insert(database.to_string());
+    }
+
+    pub fn register_schema(&mut self, database: &str, schema: &str) {
+        self.register_database(database);
+        self.schemas.insert(Self::schema_key(database, schema));
     }
 
     pub fn register_drawer(
@@ -63,13 +76,31 @@ impl CatalogRegistry {
         drawer: &str,
         location: impl Into<String>,
     ) {
+        self.register_schema(database, schema);
         let entry = CatalogEntry {
             database: database.to_string(),
             schema: schema.to_string(),
             drawer: drawer.to_string(),
             location: location.into(),
         };
-        self.entries.insert(Self::entry_key(database, schema, drawer), entry);
+        self.entries
+            .insert(Self::entry_key(database, schema, drawer), entry);
+    }
+
+    pub fn contains_database(&self, database: &str) -> bool {
+        self.databases.contains(database)
+            || self
+                .entries
+                .values()
+                .any(|entry| entry.database == database)
+    }
+
+    pub fn contains_schema(&self, database: &str, schema: &str) -> bool {
+        self.schemas.contains(&Self::schema_key(database, schema))
+            || self
+                .entries
+                .values()
+                .any(|entry| entry.database == database && entry.schema == schema)
     }
 
     pub fn contains_drawer(&self, database: &str, schema: &str, drawer: &str) -> bool {
@@ -78,41 +109,40 @@ impl CatalogRegistry {
     }
 
     pub fn database_names(&self) -> Vec<String> {
-        let mut names = self
-            .entries
-            .values()
-            .map(|entry| entry.database.clone())
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        names
+        let mut names = self.databases.clone();
+        names.extend(self.entries.values().map(|entry| entry.database.clone()));
+        names.into_iter().collect()
     }
 
     pub fn schema_names(&self, database: &str) -> Vec<String> {
         let mut names = self
-            .entries
-            .values()
-            .filter(|entry| entry.database == database)
-            .map(|entry| entry.schema.clone())
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        names
+            .schemas
+            .iter()
+            .filter_map(|schema_key| schema_key.split_once('\u{1e}'))
+            .filter(|(entry_database, _)| *entry_database == database)
+            .map(|(_, schema)| schema.to_string())
+            .collect::<BTreeSet<_>>();
+
+        names.extend(
+            self.entries
+                .values()
+                .filter(|entry| entry.database == database)
+                .map(|entry| entry.schema.clone()),
+        );
+
+        names.into_iter().collect()
     }
 
     pub fn drawer_entries(&self, database: &str, schema: &str) -> Vec<CatalogEntry> {
-        let mut entries = self
-            .entries
+        self.entries
             .values()
             .filter(|entry| entry.database == database && entry.schema == schema)
             .cloned()
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.drawer.cmp(&right.drawer));
-        entries
+            .collect()
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(CATALOG_MAGIC.len() + 64);
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(CATALOG_MAGIC);
         let payload = serde_json::to_vec(self).map_err(|error| {
             Error::new(
@@ -124,16 +154,19 @@ impl CatalogRegistry {
         Ok(bytes)
     }
 
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
+    fn from_bytes(bytes: &[u8]) -> serde_json::Result<Self> {
         if !bytes.starts_with(CATALOG_MAGIC) {
-            return Err("catalog magic header is missing or corrupt".to_string());
+            return Err(serde::de::Error::custom("catalog magic header is invalid"));
         }
 
         serde_json::from_slice(&bytes[CATALOG_MAGIC.len()..])
-            .map_err(|error| format!("catalog payload is invalid: {error}"))
     }
 
     fn entry_key(database: &str, schema: &str, drawer: &str) -> String {
         format!("{database}\u{1f}{schema}\u{1f}{drawer}")
+    }
+
+    fn schema_key(database: &str, schema: &str) -> String {
+        format!("{database}\u{1e}{schema}")
     }
 }
