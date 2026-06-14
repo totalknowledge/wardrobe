@@ -3811,3 +3811,90 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
         vec!["gem", "weapon"]
     );
 }
+#[test]
+fn us_065_logical_tenant_routes_to_catalog_defined_location() {
+    let database = TempDatabase::new("us_065_logical_tenant_route");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let routed_database = database.path.join("shards").join("tenant_a").join("production");
+    let routed_drawer = routed_database.join("core").join("gem.drw");
+    std::fs::create_dir_all(routed_database.join("core")).expect("tenant schema directory should exist");
+    std::fs::File::create(&routed_drawer).expect("tenant drawer should exist");
+    std::fs::File::create(routed_database.join("core").join("gem_index.drw"))
+        .expect("tenant index should exist");
+
+    let mut registry = CatalogRegistry::new();
+    registry.register_tenant_route("tenant_a", "production", "shards/tenant_a/production");
+    registry.register_schema("production", "core");
+    registry.register_drawer(
+        "production",
+        "core",
+        "gem",
+        routed_drawer.to_string_lossy().into_owned(),
+    );
+    registry
+        .persist_to_root(&database.path)
+        .expect("catalog should persist");
+
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
+    assert_eq!(
+        engine.show_tenants().expect("tenants should load"),
+        vec!["tenant_a".to_string()]
+    );
+
+    let result = engine
+        .execute_in_scope(
+            StorageScope::tenant("tenant_a", "production", "core"),
+            Command::Upsert {
+                drawer_name: "gem".to_string(),
+                payload: json!({
+                    "_id": "tenant_fire",
+                    "element": "Fire"
+                }),
+            },
+        )
+        .expect("tenant scoped upsert should route");
+    assert!(matches!(result, CommandResult::Pointer(pointer) if pointer == "@gem:tenant_fire"));
+
+    assert!(routed_drawer.exists());
+    assert!(
+        routed_drawer
+            .metadata()
+            .expect("tenant drawer metadata should load")
+            .len()
+            > 0
+    );
+    assert!(!database
+        .path
+        .join("production")
+        .join("core")
+        .join("gem.drw")
+        .exists());
+
+    let records = engine
+        .execute_command(Command::ExecuteForTenant {
+            tenant_id: "tenant_a".to_string(),
+            database_name: "production".to_string(),
+            schema_name: "core".to_string(),
+            command: Box::new(Command::FindAll {
+                drawer_name: "gem".to_string(),
+            }),
+        })
+        .expect("tenant command should route");
+    assert!(matches!(
+        records,
+        CommandResult::Records(records)
+            if records.len() == 1 && records[0]["_id"] == "tenant_fire"
+    ));
+
+    let missing_tenant = engine
+        .execute_for_tenant(
+            "tenant_b",
+            "production",
+            "core",
+            Command::FindAll {
+                drawer_name: "gem".to_string(),
+            },
+        )
+        .expect_err("missing tenant should fail");
+    assert_eq!(missing_tenant.kind(), std::io::ErrorKind::NotFound);
+}

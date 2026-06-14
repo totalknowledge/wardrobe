@@ -143,12 +143,25 @@ impl From<(&str, &str)> for StorageLocator {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StorageScope {
+    Tenant {
+        tenant_id: String,
+        database: String,
+        schema: String,
+    },
     Database { database: String },
     Schema { database: String, schema: String },
     Drawer { namespace: String },
 }
 
 impl StorageScope {
+    pub fn tenant(tenant_id: impl Into<String>, database: impl Into<String>, schema: impl Into<String>) -> Self {
+        Self::Tenant {
+            tenant_id: tenant_id.into(),
+            database: database.into(),
+            schema: schema.into(),
+        }
+    }
+
     pub fn database(database: &str) -> Self {
         Self::Database {
             database: database.to_string(),
@@ -255,6 +268,17 @@ pub enum Command {
         database_name: String,
         schema_name: String,
         drawer_name: String,
+    },
+    DefineTenantRoute {
+        tenant_id: String,
+        database_name: String,
+        location: String,
+    },
+    ExecuteForTenant {
+        tenant_id: String,
+        database_name: String,
+        schema_name: String,
+        command: Box<Command>,
     },
     Execute {
         coordinate: StorageCoordinate,
@@ -488,10 +512,14 @@ impl WardrobeEngine {
         let registry = Self::read_lock(&self.registry)?;
         if !registry.is_empty() {
             let mut tenants = BTreeSet::new();
+            let explicit_tenants = registry.tenant_ids();
+            let has_explicit_tenants = !explicit_tenants.is_empty();
+            tenants.extend(explicit_tenants);
+
             for database_name in registry.database_names() {
                 if let Some((tenant_name, _)) = database_name.split_once('/') {
                     tenants.insert(tenant_name.to_string());
-                } else {
+                } else if !has_explicit_tenants {
                     tenants.insert(database_name);
                 }
             }
@@ -595,6 +623,11 @@ impl WardrobeEngine {
         }
 
         match scope {
+            StorageScope::Tenant {
+                tenant_id,
+                database,
+                schema,
+            } => self.execute_for_tenant(&tenant_id, &database, &schema, command),
             StorageScope::Database { database } => {
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
                 Self::execute_in_database(&database, command, None)
@@ -697,6 +730,67 @@ impl WardrobeEngine {
         Self::drawer_inventory(drawer_name.to_string(), &schema_path, drawer_name)
     }
 
+    pub fn register_tenant_route(
+        &self,
+        tenant_id: &str,
+        database_name: &str,
+        location: &str,
+    ) -> Result<StorageInventory> {
+        Self::validate_catalog_token(tenant_id, "tenant")?;
+        Self::validate_database_name(database_name)?;
+        Self::validate_catalog_location(location)?;
+
+        let route_path = self.catalog_location_path(location);
+        std::fs::create_dir_all(&route_path)?;
+
+        {
+            let mut registry = Self::write_lock(&self.registry)?;
+            registry.register_tenant_route(tenant_id, database_name, location);
+            registry.persist_to_root(&self.root_directory)?;
+        }
+
+        Self::storage_inventory(tenant_id.to_string(), &route_path)
+    }
+
+    pub fn execute_for_tenant(
+        &self,
+        tenant_id: &str,
+        database_name: &str,
+        schema_name: &str,
+        command: Command,
+    ) -> Result<CommandResult> {
+        Self::validate_catalog_token(tenant_id, "tenant")?;
+        Self::validate_database_name(database_name)?;
+        Self::validate_catalog_token(schema_name, "schema")?;
+
+        let tenant_route = {
+            let registry = Self::read_lock(&self.registry)?;
+            registry.tenant_route(tenant_id).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::NotFound,
+                    format!("Tenant '{tenant_id}' is not registered in the catalog"),
+                )
+            })?
+        };
+
+        if tenant_route.database != database_name {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "Tenant '{tenant_id}' is not routed to database '{database_name}'"
+                ),
+            ));
+        }
+
+        self.validate_command_against_registry(database_name, schema_name, &command)?;
+
+        let route_path = self.catalog_location_path(&tenant_route.location);
+        let routed_database =
+            RwLock::new(Database::initialize_with_cache_limit(&route_path, self.max_cached_drawers)?);
+        Self::recover_database(&routed_database)?;
+        Self::execute_in_database(&routed_database, command, Some(schema_name))
+    }
+
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
         match command {
             Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
@@ -726,6 +820,19 @@ impl WardrobeEngine {
             } => self
                 .create_drawer(&database_name, &schema_name, &drawer_name)
                 .map(CommandResult::StorageInventory),
+            Command::DefineTenantRoute {
+                tenant_id,
+                database_name,
+                location,
+            } => self
+                .register_tenant_route(&tenant_id, &database_name, &location)
+                .map(CommandResult::StorageInventory),
+            Command::ExecuteForTenant {
+                tenant_id,
+                database_name,
+                schema_name,
+                command,
+            } => self.execute_for_tenant(&tenant_id, &database_name, &schema_name, *command),
             Command::Execute {
                 coordinate,
                 command,
@@ -800,6 +907,8 @@ impl WardrobeEngine {
             Command::DefineDatabase { .. }
             | Command::DefineSchema { .. }
             | Command::DefineDrawer { .. }
+            | Command::DefineTenantRoute { .. }
+            | Command::ExecuteForTenant { .. }
             | Command::Execute { .. }
             | Command::ExecuteInScope { .. } => Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -845,6 +954,29 @@ impl WardrobeEngine {
         }
 
         Ok(())
+    }
+
+    fn validate_catalog_location(location: &str) -> Result<()> {
+        let trimmed = location.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('/')
+            || trimmed.starts_with('\\')
+            || trimmed.contains('\\')
+            || trimmed.split('/').any(|segment| {
+                segment.is_empty() || segment == "." || segment == ".." || segment == ".catalog"
+            })
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Invalid catalog route location: {location}"),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn catalog_location_path(&self, location: &str) -> PathBuf {
+        self.root_directory.join(location)
     }
 
     fn database_for_route(&self, route: DatabaseRoute) -> Result<Arc<RwLock<Database>>> {
@@ -933,6 +1065,8 @@ impl WardrobeEngine {
             Command::DefineDatabase { .. }
             | Command::DefineSchema { .. }
             | Command::DefineDrawer { .. }
+            | Command::DefineTenantRoute { .. }
+            | Command::ExecuteForTenant { .. }
             | Command::ShowTenants
             | Command::ShowDatabases
             | Command::ShowSchemas { .. }

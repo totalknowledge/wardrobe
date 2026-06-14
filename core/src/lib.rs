@@ -16,7 +16,7 @@ pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::{Drawer, VacuumReport};
 pub use wrdb_lib::protocol::{PROTOCOL_MAGIC, ProtocolFrame, ProtocolOpcode};
 pub use wrdb_lib::reader::DatabaseReader;
-pub use wrdb_lib::registry::{CatalogEntry, CatalogRegistry, CATALOG_FILE_NAME};
+pub use wrdb_lib::registry::{CatalogEntry, CatalogRegistry, CatalogTenantRoute, CATALOG_FILE_NAME};
 pub use wrdb_lib::recycler::Recycler;
 pub use wrdb_lib::storage_format::{BsonBinaryFormat, PlainTextJsonFormat, StorageFormat};
 pub use wrdb_lib::writer::DatabaseWriter;

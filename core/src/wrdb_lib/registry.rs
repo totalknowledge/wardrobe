@@ -15,12 +15,21 @@ pub struct CatalogEntry {
     pub location: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogTenantRoute {
+    pub tenant_id: String,
+    pub database: String,
+    pub location: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogRegistry {
     #[serde(default)]
     databases: BTreeSet<String>,
     #[serde(default)]
     schemas: BTreeSet<String>,
+    #[serde(default)]
+    tenant_routes: BTreeMap<String, CatalogTenantRoute>,
     entries: BTreeMap<String, CatalogEntry>,
 }
 
@@ -57,7 +66,10 @@ impl CatalogRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.databases.is_empty() && self.schemas.is_empty() && self.entries.is_empty()
+        self.databases.is_empty()
+            && self.schemas.is_empty()
+            && self.tenant_routes.is_empty()
+            && self.entries.is_empty()
     }
 
     pub fn register_database(&mut self, database: &str) {
@@ -67,6 +79,29 @@ impl CatalogRegistry {
     pub fn register_schema(&mut self, database: &str, schema: &str) {
         self.register_database(database);
         self.schemas.insert(Self::schema_key(database, schema));
+    }
+
+    pub fn register_tenant_route(
+        &mut self,
+        tenant_id: &str,
+        database: &str,
+        location: impl Into<String>,
+    ) {
+        self.register_database(database);
+        let route = CatalogTenantRoute {
+            tenant_id: tenant_id.to_string(),
+            database: database.to_string(),
+            location: location.into(),
+        };
+        self.tenant_routes.insert(tenant_id.to_string(), route);
+    }
+
+    pub fn tenant_ids(&self) -> Vec<String> {
+        self.tenant_routes.keys().cloned().collect()
+    }
+
+    pub fn tenant_route(&self, tenant_id: &str) -> Option<CatalogTenantRoute> {
+        self.tenant_routes.get(tenant_id).cloned()
     }
 
     pub fn register_drawer(
