@@ -1,0 +1,29 @@
+html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@plugin "daisyui";
+
+header.menubar {
+    min-height: 1.25rem;
+    height: 1.25rem;
+}
+
+footer.infobar {
+    min-height: 2rem;
+    height: 2rem;
+    padding: 0rem 1rem;
+}
+
+summary {
+    list-style: none;
+}
+
+summary::after {
+    display: none;
+}

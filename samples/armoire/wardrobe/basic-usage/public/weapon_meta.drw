@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "primary_key": "_id",
+  "record_count": 0,
+  "unique_constraints": [],
+  "relationship_constraints": {
+    "primary_gem_id": {
+      "type": "polymorphic",
+      "target_drawers": [
+        "gem"
+      ]
+    },
+    "user_id": {
+      "type": "polymorphic",
+      "target_drawers": [
+        "user"
+      ]
+    }
+  },
+  "delete_rules": {},
+  "cascade_delete_rules": {}
+}

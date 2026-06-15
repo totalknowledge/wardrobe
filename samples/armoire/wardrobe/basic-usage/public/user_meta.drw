@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "primary_key": "_id",
+  "record_count": 0,
+  "unique_constraints": [],
+  "relationship_constraints": {},
+  "delete_rules": {},
+  "cascade_delete_rules": {}
+}
