@@ -5,6 +5,7 @@ import {
   viewChild
 } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
+import { WardrobeService } from './wardrobe/wardrobe-service';
 
 @Component({
   selector: 'app-root',
@@ -20,6 +21,8 @@ export class App implements AfterViewInit {
   private aboutMenu = viewChild.required<ElementRef<HTMLDetailsElement>>('helpMenu');
 
   public openTracker!: Record<string, HTMLDetailsElement>;
+
+  constructor(public databaseService: WardrobeService) {}
 
   public ngAfterViewInit(): void {
     this.openTracker = {
@@ -37,5 +40,13 @@ export class App implements AfterViewInit {
   public clearOpenMenus(): void {
     console.log(this.openTracker);
     this.openTracker['help']?.removeAttribute('open');
+  }
+
+  public testWardrobeDatabaseAccess(): void {
+    console.log('Testing wardrobe database access command...');
+
+    this.databaseService.testDatabaseAccess('./wardrobe');
+
+    console.log('Wardrobe database access command completed.');
   }
 }

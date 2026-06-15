@@ -10,9 +10,10 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Armoire - Database Manager",
+        "title": "Armoire - A Wardrobe Database Manager",
         "width": 1200,
         "height": 800,
         "resizable": true,
