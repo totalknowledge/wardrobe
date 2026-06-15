@@ -2,7 +2,9 @@ use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::reader::DatabaseReader;
-use crate::wrdb_lib::wal::{WalJournal, WalOperation, WalVerification};
+use crate::wrdb_lib::wal::{
+    WalJournal, WalOperation as DurableWalOperation, WalVerification,
+};
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -184,6 +186,7 @@ impl StorageScope {
 
     fn validate(&self) -> Result<()> {
         match self {
+            Self::Tenant { .. } => Ok(()),
             Self::Database { database } => {
                 StorageCoordinate::validate_component("database", database)
             }
@@ -598,15 +601,17 @@ impl WardrobeEngine {
         Ok(())
     }
 
-    fn wal_operation(command: &Command) -> Option<WalOperation> {
+    fn wal_operation(command: &Command) -> Option<DurableWalOperation> {
         match command {
-            Command::Upsert { .. } => Some(WalOperation::Upsert),
-            Command::Delete { .. } => Some(WalOperation::Delete),
-            Command::Vacuum { .. } | Command::Migrate { .. } => Some(WalOperation::Maintenance),
+            Command::Upsert { .. } => Some(DurableWalOperation::Upsert),
+            Command::Delete { .. } => Some(DurableWalOperation::Delete),
+            Command::Vacuum { .. } | Command::Migrate { .. } => {
+                Some(DurableWalOperation::Maintenance)
+            }
             Command::DefineDatabase { .. }
             | Command::DefineSchema { .. }
             | Command::DefineDrawer { .. }
-            | Command::DefineTenantRoute { .. } => Some(WalOperation::Define),
+            | Command::DefineTenantRoute { .. } => Some(DurableWalOperation::Define),
             _ => None,
         }
     }
@@ -709,7 +714,7 @@ impl WardrobeEngine {
                 database_name: database_name.to_string(),
             },
         )?;
-        let database_path = self.database_path_from_name(database_name);
+        let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
         std::fs::create_dir_all(&database_path)?;
 
         {
@@ -743,7 +748,8 @@ impl WardrobeEngine {
             }
         }
 
-        let schema_path = self.database_path_from_name(database_name).join(schema_name);
+        let schema_path =
+            Self::database_path_from_name(&self.root_directory, database_name)?.join(schema_name);
         std::fs::create_dir_all(&schema_path)?;
 
         {
@@ -786,7 +792,8 @@ impl WardrobeEngine {
             }
         }
 
-        let schema_path = self.database_path_from_name(database_name).join(schema_name);
+        let schema_path =
+            Self::database_path_from_name(&self.root_directory, database_name)?.join(schema_name);
         std::fs::create_dir_all(&schema_path)?;
         let drawer_path = schema_path.join(format!("{drawer_name}.drw"));
         if !drawer_path.exists() {
