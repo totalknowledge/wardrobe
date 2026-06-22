@@ -5,6 +5,7 @@ use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::engine_wal;
+use crate::wrdb_lib::hydration;
 use crate::wrdb_lib::nested_decomposition;
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query;
@@ -574,8 +575,10 @@ impl WardrobeEngine {
             Vec::new()
         };
 
-        Self::hydrate_records(database_core, &mut records, true)?;
-        Self::hydrate_virtual_relationships(
+        hydration::hydrate_records(&mut records, true, |drawer_name, record_key| {
+            Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+        })?;
+        Self::attach_virtual_relationships(
             database_core,
             &physical_drawer_name,
             &mut records,
@@ -612,8 +615,10 @@ impl WardrobeEngine {
             query::record_matches_filter(record, filter_map, context.drawer_namespace)
         });
         query::apply_query_modifiers(&mut records, modifiers.as_ref());
-        Self::hydrate_records(database_core, &mut records, true)?;
-        Self::hydrate_virtual_relationships(
+        hydration::hydrate_records(&mut records, true, |drawer_name, record_key| {
+            Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+        })?;
+        Self::attach_virtual_relationships(
             database_core,
             &physical_drawer_name,
             &mut records,
@@ -732,8 +737,15 @@ impl WardrobeEngine {
                 Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?;
             if let Some(mut record) = found_record {
                 let mut active_pointer_path = HashSet::from([physical_pointer]);
-                Self::hydrate_value(database_core, &mut record, false, &mut active_pointer_path)?;
-                Self::hydrate_virtual_relationships(
+                hydration::hydrate_value(
+                    &mut record,
+                    false,
+                    &mut active_pointer_path,
+                    &mut |drawer_name, record_key| {
+                        Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+                    },
+                )?;
+                Self::attach_virtual_relationships(
                     database_core,
                     &drawer_name,
                     std::slice::from_mut(&mut record),
@@ -1066,25 +1078,25 @@ impl WardrobeEngine {
         pointers
     }
 
-    fn hydrate_records(
+    fn fetch_record_for_hydration(
         database_core: &RwLock<Database>,
-        records: &mut [Value],
-        include_ids: bool,
-    ) -> Result<()> {
-        for record in records {
-            let mut active_pointer_path = HashSet::new();
-            if let Value::Object(map) = record {
-                if let Some(pointer) = map.get("_id").and_then(|value| value.as_str()) {
-                    active_pointer_path.insert(pointer.to_string());
-                }
-            }
-            Self::hydrate_value(database_core, record, include_ids, &mut active_pointer_path)?;
-        }
+        drawer_name: &str,
+        record_key: &str,
+    ) -> Result<Option<Value>> {
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Ok(None);
+        };
 
-        Ok(())
+        Self::write_lock(&drawer)?.find_by_primary_key_with_migration(record_key)
     }
 
-    fn hydrate_virtual_relationships(
+    fn attach_virtual_relationships(
         database_core: &RwLock<Database>,
         drawer_name: &str,
         records: &mut [Value],
@@ -1107,36 +1119,22 @@ impl WardrobeEngine {
             )
         };
 
-        if virtual_relationships.is_empty() {
-            return Ok(());
-        }
-
-        for record in records {
-            let Some(record_map) = record.as_object_mut() else {
-                continue;
-            };
-            let Some(parent_key) = record_map.get("_id").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let parent_pointer = pointer::format_pointer(drawer_name, parent_key);
-
-            for relationship in &virtual_relationships {
-                let mut child_records = Self::virtual_relationship_children(
+        hydration::hydrate_virtual_relationships(
+            drawer_name,
+            records,
+            &virtual_relationships,
+            include_ids,
+            |relationship, parent_pointer, include_ids| {
+                Self::virtual_relationship_children(
                     database_core,
                     &relationship.target_drawer,
                     &relationship.mapped_by,
-                    &parent_pointer,
+                    parent_pointer,
                     include_ids,
                     context,
-                )?;
-                if !include_ids {
-                    Self::remove_root_ids(&mut child_records);
-                }
-                record_map.insert(relationship.field_name.clone(), Value::Array(child_records));
-            }
-        }
-
-        Ok(())
+                )
+            },
+        )
     }
 
     fn virtual_relationship_children(
@@ -1163,134 +1161,15 @@ impl WardrobeEngine {
         child_records.retain(|record| {
             record.get(mapped_by).and_then(|value| value.as_str()) == Some(parent_pointer)
         });
-        Self::hydrate_records(database_core, &mut child_records, include_ids)?;
+        hydration::hydrate_records(
+            &mut child_records,
+            include_ids,
+            |drawer_name, record_key| {
+                Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+            },
+        )?;
 
         Ok(child_records)
-    }
-
-    fn remove_root_ids(records: &mut [Value]) {
-        for record in records {
-            if let Value::Object(map) = record {
-                map.remove("_id");
-            }
-        }
-    }
-
-    fn hydrate_value(
-        database_core: &RwLock<Database>,
-        current_value: &mut Value,
-        include_ids: bool,
-        active_pointer_path: &mut HashSet<String>,
-    ) -> Result<()> {
-        match current_value {
-            Value::Object(map) => {
-                let pointer_updates = map
-                    .iter()
-                    .filter_map(|(field_name, field_value)| {
-                        if field_name == "_id" {
-                            return None;
-                        }
-
-                        field_value
-                            .as_str()
-                            .filter(|pointer| pointer::is_pointer(pointer))
-                            .map(|pointer| (field_name.clone(), pointer.to_string()))
-                    })
-                    .collect::<Vec<_>>();
-
-                for (field_name, pointer) in pointer_updates {
-                    if let Some(resolved_value) = Self::resolve_pointer(
-                        database_core,
-                        &pointer,
-                        include_ids,
-                        active_pointer_path,
-                    )? {
-                        if let Some(value_ref) = map.get_mut(&field_name) {
-                            *value_ref = resolved_value;
-                        }
-                    }
-                }
-
-                for (field_name, field_value) in map.iter_mut() {
-                    if field_name != "_id" {
-                        Self::hydrate_value(
-                            database_core,
-                            field_value,
-                            include_ids,
-                            active_pointer_path,
-                        )?;
-                    }
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    if let Some(pointer) = value
-                        .as_str()
-                        .filter(|pointer| pointer::is_pointer(pointer))
-                        .map(|pointer| pointer.to_string())
-                    {
-                        if let Some(resolved_value) = Self::resolve_pointer(
-                            database_core,
-                            &pointer,
-                            include_ids,
-                            active_pointer_path,
-                        )? {
-                            *value = resolved_value;
-                            continue;
-                        }
-                    }
-
-                    Self::hydrate_value(database_core, value, include_ids, active_pointer_path)?;
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    fn resolve_pointer(
-        database_core: &RwLock<Database>,
-        pointer: &str,
-        include_ids: bool,
-        active_pointer_path: &mut HashSet<String>,
-    ) -> Result<Option<Value>> {
-        let (drawer_name, record_key) = pointer::parse_pointer(pointer)?;
-        let canonical_pointer = pointer::format_pointer(&drawer_name, &record_key);
-
-        if active_pointer_path.contains(&canonical_pointer) {
-            return Ok(None);
-        }
-
-        let mut record = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
-            database_core,
-            &drawer_name,
-            "_id",
-            Vec::new(),
-        )? {
-            Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?
-        } else {
-            None
-        };
-
-        if let Some(ref mut record_value) = record {
-            active_pointer_path.insert(canonical_pointer.clone());
-            Self::hydrate_value(
-                database_core,
-                record_value,
-                include_ids,
-                active_pointer_path,
-            )?;
-            active_pointer_path.remove(&canonical_pointer);
-
-            if !include_ids {
-                if let Value::Object(map) = record_value {
-                    map.remove("_id");
-                }
-            }
-        }
-
-        Ok(record)
     }
 }
 
