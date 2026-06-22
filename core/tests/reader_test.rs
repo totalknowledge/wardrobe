@@ -1,7 +1,8 @@
+use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe_core::DatabaseReader;
+use wardrobe_core::{BsonBinaryFormat, DatabaseReader, StorageFormat};
 
 fn temp_file_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -17,8 +18,17 @@ fn temp_file_path(test_name: &str) -> std::path::PathBuf {
 fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
     let file_path = temp_file_path("reader_record_raw_bytes");
     let mut file = fs::File::create(&file_path).expect("file should create");
-    writeln!(file, r#"{{"_id":"@gem:lnk_a","element":"Fire"}}"#).expect("write should succeed");
-    writeln!(file, "!!DEAD!!").expect("write should succeed");
+    let record_payload =
+        BsonBinaryFormat::serialize_record(&json!({"_id":"@gem:lnk_a","element":"Fire"}))
+            .expect("record should serialize");
+    let mut tombstone_payload =
+        BsonBinaryFormat::tombstone_frame(BsonBinaryFormat::frame_header_len() * 2)
+            .expect("tombstone should serialize");
+    tombstone_payload.resize(BsonBinaryFormat::frame_header_len() * 2, 0);
+    file.write_all(&record_payload)
+        .expect("write should succeed");
+    file.write_all(&tombstone_payload)
+        .expect("write should succeed");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let record = reader
@@ -31,7 +41,7 @@ fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
         .read_raw_bytes_at_offset(0)
         .expect("raw read should succeed")
         .expect("bytes should exist");
-    assert!(raw_bytes.ends_with(b"\n"));
+    assert!(raw_bytes.starts_with(b"WRDB"));
 
     let tombstoned = reader
         .read_record_at_offset(raw_bytes.len() as u64)
@@ -43,8 +53,16 @@ fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
 fn us_071_reader_reuses_handle_for_successive_reads_and_closes_cleanly() {
     let file_path = temp_file_path("persistent_reader_successive_reads");
     let mut file = fs::File::create(&file_path).expect("file should create");
-    writeln!(file, r#"{{"_id":"@gem:fire","element":"Fire"}}"#).expect("write should succeed");
-    writeln!(file, r#"{{"_id":"@gem:water","element":"Water"}}"#).expect("write should succeed");
+    let first_payload =
+        BsonBinaryFormat::serialize_record(&json!({"_id":"@gem:fire","element":"Fire"}))
+            .expect("first record should serialize");
+    let second_payload =
+        BsonBinaryFormat::serialize_record(&json!({"_id":"@gem:water","element":"Water"}))
+            .expect("second record should serialize");
+    file.write_all(&first_payload)
+        .expect("write should succeed");
+    file.write_all(&second_payload)
+        .expect("write should succeed");
     file.sync_all().expect("sync should succeed");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
@@ -70,21 +88,27 @@ fn us_071_reader_reuses_handle_for_successive_reads_and_closes_cleanly() {
 fn stream_with_offsets_reports_each_line_offset() {
     let file_path = temp_file_path("reader_stream_with_offsets");
     let mut file = fs::File::create(&file_path).expect("file should create");
-    writeln!(file, r#"{{"a":1}}"#).expect("write should succeed");
-    writeln!(file, r#"{{"b":2}}"#).expect("write should succeed");
+    let first_payload =
+        BsonBinaryFormat::serialize_record(&json!({"a":1})).expect("first should serialize");
+    let second_payload =
+        BsonBinaryFormat::serialize_record(&json!({"b":2})).expect("second should serialize");
+    file.write_all(&first_payload)
+        .expect("write should succeed");
+    file.write_all(&second_payload)
+        .expect("write should succeed");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let mut offsets = Vec::new();
 
     reader
-        .stream_with_offsets(|offset, line| {
-            offsets.push((offset, String::from_utf8_lossy(line).to_string()))
-        })
+        .stream_with_offsets(|offset, line| offsets.push((offset, line.to_vec())))
         .expect("stream should succeed");
 
     assert_eq!(offsets.len(), 2);
     assert_eq!(offsets[0].0, 0);
-    assert!(offsets[1].0 > 0);
+    assert_eq!(offsets[1].0, first_payload.len() as u64);
+    assert!(offsets[0].1.starts_with(b"WRDB"));
+    assert!(offsets[1].1.starts_with(b"WRDB"));
 }
 
 #[test]
@@ -109,7 +133,9 @@ fn reader_open_drawer_missing_file_errors() {
 fn reader_offset_out_of_bounds_returns_none() {
     let file_path = temp_file_path("bounds_test");
     let mut file = fs::File::create(&file_path).expect("create");
-    file.write_all(b"data\n").expect("write");
+    let payload = BsonBinaryFormat::serialize_record(&json!({"valid":true}))
+        .expect("record should serialize");
+    file.write_all(&payload).expect("write");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
     assert!(reader.read_raw_bytes_at_offset(100).unwrap().is_none());
@@ -142,31 +168,51 @@ fn stream_with_offsets_binary_overflow_error() {
 fn read_record_at_offset_deserialization_failure() {
     let file_path = temp_file_path("deserialization_fail");
     let mut file = fs::File::create(&file_path).expect("create");
-    file.write_all(b"{\"corrupted_payload_without_closing_brace\n")
+    file.write_all(b"WRDB\x01\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x14nope")
         .expect("write");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
-    assert!(reader.read_record_at_offset(0).unwrap().is_none());
+    assert!(reader.read_record_at_offset(0).is_err());
 }
 
 #[test]
-fn read_record_at_offset_valid_plaintext_parsing() {
-    let file_path = temp_file_path("valid_plaintext");
+fn us_072_read_record_at_offset_rejects_legacy_plaintext() {
+    let file_path = temp_file_path("legacy_plaintext_rejected");
     let mut file = fs::File::create(&file_path).expect("create");
     file.write_all(b"{\"valid\":true}\n").expect("write");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
-    let record = reader.read_record_at_offset(0).unwrap().unwrap();
-    assert_eq!(record["valid"], true);
+    let error = reader
+        .read_record_at_offset(0)
+        .expect_err("legacy plaintext should be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn us_072_stream_with_offsets_rejects_legacy_plaintext() {
+    let file_path = temp_file_path("legacy_plaintext_stream_rejected");
+    let mut file = fs::File::create(&file_path).expect("create");
+    file.write_all(b"{\"valid\":true}\n").expect("write");
+
+    let reader = DatabaseReader::open_drawer(&file_path).expect("open");
+    let error = reader
+        .stream_with_offsets(|_, _| {})
+        .expect_err("legacy plaintext should be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]
 fn read_record_at_offset_valid_binary_parsing() {
     let file_path = temp_file_path("valid_binary");
     let mut file = fs::File::create(&file_path).expect("create");
-    file.write_all(b"WRDB\x00\x00\x00\x18\x13\x00\x00\x00\x08valid\x00\x01\x00")
-        .expect("write");
+    let payload = BsonBinaryFormat::serialize_record(&json!({"valid":true}))
+        .expect("record should serialize");
+    file.write_all(&payload).expect("write");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
-    let _ = reader.read_record_at_offset(0);
+    let record = reader
+        .read_record_at_offset(0)
+        .expect("read should succeed")
+        .expect("record should exist");
+    assert_eq!(record["valid"], true);
 }

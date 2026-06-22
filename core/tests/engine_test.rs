@@ -3559,7 +3559,7 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
 }
 
 #[test]
-fn us_044_find_all_lazily_migrates_legacy_record_layout() {
+fn us_072_find_all_rejects_legacy_newline_record_layout() {
     let database = TempDatabase::new("us_044_lazy_schema_evolution");
     let database_directory = database.path.to_string_lossy().into_owned();
     write_legacy_drawer_record(
@@ -3573,39 +3573,19 @@ fn us_044_find_all_lazily_migrates_legacy_record_layout() {
     );
 
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
-    let records = engine.find_all("gem").expect("legacy records should read");
-
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["_id"], "lazy_fire");
-    assert_eq!(records[0]["socket"], "@socket:alpha");
-
-    let data_records = drawer_records_from_disk(&database.path.join("gem.drw"));
-    assert!(data_records.iter().any(|record| {
-        record["element"] == "Fire"
-            && record
-                .get("socket")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.starts_with("@socket:"))
-    }));
-
-    let metadata: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(database.path.join("gem_meta.drw")).expect("metadata should read"),
-    )
-    .expect("metadata should parse");
-    assert_eq!(metadata["format_version"], 1);
-
-    let restarted_engine =
-        WardrobeEngine::open(&database_directory).expect("engine should reopen after migration");
-    let migrated = restarted_engine
-        .find_by_id("@gem:lnk_lazy_fire")
-        .expect("legacy pointer lookup should parse")
-        .expect("migrated record should exist");
-    assert_eq!(migrated["element"], "Fire");
-    assert_eq!(migrated["socket"], "@socket:alpha");
+    let error = engine
+        .find_all("gem")
+        .expect_err("legacy newline records should be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("Legacy newline-delimited records are no longer supported")
+    );
 }
 
 #[test]
-fn us_044_batch_migration_rewrites_legacy_storage_partition() {
+fn us_072_batch_migration_rejects_legacy_newline_storage_partition() {
     let database = TempDatabase::new("us_044_batch_schema_evolution");
     let database_directory = database.path.to_string_lossy().into_owned();
     write_legacy_drawer_record(
@@ -3619,31 +3599,15 @@ fn us_044_batch_migration_rewrites_legacy_storage_partition() {
     );
 
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
-    let report = engine
+    let error = engine
         .migrate_drawer("weapon")
-        .expect("batch migration should succeed");
-
-    assert_eq!(report.records_rewritten, 1);
-
-    let data_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+        .expect_err("legacy newline records should be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
-        data_records
-            .iter()
-            .any(|record| record["_id"] == "batch_blade" && record["gem"] == "@gem:batch_gem")
+        error
+            .to_string()
+            .contains("Legacy newline-delimited records are no longer supported")
     );
-
-    let metadata: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(database.path.join("weapon_meta.drw")).expect("metadata should read"),
-    )
-    .expect("metadata should parse");
-    assert_eq!(metadata["format_version"], 1);
-
-    let migrated = engine
-        .find_by_id("@weapon:batch_blade")
-        .expect("migrated lookup should succeed")
-        .expect("migrated record should exist");
-    assert_eq!(migrated["name"], "Batch Blade");
-    assert_eq!(migrated["gem"], "@gem:batch_gem");
 }
 
 #[test]

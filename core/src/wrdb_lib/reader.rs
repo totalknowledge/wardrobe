@@ -43,53 +43,47 @@ impl DatabaseReader {
             return Ok(None);
         }
 
-        reader.seek(SeekFrom::Start(byte_offset))?;
-        let mut frame_probe = [0u8; 4];
-        reader.read_exact(&mut frame_probe)?;
-
-        if frame_probe == *b"WRDB" {
+        let header_len = BsonBinaryFormat::frame_header_len();
+        if byte_offset + header_len as u64 > file_len {
+            let remaining = file_len - byte_offset;
+            let probe_len = remaining.min(4) as usize;
+            let mut probe = vec![0u8; probe_len];
             reader.seek(SeekFrom::Start(byte_offset))?;
-            let mut header = vec![0u8; BsonBinaryFormat::frame_header_len()];
-            reader.read_exact(&mut header)?;
-
-            let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Binary frame missing slot size",
-                )
-            })?;
-            if byte_offset + slot_size as u64 > file_len {
+            reader.read_exact(&mut probe)?;
+            if probe.as_slice() != &b"WRDB"[..probe_len] {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Binary frame exceeds file length",
+                    std::io::ErrorKind::InvalidData,
+                    "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
                 ));
             }
 
-            reader.seek(SeekFrom::Start(byte_offset))?;
-            let mut slot = vec![0u8; slot_size];
-            reader.read_exact(&mut slot)?;
-            return Ok(Some(slot));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "WRDB binary frame header exceeds file length",
+            ));
         }
 
         reader.seek(SeekFrom::Start(byte_offset))?;
-        let mut byte_buffer = Vec::new();
-        let mut single_byte_chunk = [0u8; 1];
-        loop {
-            let bytes_read = reader.read(&mut single_byte_chunk)?;
-            if bytes_read == 0 {
-                break;
-            }
-            byte_buffer.push(single_byte_chunk[0]);
-            if single_byte_chunk[0] == b'\n' {
-                break;
-            }
+        let mut header = vec![0u8; header_len];
+        reader.read_exact(&mut header)?;
+
+        let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
+            )
+        })?;
+        if byte_offset + slot_size as u64 > file_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Binary frame exceeds file length",
+            ));
         }
 
-        if byte_buffer.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(byte_buffer))
-        }
+        reader.seek(SeekFrom::Start(byte_offset))?;
+        let mut slot = vec![0u8; slot_size];
+        reader.read_exact(&mut slot)?;
+        Ok(Some(slot))
     }
 
     pub fn stream_with_offsets<F>(&self, mut processing_closure: F) -> std::io::Result<()>
@@ -108,54 +102,47 @@ impl DatabaseReader {
         let mut track_offset = 0u64;
         while track_offset < file_len {
             reader.seek(SeekFrom::Start(track_offset))?;
-            let mut probe = [0u8; 4];
-            let probe_read = reader.read(&mut probe)?;
-            if probe_read == 0 {
-                break;
-            }
-
-            if probe_read == 4 && probe == *b"WRDB" {
+            let header_len = BsonBinaryFormat::frame_header_len();
+            if track_offset + header_len as u64 > file_len {
+                let remaining = file_len - track_offset;
+                let probe_len = remaining.min(4) as usize;
+                let mut probe = vec![0u8; probe_len];
                 reader.seek(SeekFrom::Start(track_offset))?;
-                let mut header = vec![0u8; BsonBinaryFormat::frame_header_len()];
-                reader.read_exact(&mut header)?;
-                let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Binary frame missing slot size",
-                    )
-                })?;
-                if track_offset + slot_size as u64 > file_len {
+                reader.read_exact(&mut probe)?;
+                if probe.as_slice() != &b"WRDB"[..probe_len] {
                     return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "Binary frame exceeds file length",
+                        std::io::ErrorKind::InvalidData,
+                        "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
                     ));
                 }
 
-                reader.seek(SeekFrom::Start(track_offset))?;
-                let mut slot = vec![0u8; slot_size];
-                reader.read_exact(&mut slot)?;
-                processing_closure(track_offset, &slot);
-                track_offset += slot_size as u64;
-            } else {
-                reader.seek(SeekFrom::Start(track_offset))?;
-                let mut byte_buffer = Vec::new();
-                let mut single_byte_chunk = [0u8; 1];
-                loop {
-                    let bytes_read = reader.read(&mut single_byte_chunk)?;
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    byte_buffer.push(single_byte_chunk[0]);
-                    if single_byte_chunk[0] == b'\n' {
-                        break;
-                    }
-                }
-                if byte_buffer.is_empty() {
-                    break;
-                }
-                processing_closure(track_offset, &byte_buffer);
-                track_offset += byte_buffer.len() as u64;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "WRDB binary frame header exceeds file length",
+                ));
             }
+
+            reader.seek(SeekFrom::Start(track_offset))?;
+            let mut header = vec![0u8; header_len];
+            reader.read_exact(&mut header)?;
+            let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
+                )
+            })?;
+            if track_offset + slot_size as u64 > file_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Binary frame exceeds file length",
+                ));
+            }
+
+            reader.seek(SeekFrom::Start(track_offset))?;
+            let mut slot = vec![0u8; slot_size];
+            reader.read_exact(&mut slot)?;
+            processing_closure(track_offset, &slot);
+            track_offset += slot_size as u64;
         }
 
         Ok(())

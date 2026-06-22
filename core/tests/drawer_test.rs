@@ -121,16 +121,21 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
     let data_file = database_directory.path.join("weapon.drw");
     let index_file = database_directory.path.join("weapon_index.drw");
 
-    fs::write(
-        &data_file,
-        "{\"_id\":\"@weapon:lnk_a\",\"serial\":\"SER-1\"}\n",
-    )
-    .expect("data file should write");
-    fs::write(
-        &index_file,
-        "{\"f\":\"_id\",\"k\":\"@weapon:lnk_a\",\"o\":0}\n{\"f\":\"serial\",\"k\":\"SER-1\",\"o\":[0]}\n",
-    )
-    .expect("index file should write");
+    let data_record =
+        BsonBinaryFormat::serialize_record(&json!({"_id": "@weapon:lnk_a", "serial": "SER-1"}))
+            .expect("data record should serialize");
+    fs::write(&data_file, data_record).expect("data file should write");
+
+    let mut index_records = Vec::new();
+    index_records.extend(
+        BsonBinaryFormat::serialize_record(&json!({"f": "_id", "k": "@weapon:lnk_a", "o": 0}))
+            .expect("primary index should serialize"),
+    );
+    index_records.extend(
+        BsonBinaryFormat::serialize_record(&json!({"f": "serial", "k": "SER-1", "o": [0]}))
+            .expect("secondary index should serialize"),
+    );
+    fs::write(&index_file, index_records).expect("index file should write");
 
     let drawer = Drawer::open(
         &database_directory.path,
