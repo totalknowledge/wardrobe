@@ -1,6 +1,7 @@
 use crate::wrdb_lib::catalog_validation;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
+use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
@@ -854,7 +855,7 @@ impl WardrobeEngine {
             | Command::Vacuum { drawer_name }
             | Command::Migrate { drawer_name } => Some(drawer_name.clone()),
             Command::FindById { pointer } | Command::Delete { pointer } => {
-                Self::try_parse_pointer(pointer).map(|(drawer_name, _)| drawer_name)
+                pointer::try_parse_pointer(pointer).map(|(drawer_name, _)| drawer_name)
             }
             Command::Execute { command, .. } | Command::ExecuteInScope { command, .. } => {
                 Self::command_drawer_name(command)
@@ -1608,18 +1609,16 @@ impl WardrobeEngine {
     ) -> Result<String> {
         if let Value::Object(map) = payload {
             let target_primary_key = "_id";
-            let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+            let physical_drawer_name =
+                pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
 
             let record_key = match map.get(target_primary_key).and_then(|v| v.as_str()) {
-                Some(existing_id) => Self::normalize_primary_key(
-                    &physical_drawer_name,
-                    drawer_name,
-                    existing_id,
-                    context,
-                ),
+                Some(existing_id) => {
+                    pointer::normalize_primary_key(&physical_drawer_name, drawer_name, existing_id)
+                }
                 None => Uuid::new_v4().simple().to_string(),
             };
-            let record_pointer = Self::format_pointer(&physical_drawer_name, &record_key);
+            let record_pointer = pointer::format_pointer(&physical_drawer_name, &record_key);
 
             let drawer_handle = Self::load_drawer_handle(
                 database_core,
@@ -1665,7 +1664,8 @@ impl WardrobeEngine {
         drawer_name: &str,
         context: ExecutionContext<'_>,
     ) -> std::io::Result<Vec<Value>> {
-        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let physical_drawer_name =
+            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let mut records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1697,7 +1697,8 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
         let filter_map = Self::filter_map(&filter)?;
-        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let physical_drawer_name =
+            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
 
         let mut records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
@@ -1731,7 +1732,8 @@ impl WardrobeEngine {
         _modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
     ) -> Result<usize> {
-        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let physical_drawer_name =
+            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let Some(filter) = filter else {
             let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
                 database_core,
@@ -1770,7 +1772,8 @@ impl WardrobeEngine {
         drawer_name: &str,
         context: ExecutionContext<'_>,
     ) -> Result<VacuumReport> {
-        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let physical_drawer_name =
+            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1792,7 +1795,8 @@ impl WardrobeEngine {
         drawer_name: &str,
         context: ExecutionContext<'_>,
     ) -> Result<VacuumReport> {
-        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
+        let physical_drawer_name =
+            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1814,8 +1818,8 @@ impl WardrobeEngine {
         pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<Option<Value>> {
-        let physical_pointer = Self::scoped_pointer(pointer, context);
-        let (drawer_name, record_key) = Self::parse_pointer(&physical_pointer)?;
+        let physical_pointer = pointer::scoped_pointer(pointer, context.drawer_namespace);
+        let (drawer_name, record_key) = pointer::parse_pointer(&physical_pointer)?;
 
         if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
@@ -1849,7 +1853,7 @@ impl WardrobeEngine {
         locator: StorageLocator,
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
-        let pointer = Self::locator_to_pointer(locator);
+        let pointer = pointer::locator_to_pointer(locator);
         let operation = WalOperation::DeleteById {
             pointer: pointer.clone(),
             drawer_namespace: context.drawer_namespace.map(str::to_string),
@@ -1885,7 +1889,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
         let mut active_delete_path = HashSet::new();
-        let physical_pointer = Self::scoped_pointer(pointer, context);
+        let physical_pointer = pointer::scoped_pointer(pointer, context.drawer_namespace);
         Self::delete_by_id_inner(
             database_core,
             &physical_pointer,
@@ -1904,7 +1908,7 @@ impl WardrobeEngine {
             return Ok(false);
         }
 
-        let (drawer_name, record_key) = Self::parse_pointer(pointer)?;
+        let (drawer_name, record_key) = pointer::parse_pointer(pointer)?;
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &drawer_name,
@@ -2050,10 +2054,11 @@ impl WardrobeEngine {
                 context,
             )?;
 
-            let physical_target_drawer = Self::scoped_drawer_name(&rule.target_drawer, context);
+            let physical_target_drawer =
+                pointer::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
             for record in child_records {
                 if let Some(child_key) = record.get("_id").and_then(|value| value.as_str()) {
-                    pointers.push(Self::format_pointer(&physical_target_drawer, child_key));
+                    pointers.push(pointer::format_pointer(&physical_target_drawer, child_key));
                 }
             }
         }
@@ -2084,7 +2089,8 @@ impl WardrobeEngine {
             }
 
             for child_record in child_records {
-                let physical_target_drawer = Self::scoped_drawer_name(&rule.target_drawer, context);
+                let physical_target_drawer =
+                    pointer::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
                 let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
                     database_core,
                     &physical_target_drawer,
@@ -2120,7 +2126,8 @@ impl WardrobeEngine {
         parent_pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
-        let physical_target_drawer = Self::scoped_drawer_name(target_drawer, context);
+        let physical_target_drawer =
+            pointer::scoped_drawer_name(target_drawer, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_target_drawer,
@@ -2246,7 +2253,7 @@ impl WardrobeEngine {
             .filter(|(field_name, _)| field_name.as_str() != "_id")
             .filter(|(field_name, _)| !relationship_constraints.contains_key(field_name.as_str()))
             .filter_map(|(field_name, value)| {
-                let drawer_names = Self::inline_pointer_drawer_names(value);
+                let drawer_names = pointer::inline_pointer_drawer_names(value);
                 if drawer_names.is_empty() {
                     return None;
                 }
@@ -2274,35 +2281,6 @@ impl WardrobeEngine {
         Ok(())
     }
 
-    fn inline_pointer_drawer_names(value: &Value) -> Vec<String> {
-        let mut drawer_names = Vec::new();
-        Self::collect_inline_pointer_drawer_names(value, &mut drawer_names);
-        drawer_names.sort();
-        drawer_names.dedup();
-        drawer_names
-    }
-
-    fn collect_inline_pointer_drawer_names(value: &Value, drawer_names: &mut Vec<String>) {
-        match value {
-            Value::String(pointer) => {
-                if let Some((drawer_name, _)) = Self::try_parse_pointer(pointer) {
-                    drawer_names.push(drawer_name);
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    Self::collect_inline_pointer_drawer_names(value, drawer_names);
-                }
-            }
-            Value::Object(map) => {
-                for value in map.values() {
-                    Self::collect_inline_pointer_drawer_names(value, drawer_names);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn decompose_relationship_value(
         database_core: &RwLock<Database>,
         drawer_name: &str,
@@ -2313,10 +2291,10 @@ impl WardrobeEngine {
         match value {
             Value::Object(child_map) => {
                 if let Some(reference_id) = Self::id_only_reference(&child_map) {
-                    let normalized_pointer = Self::normalize_reference_pointer_for_context(
+                    let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
                         drawer_name,
                         reference_id,
-                        context,
+                        context.drawer_namespace,
                     );
                     Ok(Value::String(normalized_pointer))
                 } else {
@@ -2342,17 +2320,21 @@ impl WardrobeEngine {
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Value::Array),
-            Value::String(pointer) if Self::is_pointer(&pointer) => Ok(Value::String(
-                Self::normalize_reference_pointer_for_context(drawer_name, &pointer, context),
+            Value::String(pointer) if pointer::is_pointer(&pointer) => Ok(Value::String(
+                pointer::normalize_reference_pointer_for_namespace(
+                    drawer_name,
+                    &pointer,
+                    context.drawer_namespace,
+                ),
             )),
             Value::String(reference_id)
                 if Self::should_normalize_plain_string(&relation_target) =>
             {
                 Ok(Value::String(
-                    Self::normalize_reference_pointer_for_context(
+                    pointer::normalize_reference_pointer_for_namespace(
                         drawer_name,
                         &reference_id,
-                        context,
+                        context.drawer_namespace,
                     ),
                 ))
             }
@@ -2365,84 +2347,6 @@ impl WardrobeEngine {
             map.get("_id").and_then(|value| value.as_str())
         } else {
             None
-        }
-    }
-
-    fn normalize_reference_pointer(drawer_name: &str, reference_id: &str) -> String {
-        if let Some((pointer_drawer, pointer_key)) = Self::try_parse_pointer(reference_id) {
-            return Self::format_pointer(&pointer_drawer, &pointer_key);
-        }
-
-        Self::format_pointer(drawer_name, &Self::clean_primary_key_token(reference_id))
-    }
-
-    fn normalize_reference_pointer_for_context(
-        drawer_name: &str,
-        reference_id: &str,
-        context: ExecutionContext<'_>,
-    ) -> String {
-        let Some(_) = context.drawer_namespace else {
-            return Self::normalize_reference_pointer(drawer_name, reference_id);
-        };
-
-        if let Some((pointer_drawer, pointer_key)) = Self::try_parse_pointer(reference_id) {
-            let physical_pointer_drawer = Self::scoped_drawer_name(&pointer_drawer, context);
-            return Self::format_pointer(&physical_pointer_drawer, &pointer_key);
-        }
-
-        let physical_drawer_name = Self::scoped_drawer_name(drawer_name, context);
-        Self::normalize_reference_pointer(&physical_drawer_name, reference_id)
-    }
-
-    fn normalize_primary_key(
-        physical_drawer_name: &str,
-        logical_drawer_name: &str,
-        existing_id: &str,
-        context: ExecutionContext<'_>,
-    ) -> String {
-        if let Some((pointer_drawer, pointer_key)) = Self::try_parse_pointer(existing_id) {
-            if pointer_drawer == logical_drawer_name || pointer_drawer == physical_drawer_name {
-                return pointer_key;
-            }
-        }
-
-        let Some(_) = context.drawer_namespace else {
-            return Self::clean_primary_key_token(existing_id);
-        };
-
-        Self::clean_primary_key_token(existing_id)
-    }
-
-    fn scoped_drawer_name(drawer_name: &str, context: ExecutionContext<'_>) -> String {
-        let Some(namespace) = context.drawer_namespace else {
-            return drawer_name.to_string();
-        };
-
-        let prefix = format!("{namespace}_");
-        if drawer_name.starts_with(&prefix) {
-            drawer_name.to_string()
-        } else {
-            format!("{prefix}{drawer_name}")
-        }
-    }
-
-    fn scoped_pointer(pointer: &str, context: ExecutionContext<'_>) -> String {
-        let Some((drawer_name, record_key)) = Self::try_parse_pointer(pointer) else {
-            return pointer.to_string();
-        };
-
-        let Some(_) = context.drawer_namespace else {
-            return Self::format_pointer(&drawer_name, &record_key);
-        };
-
-        let physical_drawer_name = Self::scoped_drawer_name(&drawer_name, context);
-        Self::format_pointer(&physical_drawer_name, &record_key)
-    }
-
-    fn locator_to_pointer(locator: StorageLocator) -> String {
-        match locator {
-            StorageLocator::Explicit { drawer, id } => Self::format_pointer(&drawer, &id),
-            StorageLocator::Inline(pointer) => pointer,
         }
     }
 
@@ -2518,7 +2422,7 @@ impl WardrobeEngine {
         if let Value::Object(map) = record {
             for field in cascade_fields {
                 if let Some(value) = map.get(field) {
-                    Self::collect_pointer_strings(value, &mut pointers);
+                    pointer::collect_pointer_strings(value, &mut pointers);
                 }
             }
         }
@@ -2555,10 +2459,10 @@ impl WardrobeEngine {
             Value::Object(expected_map) => {
                 if let Some(reference_id) = Self::id_only_reference(expected_map) {
                     let relationship_drawer = Self::relationship_drawer_name(field_name);
-                    let normalized_pointer = Self::normalize_reference_pointer_for_context(
+                    let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
                         &relationship_drawer,
                         reference_id,
-                        context,
+                        context.drawer_namespace,
                     );
                     return actual_value.as_str() == Some(normalized_pointer.as_str());
                 }
@@ -2789,7 +2693,7 @@ impl WardrobeEngine {
             let Some(parent_key) = record_map.get("_id").and_then(|value| value.as_str()) else {
                 continue;
             };
-            let parent_pointer = Self::format_pointer(drawer_name, parent_key);
+            let parent_pointer = pointer::format_pointer(drawer_name, parent_key);
 
             for (field_name, target_drawer, mapped_by) in &virtual_relationships {
                 let mut child_records = Self::virtual_relationship_children(
@@ -2818,7 +2722,8 @@ impl WardrobeEngine {
         include_ids: bool,
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
-        let physical_target_drawer = Self::scoped_drawer_name(target_drawer, context);
+        let physical_target_drawer =
+            pointer::scoped_drawer_name(target_drawer, context.drawer_namespace);
         let mut child_records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_target_drawer,
@@ -2858,25 +2763,6 @@ impl WardrobeEngine {
         rule.get("mapped_by").and_then(|value| value.as_str())
     }
 
-    fn collect_pointer_strings(value: &Value, pointers: &mut Vec<String>) {
-        match value {
-            Value::String(pointer) if Self::is_pointer(pointer) => {
-                pointers.push(pointer.to_string());
-            }
-            Value::Array(values) => {
-                for value in values {
-                    Self::collect_pointer_strings(value, pointers);
-                }
-            }
-            Value::Object(map) => {
-                for value in map.values() {
-                    Self::collect_pointer_strings(value, pointers);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn hydrate_value(
         database_core: &RwLock<Database>,
         current_value: &mut Value,
@@ -2894,7 +2780,7 @@ impl WardrobeEngine {
 
                         field_value
                             .as_str()
-                            .filter(|pointer| Self::is_pointer(pointer))
+                            .filter(|pointer| pointer::is_pointer(pointer))
                             .map(|pointer| (field_name.clone(), pointer.to_string()))
                     })
                     .collect::<Vec<_>>();
@@ -2927,7 +2813,7 @@ impl WardrobeEngine {
                 for value in values {
                     if let Some(pointer) = value
                         .as_str()
-                        .filter(|pointer| Self::is_pointer(pointer))
+                        .filter(|pointer| pointer::is_pointer(pointer))
                         .map(|pointer| pointer.to_string())
                     {
                         if let Some(resolved_value) = Self::resolve_pointer(
@@ -2956,8 +2842,8 @@ impl WardrobeEngine {
         include_ids: bool,
         active_pointer_path: &mut HashSet<String>,
     ) -> Result<Option<Value>> {
-        let (drawer_name, record_key) = Self::parse_pointer(pointer)?;
-        let canonical_pointer = Self::format_pointer(&drawer_name, &record_key);
+        let (drawer_name, record_key) = pointer::parse_pointer(pointer)?;
+        let canonical_pointer = pointer::format_pointer(&drawer_name, &record_key);
 
         if active_pointer_path.contains(&canonical_pointer) {
             return Ok(None);
@@ -2992,55 +2878,5 @@ impl WardrobeEngine {
         }
 
         Ok(record)
-    }
-
-    fn is_pointer(value: &str) -> bool {
-        Self::try_parse_pointer_parts(value).is_some()
-    }
-
-    fn try_parse_pointer(pointer: &str) -> Option<(String, String)> {
-        let (drawer_name, record_key) = Self::try_parse_pointer_parts(pointer)?;
-        Some((drawer_name.to_string(), record_key.to_string()))
-    }
-
-    fn try_parse_pointer_parts(pointer: &str) -> Option<(&str, &str)> {
-        let clean_pointer = pointer.strip_prefix('@')?;
-        let (drawer_name, record_key) = clean_pointer.split_once(':')?;
-        let record_key = record_key.strip_prefix("lnk_").unwrap_or(record_key);
-
-        if drawer_name.is_empty() || record_key.is_empty() || record_key.contains(':') {
-            return None;
-        }
-
-        Some((drawer_name, record_key))
-    }
-
-    fn parse_pointer(pointer: &str) -> Result<(String, String)> {
-        Self::try_parse_pointer(pointer).ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Malformed pointer reference encountered: {}", pointer),
-            )
-        })
-    }
-
-    fn clean_primary_key_token(value: &str) -> String {
-        if let Some((_, record_key)) = Self::try_parse_pointer_parts(value) {
-            return record_key.to_string();
-        }
-
-        value
-            .trim_start_matches('@')
-            .strip_prefix("lnk_")
-            .unwrap_or_else(|| value.trim_start_matches('@'))
-            .to_string()
-    }
-
-    fn format_pointer(drawer_name: &str, record_key: &str) -> String {
-        format!(
-            "@{}:{}",
-            drawer_name.trim_start_matches('@'),
-            Self::clean_primary_key_token(record_key)
-        )
     }
 }

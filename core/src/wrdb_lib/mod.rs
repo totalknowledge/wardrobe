@@ -3,6 +3,7 @@ pub(crate) mod command;
 pub mod connection;
 pub mod database;
 pub mod drawer;
+pub(crate) mod pointer;
 pub mod protocol;
 pub(crate) mod query;
 pub mod reader;
