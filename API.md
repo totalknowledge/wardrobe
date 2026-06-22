@@ -221,6 +221,27 @@ pub fn open_with_drawer_cache_limit(
 Opens a local engine with a maximum active drawer cache size.
 
 ```rust
+pub fn open_with_wal_checkpoint_thresholds(
+    directory: &str,
+    wal_size_threshold_bytes: u64,
+    wal_ops_threshold_count: u64,
+) -> Result<Self>
+```
+
+Opens a local engine with custom automatic WAL checkpoint thresholds. A checkpoint is triggered when either threshold is reached.
+
+```rust
+pub fn open_with_drawer_cache_limit_and_wal_checkpoint_thresholds(
+    directory: &str,
+    max_cached_drawers: usize,
+    wal_size_threshold_bytes: u64,
+    wal_ops_threshold_count: u64,
+) -> Result<Self>
+```
+
+Opens a local engine with both drawer cache and WAL checkpoint thresholds configured.
+
+```rust
 #[deprecated(note = "Use WardrobeEngine::open for filesystem-backed initialization")]
 pub fn new(directory: &str) -> Result<Self>
 ```

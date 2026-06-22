@@ -3738,6 +3738,82 @@ fn engine_appends_to_wal_on_write() -> std::io::Result<()> {
     assert!(metadata.len() > 0);
     Ok(())
 }
+
+#[test]
+fn us_060_ops_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Result<()> {
+    let database = TempDatabase::new("us_060_ops_threshold_checkpoint");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine =
+        WardrobeEngine::open_with_wal_checkpoint_thresholds(&database_directory, 1_048_576, 2)
+            .expect("engine opens with WAL thresholds");
+
+    let pointer = engine.upsert("gem", json!({"_id": "fire", "element": "Fire"}))?;
+    assert_eq!(pointer, "@gem:fire");
+
+    let wal_path = database.path.join("wardrobe.wal");
+    let wal_meta_path = database.path.join("wardrobe.wal.meta");
+    assert!(wal_path.exists());
+    assert!(wal_meta_path.exists());
+    assert_eq!(fs::metadata(&wal_path)?.len(), 0);
+
+    drop(engine);
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine reopens");
+    let record = reopened
+        .find_by_id("@gem:fire")
+        .expect("record lookup succeeds")
+        .expect("record should survive checkpoint");
+    assert_eq!(record["element"], "Fire");
+    Ok(())
+}
+
+#[test]
+fn us_060_byte_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Result<()> {
+    let database = TempDatabase::new("us_060_byte_threshold_checkpoint");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open_with_wal_checkpoint_thresholds(&database_directory, 1, 1000)
+        .expect("engine opens with WAL thresholds");
+
+    engine.upsert("gem", json!({"_id": "water", "element": "Water"}))?;
+
+    let wal_path = database.path.join("wardrobe.wal");
+    let wal_meta_path = database.path.join("wardrobe.wal.meta");
+    assert!(wal_path.exists());
+    assert!(wal_meta_path.exists());
+    assert_eq!(fs::metadata(&wal_path)?.len(), 0);
+
+    drop(engine);
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine reopens");
+    let record = reopened
+        .find_by_id("@gem:water")
+        .expect("record lookup succeeds")
+        .expect("record should survive checkpoint");
+    assert_eq!(record["element"], "Water");
+    Ok(())
+}
+
+#[test]
+fn us_060_wal_checkpoint_thresholds_reject_zero_values() {
+    let database = TempDatabase::new("us_060_zero_threshold_rejected");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    let zero_size =
+        match WardrobeEngine::open_with_wal_checkpoint_thresholds(&database_directory, 0, 1000) {
+            Ok(_) => panic!("zero byte threshold should fail"),
+            Err(error) => error,
+        };
+    assert_eq!(zero_size.kind(), std::io::ErrorKind::InvalidInput);
+
+    let zero_ops = match WardrobeEngine::open_with_wal_checkpoint_thresholds(
+        &database_directory,
+        1_048_576,
+        0,
+    ) {
+        Ok(_) => panic!("zero operation threshold should fail"),
+        Err(error) => error,
+    };
+    assert_eq!(zero_ops.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 #[test]
 fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
     let database = TempDatabase::new("us_064_managed_lifecycle");

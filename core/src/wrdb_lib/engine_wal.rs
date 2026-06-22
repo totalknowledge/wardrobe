@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{BufWriter, Error, ErrorKind, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -273,13 +272,15 @@ where
 
 fn append_wal_record(database_core: &RwLock<Database>, record: &WalRecord) -> Result<()> {
     let wal_path = wal_path(database_core)?;
-    let mut wal_file = OpenOptions::new()
+    let wal_file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(wal_path)?;
     let serialized = serde_json::to_vec(record)?;
-    wal_file.write_all(&serialized)?;
-    wal_file.write_all(b"\n")?;
+    let mut writer = BufWriter::new(&wal_file);
+    writer.write_all(&serialized)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
     wal_file.sync_all()?;
     let bytes_written = serialized.len() as u64 + 1;
     {
@@ -301,8 +302,8 @@ fn check_wal_thresholds(database_core: &RwLock<Database>) -> Result<()> {
 
 fn flush_checkpoint(database_core: &RwLock<Database>) -> Result<()> {
     let wal_path = wal_path(database_core)?;
-    let wal_file = OpenOptions::new().write(true).open(&wal_path)?;
-    wal_file.sync_all()?;
+    let wal_handle = OpenOptions::new().read(true).write(true).open(&wal_path)?;
+    wal_handle.sync_all()?;
 
     let drawers = read_lock(database_core)?.get_all_drawers();
     for (_name, drawer) in drawers {
@@ -317,7 +318,6 @@ fn flush_checkpoint(database_core: &RwLock<Database>) -> Result<()> {
     let meta_f = OpenOptions::new().write(true).open(&checkpoint_path)?;
     meta_f.sync_all()?;
 
-    let wal_handle = OpenOptions::new().write(true).open(&wal_path)?;
     wal_handle.set_len(0)?;
     wal_handle.sync_all()?;
 

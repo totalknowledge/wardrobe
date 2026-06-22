@@ -52,28 +52,64 @@ pub struct WardrobeEngine {
     database_core: RwLock<Database>,
     routed_databases: RwLock<HashMap<DatabaseRoute, Arc<RwLock<Database>>>>,
     max_cached_drawers: Option<usize>,
+    wal_size_threshold_bytes: u64,
+    wal_ops_threshold_count: u64,
 }
 
 impl WardrobeEngine {
     pub fn open(directory: &str) -> Result<Self> {
-        Self::open_with_optional_drawer_cache_limit(directory, None)
+        Self::open_with_optional_limits(directory, None, None)
     }
 
     pub fn open_with_drawer_cache_limit(
         directory: &str,
         max_cached_drawers: usize,
     ) -> Result<Self> {
-        Self::open_with_optional_drawer_cache_limit(directory, Some(max_cached_drawers))
+        Self::open_with_optional_limits(directory, Some(max_cached_drawers), None)
     }
 
-    fn open_with_optional_drawer_cache_limit(
+    pub fn open_with_wal_checkpoint_thresholds(
+        directory: &str,
+        wal_size_threshold_bytes: u64,
+        wal_ops_threshold_count: u64,
+    ) -> Result<Self> {
+        Self::open_with_optional_limits(
+            directory,
+            None,
+            Some((wal_size_threshold_bytes, wal_ops_threshold_count)),
+        )
+    }
+
+    pub fn open_with_drawer_cache_limit_and_wal_checkpoint_thresholds(
+        directory: &str,
+        max_cached_drawers: usize,
+        wal_size_threshold_bytes: u64,
+        wal_ops_threshold_count: u64,
+    ) -> Result<Self> {
+        Self::open_with_optional_limits(
+            directory,
+            Some(max_cached_drawers),
+            Some((wal_size_threshold_bytes, wal_ops_threshold_count)),
+        )
+    }
+
+    fn open_with_optional_limits(
         directory: &str,
         max_cached_drawers: Option<usize>,
+        wal_thresholds: Option<(u64, u64)>,
     ) -> Result<Self> {
         let root_directory = PathBuf::from(directory);
         let registry = CatalogRegistry::open_or_initialize(&root_directory)?;
-        let database_core =
-            Database::initialize_with_cache_limit(&root_directory, max_cached_drawers)?;
+        let (default_wal_size_threshold, default_wal_ops_threshold) =
+            Database::default_wal_thresholds();
+        let (wal_size_threshold_bytes, wal_ops_threshold_count) =
+            wal_thresholds.unwrap_or((default_wal_size_threshold, default_wal_ops_threshold));
+        let database_core = Database::initialize_with_cache_limit_and_wal_thresholds(
+            &root_directory,
+            max_cached_drawers,
+            wal_size_threshold_bytes,
+            wal_ops_threshold_count,
+        )?;
         let database_core = RwLock::new(database_core);
         engine_wal::recover_database::<Self>(&database_core)?;
         Ok(Self {
@@ -82,6 +118,8 @@ impl WardrobeEngine {
             database_core,
             routed_databases: RwLock::new(HashMap::new()),
             max_cached_drawers,
+            wal_size_threshold_bytes,
+            wal_ops_threshold_count,
         })
     }
 
@@ -368,10 +406,13 @@ impl WardrobeEngine {
             catalog_validation::catalog_location_path(&self.root_directory, &tenant_route.location);
         let schema_path = routing::tenant_schema_path(&route_path, schema_name);
         engine_wal::append_command(&schema_path, Some(schema_name), &command)?;
-        let routed_database = RwLock::new(Database::initialize_with_cache_limit(
-            &schema_path,
-            self.max_cached_drawers,
-        )?);
+        let routed_database =
+            RwLock::new(Database::initialize_with_cache_limit_and_wal_thresholds(
+                &schema_path,
+                self.max_cached_drawers,
+                self.wal_size_threshold_bytes,
+                self.wal_ops_threshold_count,
+            )?);
         engine_wal::recover_database::<Self>(&routed_database)?;
         command_dispatch::execute_in_database::<Self>(&routed_database, command, None)
     }
@@ -392,8 +433,12 @@ impl WardrobeEngine {
 
         let mut routed_databases = Self::write_lock(&self.routed_databases)?;
         if !routed_databases.contains_key(&route) {
-            let database =
-                Database::initialize_with_cache_limit(storage_path, self.max_cached_drawers)?;
+            let database = Database::initialize_with_cache_limit_and_wal_thresholds(
+                storage_path,
+                self.max_cached_drawers,
+                self.wal_size_threshold_bytes,
+                self.wal_ops_threshold_count,
+            )?;
             let database = Arc::new(RwLock::new(database));
             engine_wal::recover_database::<Self>(&database)?;
             routed_databases.insert(route.clone(), database);

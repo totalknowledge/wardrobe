@@ -64,6 +64,11 @@ impl Database {
     pub fn wal_thresholds(&self) -> (u64, u64) {
         (self.wal_size_threshold_bytes, self.wal_ops_threshold_count)
     }
+
+    pub fn default_wal_thresholds() -> (u64, u64) {
+        (DEFAULT_WAL_SIZE_THRESHOLD, DEFAULT_WAL_OPS_THRESHOLD)
+    }
+
     pub fn initialize<P: AsRef<Path>>(directory_path: P) -> std::io::Result<Self> {
         Self::initialize_with_cache_limit(directory_path, None)
     }
@@ -72,10 +77,49 @@ impl Database {
         directory_path: P,
         max_cached_drawers: Option<usize>,
     ) -> std::io::Result<Self> {
+        Self::initialize_with_cache_limit_and_wal_thresholds(
+            directory_path,
+            max_cached_drawers,
+            DEFAULT_WAL_SIZE_THRESHOLD,
+            DEFAULT_WAL_OPS_THRESHOLD,
+        )
+    }
+
+    pub fn initialize_with_wal_thresholds<P: AsRef<Path>>(
+        directory_path: P,
+        wal_size_threshold_bytes: u64,
+        wal_ops_threshold_count: u64,
+    ) -> std::io::Result<Self> {
+        Self::initialize_with_cache_limit_and_wal_thresholds(
+            directory_path,
+            None,
+            wal_size_threshold_bytes,
+            wal_ops_threshold_count,
+        )
+    }
+
+    pub fn initialize_with_cache_limit_and_wal_thresholds<P: AsRef<Path>>(
+        directory_path: P,
+        max_cached_drawers: Option<usize>,
+        wal_size_threshold_bytes: u64,
+        wal_ops_threshold_count: u64,
+    ) -> std::io::Result<Self> {
         if max_cached_drawers == Some(0) {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 "Drawer cache limit must be greater than zero",
+            ));
+        }
+        if wal_size_threshold_bytes == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "WAL size checkpoint threshold must be greater than zero",
+            ));
+        }
+        if wal_ops_threshold_count == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "WAL operation checkpoint threshold must be greater than zero",
             ));
         }
 
@@ -91,8 +135,8 @@ impl Database {
             access_clock: AtomicU64::new(0),
             wal_bytes_since_checkpoint: AtomicU64::new(0),
             wal_ops_since_checkpoint: AtomicU64::new(0),
-            wal_size_threshold_bytes: DEFAULT_WAL_SIZE_THRESHOLD,
-            wal_ops_threshold_count: DEFAULT_WAL_OPS_THRESHOLD,
+            wal_size_threshold_bytes,
+            wal_ops_threshold_count,
         })
     }
 
