@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::io::{Error, ErrorKind, Result};
-use std::path::{Component, Path, PathBuf};
+use std::io::Result;
+use std::path::{Path, PathBuf};
+
+use super::catalog_validation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageInventory {
@@ -39,28 +41,9 @@ impl StorageCoordinate {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        Self::validate_component("tenant", &self.tenant)?;
-        Self::validate_component("database", &self.database)?;
-        Self::validate_component("schema", &self.schema)
-    }
-
-    pub(crate) fn validate_component(label: &str, value: &str) -> Result<()> {
-        if value.trim().is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Storage coordinate {label} cannot be empty"),
-            ));
-        }
-
-        let mut components = Path::new(value).components();
-        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Storage coordinate {label} must be a single path segment"),
-            ));
-        }
-
-        Ok(())
+        catalog_validation::validate_storage_coordinate_component("tenant", &self.tenant)?;
+        catalog_validation::validate_storage_coordinate_component("database", &self.database)?;
+        catalog_validation::validate_storage_coordinate_component("schema", &self.schema)
     }
 
     pub(crate) fn path_under(&self, root_directory: &Path) -> PathBuf {
@@ -169,14 +152,14 @@ impl StorageScope {
         match self {
             Self::Tenant { .. } => Ok(()),
             Self::Database { database } => {
-                StorageCoordinate::validate_component("database", database)
+                catalog_validation::validate_storage_coordinate_component("database", database)
             }
             Self::Schema { database, schema } => {
-                StorageCoordinate::validate_component("database", database)?;
-                StorageCoordinate::validate_component("schema", schema)
+                catalog_validation::validate_storage_coordinate_component("database", database)?;
+                catalog_validation::validate_storage_coordinate_component("schema", schema)
             }
             Self::Drawer { namespace } => {
-                StorageCoordinate::validate_component("namespace", namespace)
+                catalog_validation::validate_storage_coordinate_component("namespace", namespace)
             }
         }
     }

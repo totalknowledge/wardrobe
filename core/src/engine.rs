@@ -1,3 +1,4 @@
+use crate::wrdb_lib::catalog_validation;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::reader::DatabaseReader;
@@ -276,7 +277,8 @@ impl WardrobeEngine {
                 .database_names()
                 .into_iter()
                 .map(|name| {
-                    let path = Self::database_path_from_name(&self.root_directory, &name)?;
+                    let path =
+                        catalog_validation::database_path_from_name(&self.root_directory, &name)?;
                     if path.exists() {
                         Self::storage_inventory(name, &path)
                     } else {
@@ -301,7 +303,7 @@ impl WardrobeEngine {
     pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
         let database_path = match database_name {
             Some(database_name) => {
-                Self::database_path_from_name(&self.root_directory, database_name)?
+                catalog_validation::database_path_from_name(&self.root_directory, database_name)?
             }
             None => self.root_directory.clone(),
         };
@@ -352,7 +354,8 @@ impl WardrobeEngine {
             return Ok(registry.schema_names(database_name));
         }
 
-        let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
+        let database_path =
+            catalog_validation::database_path_from_name(&self.root_directory, database_name)?;
         Self::discover_schemas(&database_path)
     }
 
@@ -374,7 +377,8 @@ impl WardrobeEngine {
                 .collect();
         }
 
-        let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
+        let database_path =
+            catalog_validation::database_path_from_name(&self.root_directory, database_name)?;
         Self::discover_drawers(&database_path, schema_name)
     }
 
@@ -415,13 +419,14 @@ impl WardrobeEngine {
                 schema,
             } => self.execute_for_tenant(&tenant_id, &database, &schema, command),
             StorageScope::Database { database } => {
-                let database_path = Self::database_path_from_name(&self.root_directory, &database)?;
+                let database_path =
+                    catalog_validation::database_path_from_name(&self.root_directory, &database)?;
                 Self::append_wal_for_command(&database_path, None, &command)?;
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
                 Self::execute_in_database(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
-                let database_path = Self::database_path_from_name(
+                let database_path = catalog_validation::database_path_from_name(
                     &self.root_directory,
                     &format!("{database}/{schema}"),
                 )?;
@@ -438,7 +443,7 @@ impl WardrobeEngine {
     }
 
     pub fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
-        Self::validate_database_name(database_name)?;
+        catalog_validation::validate_database_name(database_name)?;
         Self::append_wal_for_command(
             &self.root_directory,
             None,
@@ -446,7 +451,8 @@ impl WardrobeEngine {
                 database_name: database_name.to_string(),
             },
         )?;
-        let database_path = Self::database_path_from_name(&self.root_directory, database_name)?;
+        let database_path =
+            catalog_validation::database_path_from_name(&self.root_directory, database_name)?;
         std::fs::create_dir_all(&database_path)?;
 
         {
@@ -463,8 +469,8 @@ impl WardrobeEngine {
         database_name: &str,
         schema_name: &str,
     ) -> Result<StorageInventory> {
-        Self::validate_database_name(database_name)?;
-        Self::validate_catalog_token(schema_name, "schema")?;
+        catalog_validation::validate_database_name(database_name)?;
+        catalog_validation::validate_schema_name(schema_name)?;
         Self::append_wal_for_command(
             &self.root_directory,
             None,
@@ -485,7 +491,8 @@ impl WardrobeEngine {
         }
 
         let schema_path =
-            Self::database_path_from_name(&self.root_directory, database_name)?.join(schema_name);
+            catalog_validation::database_path_from_name(&self.root_directory, database_name)?
+                .join(schema_name);
         std::fs::create_dir_all(&schema_path)?;
 
         {
@@ -503,9 +510,9 @@ impl WardrobeEngine {
         schema_name: &str,
         drawer_name: &str,
     ) -> Result<StorageInventory> {
-        Self::validate_database_name(database_name)?;
-        Self::validate_catalog_token(schema_name, "schema")?;
-        Self::validate_catalog_token(drawer_name, "drawer")?;
+        catalog_validation::validate_database_name(database_name)?;
+        catalog_validation::validate_schema_name(schema_name)?;
+        catalog_validation::validate_drawer_name(drawer_name)?;
         Self::append_wal_for_command(
             &self.root_directory,
             None,
@@ -529,7 +536,8 @@ impl WardrobeEngine {
         }
 
         let schema_path =
-            Self::database_path_from_name(&self.root_directory, database_name)?.join(schema_name);
+            catalog_validation::database_path_from_name(&self.root_directory, database_name)?
+                .join(schema_name);
         std::fs::create_dir_all(&schema_path)?;
         let drawer_path = schema_path.join(format!("{drawer_name}.drw"));
         if !drawer_path.exists() {
@@ -560,9 +568,9 @@ impl WardrobeEngine {
         database_name: &str,
         location: &str,
     ) -> Result<StorageInventory> {
-        Self::validate_catalog_token(tenant_id, "tenant")?;
-        Self::validate_database_name(database_name)?;
-        Self::validate_catalog_location(location)?;
+        catalog_validation::validate_tenant_identifier(tenant_id)?;
+        catalog_validation::validate_database_name(database_name)?;
+        catalog_validation::validate_catalog_location(location)?;
         Self::append_wal_for_command(
             &self.root_directory,
             None,
@@ -573,7 +581,7 @@ impl WardrobeEngine {
             },
         )?;
 
-        let route_path = self.catalog_location_path(location);
+        let route_path = catalog_validation::catalog_location_path(&self.root_directory, location);
         std::fs::create_dir_all(&route_path)?;
 
         {
@@ -592,9 +600,9 @@ impl WardrobeEngine {
         schema_name: &str,
         command: Command,
     ) -> Result<CommandResult> {
-        Self::validate_catalog_token(tenant_id, "tenant")?;
-        Self::validate_database_name(database_name)?;
-        Self::validate_catalog_token(schema_name, "schema")?;
+        catalog_validation::validate_tenant_identifier(tenant_id)?;
+        catalog_validation::validate_database_name(database_name)?;
+        catalog_validation::validate_schema_name(schema_name)?;
 
         let tenant_route = {
             let registry = Self::read_lock(&self.registry)?;
@@ -615,7 +623,8 @@ impl WardrobeEngine {
 
         self.validate_command_against_registry(database_name, schema_name, &command)?;
 
-        let route_path = self.catalog_location_path(&tenant_route.location);
+        let route_path =
+            catalog_validation::catalog_location_path(&self.root_directory, &tenant_route.location);
         Self::append_wal_for_command(&route_path, Some(schema_name), &command)?;
         let routed_database = RwLock::new(Database::initialize_with_cache_limit(
             &route_path,
@@ -767,68 +776,6 @@ impl WardrobeEngine {
         }
     }
 
-    fn validate_database_name(database_name: &str) -> Result<()> {
-        let trimmed = database_name.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with('/')
-            || trimmed.starts_with('\\')
-            || trimmed.contains('\\')
-            || trimmed.split('/').any(|segment| {
-                segment.is_empty() || segment == "." || segment == ".." || segment == ".catalog"
-            })
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Invalid database name: {database_name}"),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn validate_catalog_token(value: &str, label: &str) -> Result<()> {
-        let trimmed = value.trim();
-        if trimmed.is_empty()
-            || trimmed.contains('/')
-            || trimmed.contains('\\')
-            || trimmed == "."
-            || trimmed == ".."
-            || trimmed == ".catalog"
-            || trimmed.ends_with("_index")
-            || trimmed.ends_with("_meta")
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Invalid {label} name: {value}"),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn validate_catalog_location(location: &str) -> Result<()> {
-        let trimmed = location.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with('/')
-            || trimmed.starts_with('\\')
-            || trimmed.contains('\\')
-            || trimmed.split('/').any(|segment| {
-                segment.is_empty() || segment == "." || segment == ".." || segment == ".catalog"
-            })
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Invalid catalog route location: {location}"),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn catalog_location_path(&self, location: &str) -> PathBuf {
-        self.root_directory.join(location)
-    }
-
     fn database_for_route(&self, route: DatabaseRoute) -> Result<Arc<RwLock<Database>>> {
         let storage_path = match &route {
             DatabaseRoute::Coordinate(coordinate) => {
@@ -836,12 +783,12 @@ impl WardrobeEngine {
                 coordinate.path_under(&self.root_directory)
             }
             DatabaseRoute::Database(database) => {
-                StorageCoordinate::validate_component("database", database)?;
+                catalog_validation::validate_storage_coordinate_component("database", database)?;
                 self.root_directory.join(database)
             }
             DatabaseRoute::Schema { database, schema } => {
-                StorageCoordinate::validate_component("database", database)?;
-                StorageCoordinate::validate_component("schema", schema)?;
+                catalog_validation::validate_storage_coordinate_component("database", database)?;
+                catalog_validation::validate_storage_coordinate_component("schema", schema)?;
                 self.root_directory.join(database).join(schema)
             }
         };
@@ -1062,7 +1009,7 @@ impl WardrobeEngine {
     }
 
     fn discover_drawers(database_path: &Path, schema_name: &str) -> Result<Vec<StorageInventory>> {
-        StorageCoordinate::validate_component("schema", schema_name)?;
+        catalog_validation::validate_storage_coordinate_component("schema", schema_name)?;
         let mut drawer_paths = BTreeMap::new();
 
         let nested_schema_path = database_path.join(schema_name);
@@ -1233,30 +1180,6 @@ impl WardrobeEngine {
         } else {
             Ok(None)
         }
-    }
-
-    fn database_path_from_name(root_directory: &Path, database_name: &str) -> Result<PathBuf> {
-        if database_name.trim().is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "Database name cannot be empty",
-            ));
-        }
-
-        let mut database_path = root_directory.to_path_buf();
-        for component in Path::new(database_name).components() {
-            match component {
-                Component::Normal(value) => database_path.push(value),
-                _ => {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        "Database name must contain only normal path segments",
-                    ));
-                }
-            }
-        }
-
-        Ok(database_path)
     }
 
     fn accumulate_storage_inventory(
