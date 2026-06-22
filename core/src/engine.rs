@@ -2,6 +2,7 @@ use crate::wrdb_lib::catalog_validation;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::pointer;
+use crate::wrdb_lib::query;
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
@@ -9,7 +10,6 @@ use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use crate::wrdb_lib::wal::{WalJournal, WalOperation as DurableWalOperation, WalVerification};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -24,19 +24,6 @@ pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 pub use crate::wrdb_lib::storage::{
     StorageCoordinate, StorageInventory, StorageLocator, StorageScope,
 };
-
-enum SortableValue<'a> {
-    Bool(bool),
-    Number(f64),
-    String(&'a str),
-}
-
-#[derive(Clone, Copy)]
-enum SortableType {
-    Bool,
-    Number,
-    String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeleteAction {
@@ -93,17 +80,6 @@ enum WalRecord {
     Abort {
         tx_id: String,
     },
-}
-
-impl SortableValue<'_> {
-    fn compare_same_type(&self, other: Self) -> Option<Ordering> {
-        match (self, other) {
-            (Self::Bool(left), Self::Bool(right)) => Some(left.cmp(&right)),
-            (Self::Number(left), Self::Number(right)) => left.partial_cmp(&right),
-            (Self::String(left), Self::String(right)) => Some(left.cmp(&right)),
-            _ => None,
-        }
-    }
 }
 
 pub struct WardrobeEngine {
@@ -604,13 +580,14 @@ impl WardrobeEngine {
 
         let route_path =
             catalog_validation::catalog_location_path(&self.root_directory, &tenant_route.location);
-        Self::append_wal_for_command(&route_path, Some(schema_name), &command)?;
+        let schema_path = routing::tenant_schema_path(&route_path, schema_name);
+        Self::append_wal_for_command(&schema_path, Some(schema_name), &command)?;
         let routed_database = RwLock::new(Database::initialize_with_cache_limit(
-            &route_path,
+            &schema_path,
             self.max_cached_drawers,
         )?);
         Self::recover_database(&routed_database)?;
-        Self::execute_in_database(&routed_database, command, Some(schema_name))
+        Self::execute_in_database(&routed_database, command, None)
     }
 
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
@@ -1660,7 +1637,7 @@ impl WardrobeEngine {
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
-        let filter_map = Self::filter_map(&filter)?;
+        let filter_map = query::filter_map(&filter)?;
         let physical_drawer_name =
             routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
 
@@ -1675,8 +1652,10 @@ impl WardrobeEngine {
             Vec::new()
         };
 
-        records.retain(|record| Self::record_matches_filter(record, filter_map, context));
-        Self::apply_query_modifiers(&mut records, modifiers.as_ref());
+        records.retain(|record| {
+            query::record_matches_filter(record, filter_map, context.drawer_namespace)
+        });
+        query::apply_query_modifiers(&mut records, modifiers.as_ref());
         Self::hydrate_records(database_core, &mut records, true)?;
         Self::hydrate_virtual_relationships(
             database_core,
@@ -1712,7 +1691,7 @@ impl WardrobeEngine {
             return Ok(Self::read_lock(&drawer)?.record_count());
         };
 
-        let filter_map = Self::filter_map(&filter)?;
+        let filter_map = query::filter_map(&filter)?;
         let count = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1722,7 +1701,9 @@ impl WardrobeEngine {
             Self::write_lock(&drawer)?
                 .find_all_records_with_migration()?
                 .into_iter()
-                .filter(|record| Self::record_matches_filter(record, filter_map, context))
+                .filter(|record| {
+                    query::record_matches_filter(record, filter_map, context.drawer_namespace)
+                })
                 .count()
         } else {
             0
@@ -2392,207 +2373,6 @@ impl WardrobeEngine {
         }
 
         pointers
-    }
-
-    fn record_matches_filter(
-        record: &Value,
-        filter_map: &Map<String, Value>,
-        context: ExecutionContext<'_>,
-    ) -> bool {
-        let Value::Object(record_map) = record else {
-            return false;
-        };
-
-        filter_map.iter().all(|(field_name, expected_value)| {
-            record_map.get(field_name).is_some_and(|actual_value| {
-                Self::field_matches_filter(field_name, actual_value, expected_value, context)
-            })
-        })
-    }
-
-    fn field_matches_filter(
-        field_name: &str,
-        actual_value: &Value,
-        expected_value: &Value,
-        context: ExecutionContext<'_>,
-    ) -> bool {
-        match expected_value {
-            Value::String(expected_string) => actual_value.as_str().is_some_and(|actual_string| {
-                Self::matches_string_filter(actual_string, expected_string)
-            }),
-            Value::Object(expected_map) => {
-                if let Some(reference_id) = Self::id_only_reference(expected_map) {
-                    let relationship_drawer = Self::relationship_drawer_name(field_name);
-                    let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
-                        &relationship_drawer,
-                        reference_id,
-                        context.drawer_namespace,
-                    );
-                    return actual_value.as_str() == Some(normalized_pointer.as_str());
-                }
-
-                let Value::Object(actual_map) = actual_value else {
-                    return false;
-                };
-
-                expected_map.iter().all(|(nested_field, nested_expected)| {
-                    actual_map.get(nested_field).is_some_and(|nested_actual| {
-                        Self::field_matches_filter(
-                            nested_field,
-                            nested_actual,
-                            nested_expected,
-                            context,
-                        )
-                    })
-                })
-            }
-            Value::Array(expected_array) => {
-                let Value::Array(actual_array) = actual_value else {
-                    return false;
-                };
-
-                actual_array.len() == expected_array.len()
-                    && actual_array.iter().zip(expected_array.iter()).all(
-                        |(actual_item, expected_item)| {
-                            Self::field_matches_filter(
-                                field_name,
-                                actual_item,
-                                expected_item,
-                                context,
-                            )
-                        },
-                    )
-            }
-            _ => actual_value == expected_value,
-        }
-    }
-
-    fn matches_string_filter(actual_value: &str, expected_filter: &str) -> bool {
-        if !expected_filter.contains('%') {
-            return actual_value == expected_filter;
-        }
-
-        let actual_bytes = actual_value.as_bytes();
-        let filter_bytes = expected_filter.as_bytes();
-        let mut actual_index = 0usize;
-        let mut filter_index = 0usize;
-        let mut wildcard_index = None;
-        let mut wildcard_match_start = 0usize;
-
-        while actual_index < actual_bytes.len() {
-            if filter_index < filter_bytes.len()
-                && filter_bytes[filter_index] == actual_bytes[actual_index]
-            {
-                actual_index += 1;
-                filter_index += 1;
-            } else if filter_index < filter_bytes.len() && filter_bytes[filter_index] == b'%' {
-                wildcard_index = Some(filter_index);
-                filter_index += 1;
-                wildcard_match_start = actual_index;
-            } else if let Some(last_wildcard_index) = wildcard_index {
-                filter_index = last_wildcard_index + 1;
-                wildcard_match_start += 1;
-                actual_index = wildcard_match_start;
-            } else {
-                return false;
-            }
-        }
-
-        while filter_index < filter_bytes.len() && filter_bytes[filter_index] == b'%' {
-            filter_index += 1;
-        }
-
-        filter_index == filter_bytes.len()
-    }
-
-    fn filter_map(filter: &Value) -> Result<&Map<String, Value>> {
-        filter
-            .as_object()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object"))
-    }
-
-    fn apply_query_modifiers(records: &mut Vec<Value>, modifiers: Option<&QueryModifiers>) {
-        let Some(modifiers) = modifiers else {
-            return;
-        };
-
-        if let Some(order_by) = modifiers.order_by.as_deref() {
-            let direction = modifiers
-                .order_direction
-                .unwrap_or(OrderDirection::Ascending);
-            let sort_type = Self::sort_type_for_records(records, order_by);
-            records.sort_by(|left, right| {
-                Self::compare_records_by_field(left, right, order_by, direction, sort_type)
-            });
-        }
-
-        let offset = modifiers.offset.unwrap_or(0);
-        if offset > 0 {
-            if offset >= records.len() {
-                records.clear();
-            } else {
-                records.drain(0..offset);
-            }
-        }
-
-        if let Some(limit) = modifiers.limit {
-            records.truncate(limit);
-        }
-    }
-
-    fn compare_records_by_field(
-        left: &Value,
-        right: &Value,
-        field_name: &str,
-        direction: OrderDirection,
-        sort_type: Option<SortableType>,
-    ) -> Ordering {
-        let Some(sort_type) = sort_type else {
-            return Ordering::Equal;
-        };
-
-        let left_value = left.get(field_name);
-        let right_value = right.get(field_name);
-
-        match (
-            left_value.and_then(|value| Self::sortable_value(value, sort_type)),
-            right_value.and_then(|value| Self::sortable_value(value, sort_type)),
-        ) {
-            (Some(left_sortable), Some(right_sortable)) => {
-                match left_sortable.compare_same_type(right_sortable) {
-                    Some(ordering) => match direction {
-                        OrderDirection::Ascending => ordering,
-                        OrderDirection::Descending => ordering.reverse(),
-                    },
-                    None => Ordering::Equal,
-                }
-            }
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        }
-    }
-
-    fn sort_type_for_records(records: &[Value], field_name: &str) -> Option<SortableType> {
-        records.iter().find_map(|record| {
-            record.get(field_name).and_then(|value| match value {
-                Value::Bool(_) => Some(SortableType::Bool),
-                Value::Number(_) => Some(SortableType::Number),
-                Value::String(_) => Some(SortableType::String),
-                _ => None,
-            })
-        })
-    }
-
-    fn sortable_value(value: &Value, sort_type: SortableType) -> Option<SortableValue<'_>> {
-        match (value, sort_type) {
-            (Value::Bool(value), SortableType::Bool) => Some(SortableValue::Bool(*value)),
-            (Value::Number(value), SortableType::Number) => {
-                value.as_f64().map(SortableValue::Number)
-            }
-            (Value::String(value), SortableType::String) => Some(SortableValue::String(value)),
-            _ => None,
-        }
     }
 
     fn hydrate_records(

@@ -72,6 +72,10 @@ pub(crate) fn schema_scope_path(
     catalog_validation::database_path_from_name(root_directory, &format!("{database}/{schema}"))
 }
 
+pub(crate) fn tenant_schema_path(route_path: &Path, schema: &str) -> PathBuf {
+    route_path.join(schema)
+}
+
 pub(crate) fn scoped_drawer_name(drawer_name: &str, drawer_namespace: Option<&str>) -> String {
     pointer::scoped_drawer_name(drawer_name, drawer_namespace)
 }
