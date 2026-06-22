@@ -1,3 +1,4 @@
+pub(crate) mod catalog_lifecycle;
 pub(crate) mod catalog_validation;
 pub(crate) mod command;
 pub mod connection;

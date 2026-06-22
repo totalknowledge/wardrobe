@@ -1,3 +1,4 @@
+use crate::wrdb_lib::catalog_lifecycle;
 use crate::wrdb_lib::catalog_validation;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::discovery;
@@ -344,25 +345,12 @@ impl WardrobeEngine {
     }
 
     pub fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
-        catalog_validation::validate_database_name(database_name)?;
-        Self::append_wal_for_command(
+        catalog_lifecycle::create_database(
             &self.root_directory,
-            None,
-            &Command::DefineDatabase {
-                database_name: database_name.to_string(),
-            },
-        )?;
-        let database_path =
-            catalog_validation::database_path_from_name(&self.root_directory, database_name)?;
-        std::fs::create_dir_all(&database_path)?;
-
-        {
-            let mut registry = Self::write_lock(&self.registry)?;
-            registry.register_database(database_name);
-            registry.persist_to_root(&self.root_directory)?;
-        }
-
-        discovery::storage_inventory(database_name.to_string(), &database_path)
+            &self.registry,
+            database_name,
+            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+        )
     }
 
     pub fn create_schema(
@@ -370,39 +358,13 @@ impl WardrobeEngine {
         database_name: &str,
         schema_name: &str,
     ) -> Result<StorageInventory> {
-        catalog_validation::validate_database_name(database_name)?;
-        catalog_validation::validate_schema_name(schema_name)?;
-        Self::append_wal_for_command(
+        catalog_lifecycle::create_schema(
             &self.root_directory,
-            None,
-            &Command::DefineSchema {
-                database_name: database_name.to_string(),
-                schema_name: schema_name.to_string(),
-            },
-        )?;
-
-        {
-            let registry = Self::read_lock(&self.registry)?;
-            if !registry.contains_database(database_name) {
-                return Err(Error::new(
-                    ErrorKind::NotFound,
-                    format!("Database '{database_name}' is not registered in the catalog"),
-                ));
-            }
-        }
-
-        let schema_path =
-            catalog_validation::database_path_from_name(&self.root_directory, database_name)?
-                .join(schema_name);
-        std::fs::create_dir_all(&schema_path)?;
-
-        {
-            let mut registry = Self::write_lock(&self.registry)?;
-            registry.register_schema(database_name, schema_name);
-            registry.persist_to_root(&self.root_directory)?;
-        }
-
-        discovery::storage_inventory(schema_name.to_string(), &schema_path)
+            &self.registry,
+            database_name,
+            schema_name,
+            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+        )
     }
 
     pub fn create_drawer(
@@ -411,56 +373,14 @@ impl WardrobeEngine {
         schema_name: &str,
         drawer_name: &str,
     ) -> Result<StorageInventory> {
-        catalog_validation::validate_database_name(database_name)?;
-        catalog_validation::validate_schema_name(schema_name)?;
-        catalog_validation::validate_drawer_name(drawer_name)?;
-        Self::append_wal_for_command(
+        catalog_lifecycle::create_drawer(
             &self.root_directory,
-            None,
-            &Command::DefineDrawer {
-                database_name: database_name.to_string(),
-                schema_name: schema_name.to_string(),
-                drawer_name: drawer_name.to_string(),
-            },
-        )?;
-
-        {
-            let registry = Self::read_lock(&self.registry)?;
-            if !registry.contains_schema(database_name, schema_name) {
-                return Err(Error::new(
-                    ErrorKind::NotFound,
-                    format!(
-                        "Schema '{schema_name}' is not registered for database '{database_name}'"
-                    ),
-                ));
-            }
-        }
-
-        let schema_path =
-            catalog_validation::database_path_from_name(&self.root_directory, database_name)?
-                .join(schema_name);
-        std::fs::create_dir_all(&schema_path)?;
-        let drawer_path = schema_path.join(format!("{drawer_name}.drw"));
-        if !drawer_path.exists() {
-            std::fs::File::create(&drawer_path)?;
-        }
-        let index_path = schema_path.join(format!("{drawer_name}_index.drw"));
-        if !index_path.exists() {
-            std::fs::File::create(&index_path)?;
-        }
-
-        {
-            let mut registry = Self::write_lock(&self.registry)?;
-            registry.register_drawer(
-                database_name,
-                schema_name,
-                drawer_name,
-                drawer_path.to_string_lossy().into_owned(),
-            );
-            registry.persist_to_root(&self.root_directory)?;
-        }
-
-        discovery::drawer_inventory(drawer_name.to_string(), &schema_path, drawer_name)
+            &self.registry,
+            database_name,
+            schema_name,
+            drawer_name,
+            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+        )
     }
 
     pub fn register_tenant_route(
@@ -469,29 +389,14 @@ impl WardrobeEngine {
         database_name: &str,
         location: &str,
     ) -> Result<StorageInventory> {
-        catalog_validation::validate_tenant_identifier(tenant_id)?;
-        catalog_validation::validate_database_name(database_name)?;
-        catalog_validation::validate_catalog_location(location)?;
-        Self::append_wal_for_command(
+        catalog_lifecycle::register_tenant_route(
             &self.root_directory,
-            None,
-            &Command::DefineTenantRoute {
-                tenant_id: tenant_id.to_string(),
-                database_name: database_name.to_string(),
-                location: location.to_string(),
-            },
-        )?;
-
-        let route_path = catalog_validation::catalog_location_path(&self.root_directory, location);
-        std::fs::create_dir_all(&route_path)?;
-
-        {
-            let mut registry = Self::write_lock(&self.registry)?;
-            registry.register_tenant_route(tenant_id, database_name, location);
-            registry.persist_to_root(&self.root_directory)?;
-        }
-
-        discovery::storage_inventory(tenant_id.to_string(), &route_path)
+            &self.registry,
+            tenant_id,
+            database_name,
+            location,
+            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+        )
     }
 
     pub fn execute_for_tenant(
