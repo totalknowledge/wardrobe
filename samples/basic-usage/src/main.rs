@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Error, ErrorKind};
 use wardrobe_core::{
     Command, CommandResult, OrderDirection, QueryModifiers, StorageScope, WardrobeClient,
@@ -63,12 +63,18 @@ fn perform_full_diagnostic_suite(client: &WardrobeClient) -> io::Result<()> {
     println!("System Databases: {:?}", database_names);
 
     let available_schemas = client.show_schemas(DATABASE_NAME)?;
-    println!("Available Schemas in '{}': {:?}", DATABASE_NAME, available_schemas);
+    println!(
+        "Available Schemas in '{}': {:?}",
+        DATABASE_NAME, available_schemas
+    );
 
     let drawer_inventory = client.show_drawers(DATABASE_NAME, SCHEMA_NAME)?;
     println!("Drawers in basic-usage/public:");
     for drawer in drawer_inventory {
-        println!(" - Drawer: {} ({} records)", drawer.name, drawer.record_count);
+        println!(
+            " - Drawer: {} ({} records)",
+            drawer.name, drawer.record_count
+        );
     }
 
     Ok(())
@@ -103,7 +109,10 @@ fn upsert_user_record(
             "active": true
         }),
     )?;
-    println!("Successfully persisted user: {} (Pointer: {})", user_id, pointer);
+    println!(
+        "Successfully persisted user: {} (Pointer: {})",
+        user_id, pointer
+    );
     Ok(pointer)
 }
 
@@ -124,7 +133,10 @@ fn upsert_gem_record(
             "tags": tags
         }),
     )?;
-    println!("Successfully persisted gem: {} (Pointer: {})", gem_id, pointer);
+    println!(
+        "Successfully persisted gem: {} (Pointer: {})",
+        gem_id, pointer
+    );
     Ok(pointer)
 }
 
@@ -147,14 +159,14 @@ fn upsert_weapon_record(
             "damage": damage
         }),
     )?;
-    println!("Successfully persisted weapon: {} (Pointer: {})", weapon_id, pointer);
+    println!(
+        "Successfully persisted weapon: {} (Pointer: {})",
+        weapon_id, pointer
+    );
     Ok(pointer)
 }
 
-fn execute_and_print_tag_filter(
-    client: &WardrobeClient,
-    user_pointer: &str,
-) -> io::Result<()> {
+fn execute_and_print_tag_filter(client: &WardrobeClient, user_pointer: &str) -> io::Result<()> {
     let query_modifiers = QueryModifiers {
         order_by: Some("element".to_string()),
         order_direction: Some(OrderDirection::Ascending),
@@ -166,7 +178,8 @@ fn execute_and_print_tag_filter(
         "user_id": user_pointer,
         "tags": ["support", "magic"]
     });
-    let matching_records = client.find_by_filter(GEM_DRAWER, filter_payload, Some(query_modifiers))?;
+    let matching_records =
+        client.find_by_filter(GEM_DRAWER, filter_payload, Some(query_modifiers))?;
 
     println!("Filtered gems for tag match: {}", matching_records.len());
     println!(
@@ -196,7 +209,12 @@ fn verify_three_relations(
         )?
         .into_iter()
         .next()
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, "gem record missing before verification"))?;
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotFound,
+                "gem record missing before verification",
+            )
+        })?;
     let weapon = client
         .find_by_filter(
             WEAPON_DRAWER,
@@ -207,13 +225,16 @@ fn verify_three_relations(
         )?
         .into_iter()
         .next()
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, "weapon record missing before verification"))?;
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::NotFound,
+                "weapon record missing before verification",
+            )
+        })?;
 
     println!(
         "Relation check: gem record {}, weapon record {}, user pointer {}",
-        gem,
-        weapon,
-        user_pointer
+        gem, weapon, user_pointer
     );
 
     Ok(())
@@ -253,7 +274,10 @@ fn perform_cascade_delete_sequence(
 fn perform_maintenance_check(client: &WardrobeClient) -> io::Result<()> {
     let gem_count = client.count(GEM_DRAWER, None, None)?;
     let weapon_count = client.count(WEAPON_DRAWER, None, None)?;
-    println!("Maintenance check: {} gems, {} weapons", gem_count, weapon_count);
+    println!(
+        "Maintenance check: {} gems, {} weapons",
+        gem_count, weapon_count
+    );
     Ok(())
 }
 
@@ -322,9 +346,27 @@ fn main() -> io::Result<()> {
 
     print_execution_separator("Phase 2: Relational Data Population");
     let user_pointer = upsert_user_record(&engine, "user_001", "Artemis_Prime")?;
-    let gem_one = upsert_gem_record(&engine, "gem_001", &user_pointer, "Plasma", vec!["combat", "magic"])?;
-    let _gem_two = upsert_gem_record(&engine, "gem_002", &user_pointer, "Gravity", vec!["support", "magic"])?;
-    let _gem_three = upsert_gem_record(&engine, "gem_003", &user_pointer, "Void", vec!["utility", "raid"])?;
+    let gem_one = upsert_gem_record(
+        &engine,
+        "gem_001",
+        &user_pointer,
+        "Plasma",
+        vec!["combat", "magic"],
+    )?;
+    let _gem_two = upsert_gem_record(
+        &engine,
+        "gem_002",
+        &user_pointer,
+        "Gravity",
+        vec!["support", "magic"],
+    )?;
+    let _gem_three = upsert_gem_record(
+        &engine,
+        "gem_003",
+        &user_pointer,
+        "Void",
+        vec!["utility", "raid"],
+    )?;
     let weapon_pointer = upsert_weapon_record(
         &engine,
         "wpn_001",

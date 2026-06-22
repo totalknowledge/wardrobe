@@ -1,11 +1,9 @@
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
-use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::reader::DatabaseReader;
-use crate::wrdb_lib::wal::{
-    WalJournal, WalOperation as DurableWalOperation, WalVerification,
-};
+use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
+use crate::wrdb_lib::wal::{WalJournal, WalOperation as DurableWalOperation, WalVerification};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
@@ -18,188 +16,11 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OrderDirection {
-    Ascending,
-    Descending,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryModifiers {
-    pub order_by: Option<String>,
-    pub order_direction: Option<OrderDirection>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StorageInventory {
-    pub name: String,
-    pub record_count: usize,
-    pub disk_size_bytes: u64,
-    pub register_file_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StorageCoordinate {
-    tenant: String,
-    database: String,
-    schema: String,
-}
-
-impl StorageCoordinate {
-    pub fn new(tenant: &str, database: &str, schema: &str) -> Self {
-        Self {
-            tenant: tenant.to_string(),
-            database: database.to_string(),
-            schema: schema.to_string(),
-        }
-    }
-
-    pub fn tenant(&self) -> &str {
-        &self.tenant
-    }
-
-    pub fn database(&self) -> &str {
-        &self.database
-    }
-
-    pub fn schema(&self) -> &str {
-        &self.schema
-    }
-
-    fn validate(&self) -> Result<()> {
-        Self::validate_component("tenant", &self.tenant)?;
-        Self::validate_component("database", &self.database)?;
-        Self::validate_component("schema", &self.schema)
-    }
-
-    fn validate_component(label: &str, value: &str) -> Result<()> {
-        if value.trim().is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Storage coordinate {label} cannot be empty"),
-            ));
-        }
-
-        let mut components = Path::new(value).components();
-        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Storage coordinate {label} must be a single path segment"),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn path_under(&self, root_directory: &Path) -> PathBuf {
-        root_directory
-            .join(&self.tenant)
-            .join(&self.database)
-            .join(&self.schema)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum StorageLocator {
-    Explicit { drawer: String, id: String },
-    Inline(String),
-}
-
-impl StorageLocator {
-    pub fn explicit(drawer: &str, id: &str) -> Self {
-        Self::Explicit {
-            drawer: drawer.to_string(),
-            id: id.to_string(),
-        }
-    }
-
-    pub fn inline(locator: &str) -> Self {
-        Self::Inline(locator.to_string())
-    }
-}
-
-impl From<&str> for StorageLocator {
-    fn from(locator: &str) -> Self {
-        Self::Inline(locator.to_string())
-    }
-}
-
-impl From<String> for StorageLocator {
-    fn from(locator: String) -> Self {
-        Self::Inline(locator)
-    }
-}
-
-impl From<&String> for StorageLocator {
-    fn from(locator: &String) -> Self {
-        Self::Inline(locator.clone())
-    }
-}
-
-impl From<(&str, &str)> for StorageLocator {
-    fn from((drawer, id): (&str, &str)) -> Self {
-        Self::explicit(drawer, id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum StorageScope {
-    Tenant {
-        tenant_id: String,
-        database: String,
-        schema: String,
-    },
-    Database { database: String },
-    Schema { database: String, schema: String },
-    Drawer { namespace: String },
-}
-
-impl StorageScope {
-    pub fn tenant(tenant_id: impl Into<String>, database: impl Into<String>, schema: impl Into<String>) -> Self {
-        Self::Tenant {
-            tenant_id: tenant_id.into(),
-            database: database.into(),
-            schema: schema.into(),
-        }
-    }
-
-    pub fn database(database: &str) -> Self {
-        Self::Database {
-            database: database.to_string(),
-        }
-    }
-
-    pub fn schema(database: &str, schema: &str) -> Self {
-        Self::Schema {
-            database: database.to_string(),
-            schema: schema.to_string(),
-        }
-    }
-
-    pub fn drawer(namespace: &str) -> Self {
-        Self::Drawer {
-            namespace: namespace.to_string(),
-        }
-    }
-
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::Tenant { .. } => Ok(()),
-            Self::Database { database } => {
-                StorageCoordinate::validate_component("database", database)
-            }
-            Self::Schema { database, schema } => {
-                StorageCoordinate::validate_component("database", database)?;
-                StorageCoordinate::validate_component("schema", schema)
-            }
-            Self::Drawer { namespace } => {
-                StorageCoordinate::validate_component("namespace", namespace)
-            }
-        }
-    }
-}
+pub use crate::wrdb_lib::command::{Command, CommandResult};
+pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
+pub use crate::wrdb_lib::storage::{
+    StorageCoordinate, StorageInventory, StorageLocator, StorageScope,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DatabaseRoute {
@@ -219,99 +40,6 @@ impl ExecutionContext<'_> {
             drawer_namespace: None,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Command {
-    ShowTenants,
-    ShowDatabases,
-    VerifyWal {
-        database_name: Option<String>,
-    },
-    ShowSchemas {
-        database_name: String,
-    },
-    ShowDrawers {
-        database_name: String,
-        schema_name: String,
-    },
-    Upsert {
-        drawer_name: String,
-        payload: Value,
-    },
-    FindAll {
-        drawer_name: String,
-    },
-    FindById {
-        pointer: String,
-    },
-    FindByFilter {
-        drawer_name: String,
-        filter: Value,
-        modifiers: Option<QueryModifiers>,
-    },
-    Count {
-        drawer_name: String,
-        filter: Option<Value>,
-        modifiers: Option<QueryModifiers>,
-    },
-    Delete {
-        pointer: String,
-    },
-    Vacuum {
-        drawer_name: String,
-    },
-    Migrate {
-        drawer_name: String,
-    },
-    DefineDatabase {
-        database_name: String,
-    },
-    DefineSchema {
-        database_name: String,
-        schema_name: String,
-    },
-    DefineDrawer {
-        database_name: String,
-        schema_name: String,
-        drawer_name: String,
-    },
-    DefineTenantRoute {
-        tenant_id: String,
-        database_name: String,
-        location: String,
-    },
-    ExecuteForTenant {
-        tenant_id: String,
-        database_name: String,
-        schema_name: String,
-        command: Box<Command>,
-    },
-    Execute {
-        coordinate: StorageCoordinate,
-        command: Box<Command>,
-    },
-    ExecuteInScope {
-        scope: StorageScope,
-        command: Box<Command>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum CommandResult {
-    StorageInventory(StorageInventory),
-    Tenants(Vec<String>),
-    Databases(Vec<StorageInventory>),
-    WalVerification(WalVerification),
-    Schemas(Vec<String>),
-    Drawers(Vec<StorageInventory>),
-    Pointer(String),
-    Records(Vec<Value>),
-    Record(Option<Value>),
-    Count(usize),
-    Deleted(bool),
-    Vacuumed(VacuumReport),
-    Migrated(VacuumReport),
 }
 
 enum SortableValue<'a> {
@@ -572,7 +300,9 @@ impl WardrobeEngine {
 
     pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
         let database_path = match database_name {
-            Some(database_name) => Self::database_path_from_name(&self.root_directory, database_name)?,
+            Some(database_name) => {
+                Self::database_path_from_name(&self.root_directory, database_name)?
+            }
             None => self.root_directory.clone(),
         };
         WalJournal::at_database_path(database_path).verify()
@@ -691,8 +421,10 @@ impl WardrobeEngine {
                 Self::execute_in_database(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
-                let database_path =
-                    Self::database_path_from_name(&self.root_directory, &format!("{database}/{schema}"))?;
+                let database_path = Self::database_path_from_name(
+                    &self.root_directory,
+                    &format!("{database}/{schema}"),
+                )?;
                 Self::append_wal_for_command(&database_path, Some(&schema), &command)?;
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
@@ -726,7 +458,11 @@ impl WardrobeEngine {
         Self::storage_inventory(database_name.to_string(), &database_path)
     }
 
-    pub fn create_schema(&self, database_name: &str, schema_name: &str) -> Result<StorageInventory> {
+    pub fn create_schema(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> Result<StorageInventory> {
         Self::validate_database_name(database_name)?;
         Self::validate_catalog_token(schema_name, "schema")?;
         Self::append_wal_for_command(
@@ -873,9 +609,7 @@ impl WardrobeEngine {
         if tenant_route.database != database_name {
             return Err(Error::new(
                 ErrorKind::NotFound,
-                format!(
-                    "Tenant '{tenant_id}' is not routed to database '{database_name}'"
-                ),
+                format!("Tenant '{tenant_id}' is not routed to database '{database_name}'"),
             ));
         }
 
@@ -883,8 +617,10 @@ impl WardrobeEngine {
 
         let route_path = self.catalog_location_path(&tenant_route.location);
         Self::append_wal_for_command(&route_path, Some(schema_name), &command)?;
-        let routed_database =
-            RwLock::new(Database::initialize_with_cache_limit(&route_path, self.max_cached_drawers)?);
+        let routed_database = RwLock::new(Database::initialize_with_cache_limit(
+            &route_path,
+            self.max_cached_drawers,
+        )?);
         Self::recover_database(&routed_database)?;
         Self::execute_in_database(&routed_database, command, Some(schema_name))
     }
@@ -1129,7 +865,7 @@ impl WardrobeEngine {
         routed_databases.get(&route).cloned().ok_or_else(|| {
             Error::new(
                 ErrorKind::NotFound,
-            "Failed to acquire routed database handle",
+                "Failed to acquire routed database handle",
             )
         })
     }
@@ -1191,21 +927,24 @@ impl WardrobeEngine {
 
     fn catalog_drawer_inventory(entry: &CatalogEntry) -> Result<StorageInventory> {
         let location = PathBuf::from(&entry.location);
-        let (directory, physical_drawer_name) =
-            if location.extension().and_then(|extension| extension.to_str()) == Some("drw") {
-                let directory = location
-                    .parent()
-                    .map(|path| path.to_path_buf())
-                    .unwrap_or_else(PathBuf::new);
-                let physical_drawer_name = location
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or(entry.drawer.as_str())
-                    .to_string();
-                (directory, physical_drawer_name)
-            } else {
-                (location, entry.drawer.clone())
-            };
+        let (directory, physical_drawer_name) = if location
+            .extension()
+            .and_then(|extension| extension.to_str())
+            == Some("drw")
+        {
+            let directory = location
+                .parent()
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(PathBuf::new);
+            let physical_drawer_name = location
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(entry.drawer.as_str())
+                .to_string();
+            (directory, physical_drawer_name)
+        } else {
+            (location, entry.drawer.clone())
+        };
 
         if !directory.exists() {
             return Ok(StorageInventory {
@@ -1796,7 +1535,11 @@ impl WardrobeEngine {
             })?;
 
             match record {
-                WalRecord::Begin { tx_id, operation, ts } => {
+                WalRecord::Begin {
+                    tx_id,
+                    operation,
+                    ts,
+                } => {
                     if checkpoint_found && ts <= last_checkpoint {
                         continue;
                     }

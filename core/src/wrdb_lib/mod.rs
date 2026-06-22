@@ -1,10 +1,13 @@
+pub(crate) mod command;
 pub mod connection;
 pub mod database;
 pub mod drawer;
 pub mod protocol;
+pub(crate) mod query;
 pub mod reader;
-pub mod registry;
 pub mod recycler;
+pub mod registry;
+pub(crate) mod storage;
 pub mod storage_format;
 pub mod wal;
 pub mod writer;

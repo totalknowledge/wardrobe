@@ -164,7 +164,10 @@ impl WalEntry {
         }
 
         if magic != WAL_MAGIC {
-            return Err(Error::new(ErrorKind::InvalidData, "WAL magic header is corrupt"));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "WAL magic header is corrupt",
+            ));
         }
 
         let mut version = [0_u8; 1];

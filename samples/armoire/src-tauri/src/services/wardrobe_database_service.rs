@@ -150,7 +150,8 @@ impl WardrobeDatabaseService {
 
             let is_drawer_file =
                 path.extension().and_then(|extension| extension.to_str()) == Some("drw");
-            let is_catalog = path.file_name().and_then(|name| name.to_str()) == Some(".catalog.drw");
+            let is_catalog =
+                path.file_name().and_then(|name| name.to_str()) == Some(".catalog.drw");
             if is_drawer_file && !is_catalog {
                 return Ok(true);
             }

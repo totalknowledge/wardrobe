@@ -3765,12 +3765,14 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
         .create_drawer("managed_db", "core", "gem")
         .expect("drawer should be created");
     assert_eq!(drawer_inventory.name, "gem");
-    assert!(database
-        .path
-        .join("managed_db")
-        .join("core")
-        .join("gem.drw")
-        .exists());
+    assert!(
+        database
+            .path
+            .join("managed_db")
+            .join("core")
+            .join("gem.drw")
+            .exists()
+    );
 
     let command_result = engine
         .execute_command(Command::DefineDrawer {
@@ -3815,9 +3817,14 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
 fn us_065_logical_tenant_routes_to_catalog_defined_location() {
     let database = TempDatabase::new("us_065_logical_tenant_route");
     let storage_pool = database.path.to_string_lossy().into_owned();
-    let routed_database = database.path.join("shards").join("tenant_a").join("production");
+    let routed_database = database
+        .path
+        .join("shards")
+        .join("tenant_a")
+        .join("production");
     let routed_drawer = routed_database.join("core").join("gem.drw");
-    std::fs::create_dir_all(routed_database.join("core")).expect("tenant schema directory should exist");
+    std::fs::create_dir_all(routed_database.join("core"))
+        .expect("tenant schema directory should exist");
     std::fs::File::create(&routed_drawer).expect("tenant drawer should exist");
     std::fs::File::create(routed_database.join("core").join("gem_index.drw"))
         .expect("tenant index should exist");
@@ -3863,12 +3870,14 @@ fn us_065_logical_tenant_routes_to_catalog_defined_location() {
             .len()
             > 0
     );
-    assert!(!database
-        .path
-        .join("production")
-        .join("core")
-        .join("gem.drw")
-        .exists());
+    assert!(
+        !database
+            .path
+            .join("production")
+            .join("core")
+            .join("gem.drw")
+            .exists()
+    );
 
     let records = engine
         .execute_command(Command::ExecuteForTenant {

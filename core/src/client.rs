@@ -230,12 +230,16 @@ impl WardrobeClient {
     pub fn verify_wal(&self, database_name: Option<&str>) -> Result<crate::WalVerification> {
         match &self.driver {
             Driver::Embedded(engine) => engine.verify_wal(database_name),
-            Driver::Network(driver) => expect_wal_verification(driver.execute(Command::VerifyWal {
-                database_name: database_name.map(ToOwned::to_owned),
-            })?),
-            Driver::UnixSocket(driver) => expect_wal_verification(driver.execute(Command::VerifyWal {
-                database_name: database_name.map(ToOwned::to_owned),
-            })?),
+            Driver::Network(driver) => {
+                expect_wal_verification(driver.execute(Command::VerifyWal {
+                    database_name: database_name.map(ToOwned::to_owned),
+                })?)
+            }
+            Driver::UnixSocket(driver) => {
+                expect_wal_verification(driver.execute(Command::VerifyWal {
+                    database_name: database_name.map(ToOwned::to_owned),
+                })?)
+            }
         }
     }
 
@@ -518,7 +522,10 @@ mod tests {
         let inline = StorageLocator::Inline("@gem:abc".to_string());
         assert_eq!(locator_to_pointer(inline), "@gem:abc".to_string());
 
-        let explicit = StorageLocator::Explicit { drawer: "gem".to_string(), id: "lnk_abc".to_string() };
+        let explicit = StorageLocator::Explicit {
+            drawer: "gem".to_string(),
+            id: "lnk_abc".to_string(),
+        };
         assert_eq!(locator_to_pointer(explicit), "@gem:abc".to_string());
     }
 
@@ -560,11 +567,19 @@ mod tests {
             .write_to_stream(&mut resp_bytes)
             .expect("frame write");
 
-        let stream = FakeStream { read: Cursor::new(resp_bytes), write: Vec::new() };
+        let stream = FakeStream {
+            read: Cursor::new(resp_bytes),
+            write: Vec::new(),
+        };
         let mutex = Mutex::new(stream);
 
-        let cmd = Command::Count { drawer_name: "gem".to_string(), filter: None, modifiers: None };
-        let result = execute_on_stream(&mutex, cmd, "test-target".to_string()).expect("execute should succeed");
+        let cmd = Command::Count {
+            drawer_name: "gem".to_string(),
+            filter: None,
+            modifiers: None,
+        };
+        let result = execute_on_stream(&mutex, cmd, "test-target".to_string())
+            .expect("execute should succeed");
         assert_eq!(result, CommandResult::Count(3));
     }
 }

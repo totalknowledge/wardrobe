@@ -33,9 +33,21 @@ fn sample_runs_extended_lifecycle_and_cleans_related_records() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(working_directory.join("wardrobe/basic-usage/public/user.drw").is_file());
-    assert!(working_directory.join("wardrobe/basic-usage/public/gem.drw").is_file());
-    assert!(working_directory.join("wardrobe/basic-usage/public/weapon.drw").is_file());
+    assert!(
+        working_directory
+            .join("wardrobe/basic-usage/public/user.drw")
+            .is_file()
+    );
+    assert!(
+        working_directory
+            .join("wardrobe/basic-usage/public/gem.drw")
+            .is_file()
+    );
+    assert!(
+        working_directory
+            .join("wardrobe/basic-usage/public/weapon.drw")
+            .is_file()
+    );
     assert!(stdout.contains("Phase 1: Metadata & Inventory Discovery"));
     assert!(stdout.contains("Phase 2: Relational Data Population"));
     assert!(stdout.contains("Phase 3: Filter Query Execution"));
