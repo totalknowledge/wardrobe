@@ -2,6 +2,7 @@ use crate::wrdb_lib::catalog_lifecycle;
 use crate::wrdb_lib::catalog_validation;
 use crate::wrdb_lib::command_dispatch;
 use crate::wrdb_lib::database::Database;
+use crate::wrdb_lib::delete_rules;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::engine_wal;
@@ -10,7 +11,7 @@ use crate::wrdb_lib::nested_decomposition;
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query;
 use crate::wrdb_lib::registry::CatalogRegistry;
-use crate::wrdb_lib::relationship::{self, DeleteAction, InverseDeleteRule};
+use crate::wrdb_lib::relationship;
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::wal::WalVerification;
 use serde_json::Value;
@@ -816,7 +817,7 @@ impl WardrobeEngine {
             (
                 drawer.find_by_primary_key_with_migration(&record_key)?,
                 drawer.cascade_delete_fields(),
-                relationship::inverse_delete_rules(
+                delete_rules::inverse_delete_rules(
                     drawer.delete_rules(),
                     drawer.relationship_constraints(),
                 ),
@@ -826,32 +827,85 @@ impl WardrobeEngine {
             return Ok(false);
         };
 
-        Self::evaluate_restrict_delete_rules(
-            database_core,
+        delete_rules::evaluate_restrict_delete_rules(
             pointer,
             &inverse_delete_rules,
-            context,
+            context.drawer_namespace,
+            |target_drawer, mapped_by, parent_pointer| {
+                Self::records_matching_parent_pointer(
+                    database_core,
+                    target_drawer,
+                    mapped_by,
+                    parent_pointer,
+                    context,
+                )
+            },
         )?;
 
         active_delete_path.insert(pointer.to_string());
 
-        let cascade_child_pointers = Self::collect_inverse_delete_rule_pointers(
-            database_core,
+        let cascade_child_pointers = delete_rules::collect_inverse_delete_rule_pointers(
             pointer,
             &inverse_delete_rules,
-            DeleteAction::Cascade,
-            context,
+            delete_rules::DeleteAction::Cascade,
+            context.drawer_namespace,
+            |target_drawer, mapped_by, parent_pointer| {
+                Self::records_matching_parent_pointer(
+                    database_core,
+                    target_drawer,
+                    mapped_by,
+                    parent_pointer,
+                    context,
+                )
+            },
         )?;
         for cascade_pointer in cascade_child_pointers {
             Self::delete_by_id_inner(database_core, &cascade_pointer, active_delete_path, context)?;
         }
 
-        let cascade_pointers = Self::collect_cascade_pointers(&record, &cascade_fields);
+        let cascade_pointers = delete_rules::collect_cascade_pointers(&record, &cascade_fields);
         for cascade_pointer in cascade_pointers {
             Self::delete_by_id_inner(database_core, &cascade_pointer, active_delete_path, context)?;
         }
 
-        Self::apply_set_null_delete_rules(database_core, pointer, &inverse_delete_rules, context)?;
+        delete_rules::apply_set_null_delete_rules(
+            pointer,
+            &inverse_delete_rules,
+            context.drawer_namespace,
+            |target_drawer, mapped_by, parent_pointer| {
+                Self::records_matching_parent_pointer(
+                    database_core,
+                    target_drawer,
+                    mapped_by,
+                    parent_pointer,
+                    context,
+                )
+            },
+            |physical_target_drawer, field_name, child_record| {
+                let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+                    database_core,
+                    physical_target_drawer,
+                    "_id",
+                    Vec::new(),
+                )?
+                else {
+                    return Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!(
+                            "Drawer '{}' could not be loaded for SetNull delete rule '{}'",
+                            physical_target_drawer, field_name
+                        ),
+                    ));
+                };
+
+                match Self::write_lock(&drawer)?.upsert_record(child_record)? {
+                    Ok(_) => Ok(()),
+                    Err(validation_error) => {
+                        Err(Error::new(ErrorKind::InvalidData, validation_error))
+                    }
+                }
+            },
+        )?;
 
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
@@ -871,119 +925,6 @@ impl WardrobeEngine {
         active_delete_path.remove(pointer);
 
         Ok(deleted_record.is_some())
-    }
-
-    fn evaluate_restrict_delete_rules(
-        database_core: &RwLock<Database>,
-        pointer: &str,
-        inverse_delete_rules: &[InverseDeleteRule],
-        context: ExecutionContext<'_>,
-    ) -> Result<()> {
-        let restricted_pointers = Self::collect_inverse_delete_rule_pointers(
-            database_core,
-            pointer,
-            inverse_delete_rules,
-            DeleteAction::Restrict,
-            context,
-        )?;
-
-        if let Some(blocking_pointer) = restricted_pointers.first() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "Delete restricted: '{}' is still referenced by '{}' through a Restrict rule",
-                    pointer, blocking_pointer
-                ),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn collect_inverse_delete_rule_pointers(
-        database_core: &RwLock<Database>,
-        pointer: &str,
-        inverse_delete_rules: &[InverseDeleteRule],
-        action: DeleteAction,
-        context: ExecutionContext<'_>,
-    ) -> Result<Vec<String>> {
-        let mut pointers = Vec::new();
-
-        for rule in inverse_delete_rules
-            .iter()
-            .filter(|rule| rule.action == action)
-        {
-            let child_records = Self::records_matching_parent_pointer(
-                database_core,
-                &rule.target_drawer,
-                &rule.mapped_by,
-                pointer,
-                context,
-            )?;
-
-            let physical_target_drawer =
-                routing::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
-            for record in child_records {
-                if let Some(child_key) = record.get("_id").and_then(|value| value.as_str()) {
-                    pointers.push(pointer::format_pointer(&physical_target_drawer, child_key));
-                }
-            }
-        }
-
-        Ok(pointers)
-    }
-
-    fn apply_set_null_delete_rules(
-        database_core: &RwLock<Database>,
-        pointer: &str,
-        inverse_delete_rules: &[InverseDeleteRule],
-        context: ExecutionContext<'_>,
-    ) -> Result<()> {
-        for rule in inverse_delete_rules
-            .iter()
-            .filter(|rule| rule.action == DeleteAction::SetNull)
-        {
-            let mut child_records = Self::records_matching_parent_pointer(
-                database_core,
-                &rule.target_drawer,
-                &rule.mapped_by,
-                pointer,
-                context,
-            )?;
-
-            for child_record in &mut child_records {
-                Self::clear_parent_pointer_field(child_record, &rule.mapped_by, pointer);
-            }
-
-            for child_record in child_records {
-                let physical_target_drawer =
-                    routing::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
-                let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
-                    database_core,
-                    &physical_target_drawer,
-                    "_id",
-                    Vec::new(),
-                )?
-                else {
-                    return Err(Error::new(
-                        ErrorKind::NotFound,
-                        format!(
-                            "Drawer '{}' could not be loaded for SetNull delete rule '{}'",
-                            physical_target_drawer, rule.field_name
-                        ),
-                    ));
-                };
-
-                match Self::write_lock(&drawer)?.upsert_record(child_record)? {
-                    Ok(_) => {}
-                    Err(validation_error) => {
-                        return Err(Error::new(ErrorKind::InvalidData, validation_error));
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     fn records_matching_parent_pointer(
@@ -1009,73 +950,13 @@ impl WardrobeEngine {
             .find_all_records_with_migration()?
             .into_iter()
             .filter(|record| {
-                record
-                    .get(mapped_by)
-                    .is_some_and(|value| Self::value_contains_pointer(value, parent_pointer))
+                record.get(mapped_by).is_some_and(|value| {
+                    delete_rules::value_contains_pointer(value, parent_pointer)
+                })
             })
             .collect();
 
         Ok(records)
-    }
-
-    fn value_contains_pointer(value: &Value, pointer: &str) -> bool {
-        match value {
-            Value::String(value) => value == pointer,
-            Value::Array(values) => values
-                .iter()
-                .any(|value| Self::value_contains_pointer(value, pointer)),
-            Value::Object(map) => map
-                .values()
-                .any(|value| Self::value_contains_pointer(value, pointer)),
-            _ => false,
-        }
-    }
-
-    fn clear_parent_pointer_field(record: &mut Value, field_name: &str, pointer: &str) -> bool {
-        let Value::Object(map) = record else {
-            return false;
-        };
-
-        let Some(field_value) = map.get_mut(field_name) else {
-            return false;
-        };
-
-        let mut remove_field = false;
-        let changed = match field_value {
-            Value::String(value) if value == pointer => {
-                remove_field = true;
-                true
-            }
-            Value::Array(values) => {
-                let original_len = values.len();
-                values.retain(|value| !Self::value_contains_pointer(value, pointer));
-                if values.is_empty() {
-                    remove_field = true;
-                }
-                values.len() != original_len
-            }
-            _ => false,
-        };
-
-        if remove_field {
-            map.remove(field_name);
-        }
-
-        changed
-    }
-
-    fn collect_cascade_pointers(record: &Value, cascade_fields: &[String]) -> Vec<String> {
-        let mut pointers = Vec::new();
-
-        if let Value::Object(map) = record {
-            for field in cascade_fields {
-                if let Some(value) = map.get(field) {
-                    pointer::collect_pointer_strings(value, &mut pointers);
-                }
-            }
-        }
-
-        pointers
     }
 
     fn fetch_record_for_hydration(

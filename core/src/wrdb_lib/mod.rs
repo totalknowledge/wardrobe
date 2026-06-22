@@ -4,6 +4,7 @@ pub(crate) mod command;
 pub(crate) mod command_dispatch;
 pub mod connection;
 pub mod database;
+pub(crate) mod delete_rules;
 pub(crate) mod discovery;
 pub mod drawer;
 pub(crate) mod engine_wal;

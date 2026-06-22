@@ -2,21 +2,6 @@ use crate::wrdb_lib::pointer;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeleteAction {
-    Cascade,
-    Restrict,
-    SetNull,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct InverseDeleteRule {
-    pub(crate) field_name: String,
-    pub(crate) action: DeleteAction,
-    pub(crate) target_drawer: String,
-    pub(crate) mapped_by: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RelationTarget {
     Inferred(String),
@@ -30,28 +15,6 @@ pub(crate) struct VirtualRelationship {
     pub(crate) field_name: String,
     pub(crate) target_drawer: String,
     pub(crate) mapped_by: String,
-}
-
-pub(crate) fn inverse_delete_rules(
-    delete_rules: BTreeMap<String, Value>,
-    relationship_constraints: BTreeMap<String, Value>,
-) -> Vec<InverseDeleteRule> {
-    delete_rules
-        .into_iter()
-        .filter_map(|(field_name, rule)| {
-            let action = delete_rule_action(&rule)?;
-            let relationship_rule = relationship_constraints.get(&field_name)?;
-            let target_drawer = relationship_target_drawer(relationship_rule)?;
-            let mapped_by = relationship_mapped_by(relationship_rule)?;
-
-            Some(InverseDeleteRule {
-                field_name,
-                action,
-                target_drawer: target_drawer.to_string(),
-                mapped_by: mapped_by.to_string(),
-            })
-        })
-        .collect()
 }
 
 pub(crate) fn inline_relationship_aliases(
@@ -161,22 +124,6 @@ pub(crate) fn relationship_mapped_by(rule: &Value) -> Option<&str> {
     rule.get("mapped_by").and_then(|value| value.as_str())
 }
 
-fn delete_rule_action(rule: &Value) -> Option<DeleteAction> {
-    let action = rule
-        .as_str()
-        .or_else(|| rule.get("action").and_then(|action| action.as_str()))?;
-
-    if action.eq_ignore_ascii_case("Cascade") {
-        Some(DeleteAction::Cascade)
-    } else if action.eq_ignore_ascii_case("Restrict") {
-        Some(DeleteAction::Restrict)
-    } else if action.eq_ignore_ascii_case("SetNull") {
-        Some(DeleteAction::SetNull)
-    } else {
-        None
-    }
-}
-
 fn relationship_drawer_name(field_name: &str) -> String {
     if let Some(stem) = field_name.strip_suffix("ies") {
         return format!("{}y", stem);
@@ -255,32 +202,6 @@ mod tests {
         assert_eq!(aliases[0].0, "attachments");
         assert_eq!(aliases[0].1["type"], "polymorphic");
         assert_eq!(aliases[0].1["target_drawers"], json!(["document", "image"]));
-    }
-
-    #[test]
-    fn inverse_delete_rules_keep_only_complete_relationship_metadata() {
-        let delete_rules = BTreeMap::from([
-            ("children".to_string(), json!("Cascade")),
-            ("orphans".to_string(), json!({"action": "SetNull"})),
-            ("ignored".to_string(), json!("Restrict")),
-        ]);
-        let relationship_constraints = BTreeMap::from([
-            (
-                "children".to_string(),
-                json!({"target_drawer": "weapon", "mapped_by": "owner"}),
-            ),
-            (
-                "orphans".to_string(),
-                json!({"target_drawer": "pet", "mapped_by": "owner"}),
-            ),
-        ]);
-
-        let rules = inverse_delete_rules(delete_rules, relationship_constraints);
-
-        assert_eq!(rules.len(), 2);
-        assert!(matches!(rules[0].action, DeleteAction::Cascade));
-        assert_eq!(rules[0].target_drawer, "weapon");
-        assert!(matches!(rules[1].action, DeleteAction::SetNull));
     }
 
     #[test]
