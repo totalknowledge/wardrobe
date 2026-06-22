@@ -1,5 +1,6 @@
 import { Service, signal } from '@angular/core';
-import { GlobalWithTauri } from './wardrobe-tauri-types';
+import { defer } from 'rxjs';
+import { invoke } from './wardrobe-tauri';
 
 export type WardrobeCommandStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -7,12 +8,19 @@ export type WardrobeCommandStatus = 'idle' | 'running' | 'success' | 'error';
 export class WardrobeService {
     public readonly testDatabaseAccessStatus = signal<WardrobeCommandStatus>('idle');
     public readonly testDatabaseAccessError = signal<string | null>(null);
+    private readonly tauri = invoke;
+
+    public createSourceLocation(databaseDirectory: string): void {
+        void this.wardrobeCommand('wardrobe_create_source_location', {
+            databaseDirectory,
+        });
+    }
 
     public testDatabaseAccess(databaseDirectory: string): void {
         this.testDatabaseAccessStatus.set('running');
         this.testDatabaseAccessError.set(null);
 
-        void this.invokeWardrobeCommand<void>('wardrobe_test_database_access', {
+        void this.wardrobeCommand<void>('wardrobe_test_database_access', {
             databaseDirectory
         })
             .then(() => {
@@ -29,19 +37,10 @@ export class WardrobeService {
             });
     }
 
-    private invokeWardrobeCommand<T>(
+    private wardrobeCommand<T>(
         command: string,
         args?: Record<string, unknown>,
     ): Promise<T> {
-        const tauri = (globalThis as GlobalWithTauri).__TAURI__;
-        const invoke = tauri?.core?.invoke ?? tauri?.tauri?.invoke;
-
-        if (!invoke) {
-            return Promise.reject(
-                new Error('Tauri invoke API is not available in this runtime.'),
-            );
-        }
-
-        return invoke<T>(command, args);
+        return this.tauri<T>(command, args);
     }
 }

@@ -6,6 +6,28 @@ use wardrobe_core::{WardrobeClient, WardrobeEngine};
 pub struct WardrobeDatabaseService;
 
 impl WardrobeDatabaseService {
+    pub fn create_source_location(database_directory: &str) -> io::Result<String> {
+        let database_directory = Self::resolve_source_location(database_directory);
+
+        std::fs::create_dir_all(&database_directory)?;
+        let database_directory = database_directory.canonicalize()?;
+        let database_directory_string = database_directory.to_string_lossy().into_owned();
+
+        println!(
+            "Creating Wardrobe source location at: {}",
+            database_directory_string
+        );
+
+        let _engine = WardrobeEngine::open(&database_directory_string)?;
+
+        println!(
+            "Wardrobe source location initialized at: {}",
+            database_directory_string
+        );
+
+        Ok(database_directory_string)
+    }
+
     pub fn test_connection(database_directory: &str) -> io::Result<()> {
         let database_directory = Self::resolve_database_directory(database_directory)?;
         let database_directory = database_directory.to_string_lossy().into_owned();
@@ -78,6 +100,34 @@ impl WardrobeDatabaseService {
                 database_directory
             ),
         ))
+    }
+
+    fn resolve_source_location(database_directory: &str) -> PathBuf {
+        let requested_path = Path::new(database_directory);
+        if requested_path.is_absolute() {
+            return requested_path.to_path_buf();
+        }
+
+        if let Ok(current_directory) = std::env::current_dir() {
+            let candidate = current_directory.join(requested_path);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+
+        let manifest_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for ancestor in manifest_directory.ancestors() {
+            let candidate = ancestor.join(requested_path);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+
+        manifest_directory
+            .ancestors()
+            .last()
+            .map(|root| root.join(requested_path))
+            .unwrap_or_else(|| manifest_directory.join(requested_path))
     }
 
     fn contains_wardrobe_storage(directory: &Path) -> io::Result<bool> {

@@ -15,7 +15,8 @@ pub fn run() {
       Ok(())
     })
         .invoke_handler(tauri::generate_handler![
-            commands::wardrobe::wardrobe_test_database_access
+            commands::wardrobe::wardrobe_test_database_access,
+            commands::wardrobe::wardrobe_create_source_location
         ])
         .run(tauri::generate_context!())
     .expect("error while running tauri application");
