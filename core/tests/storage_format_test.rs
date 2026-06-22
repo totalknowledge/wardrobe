@@ -30,21 +30,29 @@ fn bson_binary_format_round_trips_records() {
 }
 
 #[test]
-fn bson_binary_format_handles_legacy_plaintext_tombstones_empty_and_invalid_records() {
-    let padded_record = BsonBinaryFormat::deserialize_record(br#"{"_id":"@gem:lnk_a"}       "#)
-        .expect("legacy padded record should parse");
-    assert_eq!(padded_record, Some(json!({"_id": "@gem:lnk_a"})));
+fn us_073_bson_binary_format_rejects_legacy_text_records() {
+    let padded_record = BsonBinaryFormat::deserialize_record(br#"{"_id":"@gem:lnk_a"}       "#);
+    assert!(padded_record.is_err());
 
-    let tombstone = BsonBinaryFormat::deserialize_record(b"!!DEAD!!       \n")
-        .expect("tombstone should decode cleanly");
-    assert!(tombstone.is_none());
-    assert!(BsonBinaryFormat::is_tombstone(b"!!DEAD!!       "));
+    let legacy_tombstone = BsonBinaryFormat::deserialize_record(b"!!DEAD!!       \n");
+    assert!(legacy_tombstone.is_err());
+    assert!(!BsonBinaryFormat::is_tombstone(b"!!DEAD!!       "));
 
-    let empty = BsonBinaryFormat::deserialize_record(b"     \n").expect("empty should decode");
-    assert!(empty.is_none());
+    let empty = BsonBinaryFormat::deserialize_record(b"     \n");
+    assert!(empty.is_err());
 
-    let invalid = BsonBinaryFormat::deserialize_record(b"not json").expect("invalid decode");
-    assert!(invalid.is_none());
+    let invalid = BsonBinaryFormat::deserialize_record(b"not json");
+    assert!(invalid.is_err());
+}
+
+#[test]
+fn us_073_bson_binary_tombstone_frame_decodes_as_empty_record() {
+    let tombstone =
+        BsonBinaryFormat::tombstone_frame(BsonBinaryFormat::frame_header_len()).expect("tombstone");
+    let decoded =
+        BsonBinaryFormat::deserialize_record(&tombstone).expect("tombstone should decode cleanly");
+    assert!(decoded.is_none());
+    assert!(BsonBinaryFormat::is_tombstone(&tombstone));
 }
 
 #[test]

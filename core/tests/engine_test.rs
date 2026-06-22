@@ -9,9 +9,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
-    BsonBinaryFormat, Command, CommandResult, DatabaseReader, DatabaseWriter, OrderDirection,
-    PlainTextJsonFormat, QueryModifiers, Recycler, StorageCoordinate, StorageFormat,
-    StorageLocator, StorageScope, WardrobeEngine,
+    BsonBinaryFormat, Command, CommandResult, DatabaseReader, OrderDirection, QueryModifiers,
+    StorageCoordinate, StorageFormat, StorageLocator, StorageScope, WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -54,17 +53,17 @@ fn write_legacy_drawer_record(
     let data_path = database.path.join(format!("{drawer_name}.drw"));
     let index_path = database.path.join(format!("{drawer_name}_index.drw"));
     let serialized_record =
-        PlainTextJsonFormat::serialize_record(&record).expect("legacy record should serialize");
-    let data_size_class = Recycler::new().calculate_aligned_size(serialized_record.len());
-    let data_offset = DatabaseWriter::open_drawer(&data_path)
-        .expect("legacy data writer should open")
-        .append_record(&serialized_record, data_size_class)
-        .expect("legacy record should append");
+        serde_json::to_vec(&record).expect("legacy record should serialize as json");
+    let mut data_contents = serialized_record.clone();
+    data_contents.push(b'\n');
+    fs::write(&data_path, data_contents).expect("legacy data file should write");
+    let data_offset = 0u64;
 
     let primary_key = record
         .get("_id")
         .and_then(|value| value.as_str())
         .expect("legacy record should include string primary key");
+    let data_size_class = serialized_record.len() + 1;
     let index_record = json!({
         "f": "_id",
         "k": primary_key,
@@ -75,12 +74,10 @@ fn write_legacy_drawer_record(
         "status": 1
     });
     let serialized_index =
-        PlainTextJsonFormat::serialize_record(&index_record).expect("index should serialize");
-    let index_size_class = Recycler::new().calculate_aligned_size(serialized_index.len());
-    DatabaseWriter::open_drawer(&index_path)
-        .expect("legacy index writer should open")
-        .append_aligned_index(&serialized_index, index_size_class)
-        .expect("legacy index should append");
+        serde_json::to_vec(&index_record).expect("legacy index should serialize as json");
+    let mut index_contents = serialized_index;
+    index_contents.push(b'\n');
+    fs::write(&index_path, index_contents).expect("legacy index file should write");
 
     write_drawer_metadata(
         database,

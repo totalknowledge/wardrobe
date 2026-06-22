@@ -67,6 +67,24 @@ fn append_aligned_index_writes_data_and_reports_length() {
 }
 
 #[test]
+fn us_073_writer_rejects_legacy_text_payloads() {
+    let file_path = temp_file_path("writer_rejects_legacy_text");
+    let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");
+
+    let error = writer
+        .append_record(br#"{"legacy":true}"#, 64)
+        .expect_err("legacy text payload should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        writer.current_length().expect("length should be readable"),
+        0
+    );
+
+    let _ = fs::remove_file(file_path);
+}
+
+#[test]
 fn append_record_pads_to_exact_alignment_with_large_padding_span() {
     let file_path = temp_file_path("writer_append_exact_alignment");
     let mut writer = DatabaseWriter::open_drawer(&file_path).expect("writer should open");

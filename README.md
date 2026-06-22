@@ -41,7 +41,6 @@ Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
 - `DatabaseWriter`
 - `Recycler`
 - `StorageFormat`
-- `PlainTextJsonFormat`
 - `BsonBinaryFormat`
 
 The main embedded entry points on `WardrobeEngine` are:

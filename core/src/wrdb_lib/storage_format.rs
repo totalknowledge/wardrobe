@@ -2,7 +2,6 @@ use bson::Document;
 use serde_json::Value;
 use std::io::{Error, ErrorKind};
 
-const LEGACY_TOMBSTONE_MARKER: &[u8] = b"!!DEAD!!";
 const BSON_FRAME_MAGIC: [u8; 4] = *b"WRDB";
 const BSON_FRAME_VERSION: u8 = 1;
 const BSON_FLAG_TOMBSTONE: u8 = 0b0000_0001;
@@ -13,32 +12,7 @@ const BSON_FRAME_PAYLOAD_LEN_RANGE: std::ops::Range<usize> = 8..12;
 pub trait StorageFormat {
     fn serialize_record(value: &Value) -> std::io::Result<Vec<u8>>;
     fn deserialize_record(bytes: &[u8]) -> std::io::Result<Option<Value>>;
-    fn tombstone_marker() -> &'static [u8];
-
-    fn is_tombstone(bytes: &[u8]) -> bool {
-        trim_record_bytes(bytes).starts_with(Self::tombstone_marker())
-    }
-}
-
-pub struct PlainTextJsonFormat;
-
-impl StorageFormat for PlainTextJsonFormat {
-    fn serialize_record(value: &Value) -> std::io::Result<Vec<u8>> {
-        serde_json::to_vec(value).map_err(|err| Error::new(ErrorKind::InvalidData, err))
-    }
-
-    fn deserialize_record(bytes: &[u8]) -> std::io::Result<Option<Value>> {
-        let normalized = trim_record_bytes(bytes);
-        if normalized.is_empty() || Self::is_tombstone(normalized) {
-            return Ok(None);
-        }
-
-        Ok(serde_json::from_slice(normalized).ok())
-    }
-
-    fn tombstone_marker() -> &'static [u8] {
-        LEGACY_TOMBSTONE_MARKER
-    }
+    fn is_tombstone(bytes: &[u8]) -> bool;
 }
 
 pub struct BsonBinaryFormat;
@@ -104,7 +78,7 @@ impl BsonBinaryFormat {
         encoded.push(BSON_FRAME_VERSION);
         encoded.push(BSON_FLAG_TOMBSTONE);
         encoded.extend_from_slice(&0u16.to_be_bytes());
-        encoded.extend_from_slice(&(BSON_FRAME_HEADER_LEN as u32).to_be_bytes());
+        encoded.extend_from_slice(&0u32.to_be_bytes());
         encoded.extend_from_slice(&(slot_size as u32).to_be_bytes());
         Ok(encoded)
     }
@@ -189,16 +163,10 @@ impl StorageFormat for BsonBinaryFormat {
             return Ok(Some(value));
         }
 
-        let normalized = trim_record_bytes(bytes);
-        if normalized.is_empty() || normalized.starts_with(LEGACY_TOMBSTONE_MARKER) {
-            return Ok(None);
-        }
-
-        Ok(serde_json::from_slice(normalized).ok())
-    }
-
-    fn tombstone_marker() -> &'static [u8] {
-        LEGACY_TOMBSTONE_MARKER
+        Err(Error::new(
+            ErrorKind::InvalidData,
+            "WRDB binary frame expected; legacy text storage is no longer supported",
+        ))
     }
 
     fn is_tombstone(bytes: &[u8]) -> bool {
@@ -206,17 +174,8 @@ impl StorageFormat for BsonBinaryFormat {
             return flags & BSON_FLAG_TOMBSTONE != 0;
         }
 
-        let normalized = trim_record_bytes(bytes);
-        normalized.starts_with(LEGACY_TOMBSTONE_MARKER)
+        false
     }
-}
-
-fn trim_record_bytes(bytes: &[u8]) -> &[u8] {
-    let mut end = bytes.len();
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    &bytes[..end]
 }
 
 #[cfg(test)]
@@ -248,13 +207,8 @@ mod tests {
 
     #[test]
     fn tombstone_frame_is_detected_as_tombstone() {
-        // slot size must be at least header_len + payload_len per parse_frame logic
-        let slot = BsonBinaryFormat::frame_header_len() * 2;
-        let mut t = BsonBinaryFormat::tombstone_frame(slot).expect("tombstone should create");
-        // pad to declared slot size so parse_frame can validate bounds
-        if t.len() < slot {
-            t.resize(slot, 0);
-        }
+        let slot = BsonBinaryFormat::frame_header_len();
+        let t = BsonBinaryFormat::tombstone_frame(slot).expect("tombstone should create");
         assert!(BsonBinaryFormat::is_tombstone(&t));
     }
 
