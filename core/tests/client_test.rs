@@ -550,6 +550,7 @@ fn client_handles_malformed_json_response_as_invaliddata() {
     let addr = listener.local_addr().expect("address failed").to_string();
     let handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept failed");
+        let _ = ProtocolFrame::read_from_stream(&mut stream).expect("read failed");
         let payload = b"not-json".to_vec();
         ProtocolFrame::new(ProtocolOpcode::Result, payload)
             .write_to_stream(&mut stream)

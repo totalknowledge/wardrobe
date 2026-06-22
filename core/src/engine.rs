@@ -1,5 +1,6 @@
 use crate::wrdb_lib::catalog_lifecycle;
 use crate::wrdb_lib::catalog_validation;
+use crate::wrdb_lib::command_dispatch;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
@@ -300,7 +301,9 @@ impl WardrobeEngine {
         coordinate: StorageCoordinate,
         command: Command,
     ) -> Result<CommandResult> {
-        self.validate_command_against_registry(
+        let registry = Self::read_lock(&self.registry)?;
+        command_dispatch::validate_command_against_registry(
+            &registry,
             &routing::coordinate_catalog_database(&coordinate),
             coordinate.schema(),
             &command,
@@ -308,13 +311,16 @@ impl WardrobeEngine {
         let database_path = routing::coordinate_database_path(&self.root_directory, &coordinate)?;
         Self::append_wal_for_command(&database_path, Some(coordinate.schema()), &command)?;
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
-        Self::execute_in_database(&database, command, None)
+        command_dispatch::execute_in_database::<Self>(&database, command, None)
     }
 
     pub fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult> {
         routing::validate_scope(&scope)?;
         if let StorageScope::Schema { database, schema } = &scope {
-            self.validate_command_against_registry(database, schema, &command)?;
+            let registry = Self::read_lock(&self.registry)?;
+            command_dispatch::validate_command_against_registry(
+                &registry, database, schema, &command,
+            )?;
         }
 
         match scope {
@@ -327,7 +333,7 @@ impl WardrobeEngine {
                 let database_path = routing::database_scope_path(&self.root_directory, &database)?;
                 Self::append_wal_for_command(&database_path, None, &command)?;
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
-                Self::execute_in_database(&database, command, None)
+                command_dispatch::execute_in_database::<Self>(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
                 let database_path =
@@ -335,11 +341,15 @@ impl WardrobeEngine {
                 Self::append_wal_for_command(&database_path, Some(&schema), &command)?;
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
-                Self::execute_in_database(&database, command, None)
+                command_dispatch::execute_in_database::<Self>(&database, command, None)
             }
             StorageScope::Drawer { namespace } => {
                 Self::append_wal_for_command(&self.root_directory, Some(&namespace), &command)?;
-                Self::execute_in_database(&self.database_core, command, Some(namespace.as_str()))
+                command_dispatch::execute_in_database::<Self>(
+                    &self.database_core,
+                    command,
+                    Some(namespace.as_str()),
+                )
             }
         }
     }
@@ -427,7 +437,13 @@ impl WardrobeEngine {
             ));
         }
 
-        self.validate_command_against_registry(database_name, schema_name, &command)?;
+        let registry = Self::read_lock(&self.registry)?;
+        command_dispatch::validate_command_against_registry(
+            &registry,
+            database_name,
+            schema_name,
+            &command,
+        )?;
 
         let route_path =
             catalog_validation::catalog_location_path(&self.root_directory, &tenant_route.location);
@@ -438,149 +454,11 @@ impl WardrobeEngine {
             self.max_cached_drawers,
         )?);
         Self::recover_database(&routed_database)?;
-        Self::execute_in_database(&routed_database, command, None)
+        command_dispatch::execute_in_database::<Self>(&routed_database, command, None)
     }
 
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
-        if !matches!(
-            &command,
-            Command::DefineDatabase { .. }
-                | Command::DefineSchema { .. }
-                | Command::DefineDrawer { .. }
-                | Command::DefineTenantRoute { .. }
-        ) {
-            Self::append_wal_for_command(&self.root_directory, None, &command)?;
-        }
-        match command {
-            Command::ShowTenants => self.show_tenants().map(CommandResult::Tenants),
-            Command::ShowDatabases => self.show_databases().map(CommandResult::Databases),
-            Command::VerifyWal { database_name } => self
-                .verify_wal(database_name.as_deref())
-                .map(CommandResult::WalVerification),
-            Command::ShowSchemas { database_name } => self
-                .show_schemas(&database_name)
-                .map(CommandResult::Schemas),
-            Command::ShowDrawers {
-                database_name,
-                schema_name,
-            } => self
-                .show_drawers(&database_name, &schema_name)
-                .map(CommandResult::Drawers),
-            Command::DefineDatabase { database_name } => self
-                .create_database(&database_name)
-                .map(CommandResult::StorageInventory),
-            Command::DefineSchema {
-                database_name,
-                schema_name,
-            } => self
-                .create_schema(&database_name, &schema_name)
-                .map(CommandResult::StorageInventory),
-            Command::DefineDrawer {
-                database_name,
-                schema_name,
-                drawer_name,
-            } => self
-                .create_drawer(&database_name, &schema_name, &drawer_name)
-                .map(CommandResult::StorageInventory),
-            Command::DefineTenantRoute {
-                tenant_id,
-                database_name,
-                location,
-            } => self
-                .register_tenant_route(&tenant_id, &database_name, &location)
-                .map(CommandResult::StorageInventory),
-            Command::ExecuteForTenant {
-                tenant_id,
-                database_name,
-                schema_name,
-                command,
-            } => self.execute_for_tenant(&tenant_id, &database_name, &schema_name, *command),
-            Command::Execute {
-                coordinate,
-                command,
-            } => self.execute(coordinate, *command),
-            Command::ExecuteInScope { scope, command } => self.execute_in_scope(scope, *command),
-            command => Self::execute_in_database(&self.database_core, command, None),
-        }
-    }
-
-    fn execute_in_database(
-        database: &RwLock<Database>,
-        command: Command,
-        drawer_namespace: Option<&str>,
-    ) -> Result<CommandResult> {
-        let context = ExecutionContext { drawer_namespace };
-
-        match command {
-            Command::ShowTenants => Err(Error::new(
-                ErrorKind::InvalidInput,
-                "Tenant discovery is only available at the WardrobeEngine boundary",
-            )),
-            Command::ShowDatabases => Err(Error::new(
-                ErrorKind::InvalidInput,
-                "Database discovery is only available at the WardrobeEngine boundary",
-            )),
-            Command::VerifyWal { .. } => Err(Error::new(
-                ErrorKind::InvalidInput,
-                "WAL verification is only available at the WardrobeEngine boundary",
-            )),
-            Command::ShowSchemas { .. } => Err(Error::new(
-                ErrorKind::InvalidInput,
-                "Schema discovery is only available at the WardrobeEngine boundary",
-            )),
-            Command::ShowDrawers { .. } => Err(Error::new(
-                ErrorKind::InvalidInput,
-                "Drawer discovery is only available at the WardrobeEngine boundary",
-            )),
-            Command::Upsert {
-                drawer_name,
-                payload,
-            } => Self::upsert_in_database(database, &drawer_name, payload, context)
-                .map(CommandResult::Pointer),
-            Command::FindAll { drawer_name } => {
-                Self::find_all_in_database(database, &drawer_name, context)
-                    .map(CommandResult::Records)
-            }
-            Command::FindById { pointer } => {
-                Self::find_by_id_in_database(database, &pointer, context).map(CommandResult::Record)
-            }
-            Command::FindByFilter {
-                drawer_name,
-                filter,
-                modifiers,
-            } => {
-                Self::find_by_filter_in_database(database, &drawer_name, filter, modifiers, context)
-                    .map(CommandResult::Records)
-            }
-            Command::Count {
-                drawer_name,
-                filter,
-                modifiers,
-            } => Self::count_in_database(database, &drawer_name, filter, modifiers, context)
-                .map(CommandResult::Count),
-            Command::Delete { pointer } => {
-                Self::delete_by_id_in_database(database, StorageLocator::Inline(pointer), context)
-                    .map(CommandResult::Deleted)
-            }
-            Command::Vacuum { drawer_name } => {
-                Self::vacuum_drawer_in_database(database, &drawer_name, context)
-                    .map(CommandResult::Vacuumed)
-            }
-            Command::Migrate { drawer_name } => {
-                Self::migrate_drawer_in_database(database, &drawer_name, context)
-                    .map(CommandResult::Migrated)
-            }
-            Command::DefineDatabase { .. }
-            | Command::DefineSchema { .. }
-            | Command::DefineDrawer { .. }
-            | Command::DefineTenantRoute { .. }
-            | Command::ExecuteForTenant { .. }
-            | Command::Execute { .. }
-            | Command::ExecuteInScope { .. } => Err(Error::new(
-                ErrorKind::InvalidInput,
-                "Catalog and scoped command routing is only available at the WardrobeEngine boundary",
-            )),
-        }
+        command_dispatch::execute_command(self, command)
     }
 
     fn database_for_route(&self, route: DatabaseRoute) -> Result<Arc<RwLock<Database>>> {
@@ -608,61 +486,6 @@ impl WardrobeEngine {
                 "Failed to acquire routed database handle",
             )
         })
-    }
-
-    fn validate_command_against_registry(
-        &self,
-        database: &str,
-        schema: &str,
-        command: &Command,
-    ) -> Result<()> {
-        let registry = Self::read_lock(&self.registry)?;
-        if registry.is_empty() {
-            return Ok(());
-        }
-
-        let Some(drawer_name) = Self::command_drawer_name(command) else {
-            return Ok(());
-        };
-
-        if registry.contains_drawer(database, schema, &drawer_name) {
-            return Ok(());
-        }
-
-        Err(Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "InvalidLocation: drawer '{}' is not registered for database '{}' schema '{}'",
-                drawer_name, database, schema
-            ),
-        ))
-    }
-
-    fn command_drawer_name(command: &Command) -> Option<String> {
-        match command {
-            Command::Upsert { drawer_name, .. }
-            | Command::FindAll { drawer_name }
-            | Command::FindByFilter { drawer_name, .. }
-            | Command::Count { drawer_name, .. }
-            | Command::Vacuum { drawer_name }
-            | Command::Migrate { drawer_name } => Some(drawer_name.clone()),
-            Command::FindById { pointer } | Command::Delete { pointer } => {
-                pointer::try_parse_pointer(pointer).map(|(drawer_name, _)| drawer_name)
-            }
-            Command::Execute { command, .. } | Command::ExecuteInScope { command, .. } => {
-                Self::command_drawer_name(command)
-            }
-            Command::DefineDatabase { .. }
-            | Command::DefineSchema { .. }
-            | Command::DefineDrawer { .. }
-            | Command::DefineTenantRoute { .. }
-            | Command::ExecuteForTenant { .. }
-            | Command::ShowTenants
-            | Command::ShowDatabases
-            | Command::VerifyWal { .. }
-            | Command::ShowSchemas { .. }
-            | Command::ShowDrawers { .. } => None,
-        }
     }
 
     fn read_lock<T>(lock: &RwLock<T>) -> Result<RwLockReadGuard<'_, T>> {
@@ -1990,5 +1813,160 @@ impl WardrobeEngine {
         }
 
         Ok(record)
+    }
+}
+
+impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
+    fn append_boundary_wal(&self, command: &Command) -> Result<()> {
+        Self::append_wal_for_command(&self.root_directory, None, command)
+    }
+
+    fn show_tenants(&self) -> Result<Vec<String>> {
+        WardrobeEngine::show_tenants(self)
+    }
+
+    fn show_databases(&self) -> Result<Vec<StorageInventory>> {
+        WardrobeEngine::show_databases(self)
+    }
+
+    fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
+        WardrobeEngine::verify_wal(self, database_name)
+    }
+
+    fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
+        WardrobeEngine::show_schemas(self, database_name)
+    }
+
+    fn show_drawers(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> Result<Vec<StorageInventory>> {
+        WardrobeEngine::show_drawers(self, database_name, schema_name)
+    }
+
+    fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
+        WardrobeEngine::create_database(self, database_name)
+    }
+
+    fn create_schema(&self, database_name: &str, schema_name: &str) -> Result<StorageInventory> {
+        WardrobeEngine::create_schema(self, database_name, schema_name)
+    }
+
+    fn create_drawer(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+        drawer_name: &str,
+    ) -> Result<StorageInventory> {
+        WardrobeEngine::create_drawer(self, database_name, schema_name, drawer_name)
+    }
+
+    fn register_tenant_route(
+        &self,
+        tenant_id: &str,
+        database_name: &str,
+        location: &str,
+    ) -> Result<StorageInventory> {
+        WardrobeEngine::register_tenant_route(self, tenant_id, database_name, location)
+    }
+
+    fn execute_for_tenant(
+        &self,
+        tenant_id: &str,
+        database_name: &str,
+        schema_name: &str,
+        command: Command,
+    ) -> Result<CommandResult> {
+        WardrobeEngine::execute_for_tenant(self, tenant_id, database_name, schema_name, command)
+    }
+
+    fn execute(&self, coordinate: StorageCoordinate, command: Command) -> Result<CommandResult> {
+        WardrobeEngine::execute(self, coordinate, command)
+    }
+
+    fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult> {
+        WardrobeEngine::execute_in_scope(self, scope, command)
+    }
+
+    fn execute_local(&self, command: Command) -> Result<CommandResult> {
+        command_dispatch::execute_in_database::<Self>(&self.database_core, command, None)
+    }
+}
+
+impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
+    fn upsert_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<String> {
+        WardrobeEngine::upsert_in_database(database, drawer_name, payload, context)
+    }
+
+    fn find_all_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<Value>> {
+        WardrobeEngine::find_all_in_database(database, drawer_name, context)
+    }
+
+    fn find_by_id_in_database(
+        database: &RwLock<Database>,
+        pointer: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<Option<Value>> {
+        WardrobeEngine::find_by_id_in_database(database, pointer, context)
+    }
+
+    fn find_by_filter_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
+        modifiers: Option<QueryModifiers>,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<Value>> {
+        WardrobeEngine::find_by_filter_in_database(
+            database,
+            drawer_name,
+            filter,
+            modifiers,
+            context,
+        )
+    }
+
+    fn count_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Option<Value>,
+        modifiers: Option<QueryModifiers>,
+        context: ExecutionContext<'_>,
+    ) -> Result<usize> {
+        WardrobeEngine::count_in_database(database, drawer_name, filter, modifiers, context)
+    }
+
+    fn delete_by_id_in_database(
+        database: &RwLock<Database>,
+        locator: StorageLocator,
+        context: ExecutionContext<'_>,
+    ) -> Result<bool> {
+        WardrobeEngine::delete_by_id_in_database(database, locator, context)
+    }
+
+    fn vacuum_drawer_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<VacuumReport> {
+        WardrobeEngine::vacuum_drawer_in_database(database, drawer_name, context)
+    }
+
+    fn migrate_drawer_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<VacuumReport> {
+        WardrobeEngine::migrate_drawer_in_database(database, drawer_name, context)
     }
 }
