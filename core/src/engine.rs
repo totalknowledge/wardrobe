@@ -4,6 +4,7 @@ use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
+use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use crate::wrdb_lib::wal::{WalJournal, WalOperation as DurableWalOperation, WalVerification};
 use serde::{Deserialize, Serialize};
@@ -23,26 +24,6 @@ pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 pub use crate::wrdb_lib::storage::{
     StorageCoordinate, StorageInventory, StorageLocator, StorageScope,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DatabaseRoute {
-    Coordinate(StorageCoordinate),
-    Database(String),
-    Schema { database: String, schema: String },
-}
-
-#[derive(Clone, Copy)]
-struct ExecutionContext<'a> {
-    drawer_namespace: Option<&'a str>,
-}
-
-impl ExecutionContext<'_> {
-    fn root() -> Self {
-        Self {
-            drawer_namespace: None,
-        }
-    }
-}
 
 enum SortableValue<'a> {
     Bool(bool),
@@ -397,18 +378,18 @@ impl WardrobeEngine {
         command: Command,
     ) -> Result<CommandResult> {
         self.validate_command_against_registry(
-            &format!("{}/{}", coordinate.tenant(), coordinate.database()),
+            &routing::coordinate_catalog_database(&coordinate),
             coordinate.schema(),
             &command,
         )?;
-        let database_path = coordinate.path_under(&self.root_directory);
+        let database_path = routing::coordinate_database_path(&self.root_directory, &coordinate)?;
         Self::append_wal_for_command(&database_path, Some(coordinate.schema()), &command)?;
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
         Self::execute_in_database(&database, command, None)
     }
 
     pub fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult> {
-        scope.validate()?;
+        routing::validate_scope(&scope)?;
         if let StorageScope::Schema { database, schema } = &scope {
             self.validate_command_against_registry(database, schema, &command)?;
         }
@@ -420,17 +401,14 @@ impl WardrobeEngine {
                 schema,
             } => self.execute_for_tenant(&tenant_id, &database, &schema, command),
             StorageScope::Database { database } => {
-                let database_path =
-                    catalog_validation::database_path_from_name(&self.root_directory, &database)?;
+                let database_path = routing::database_scope_path(&self.root_directory, &database)?;
                 Self::append_wal_for_command(&database_path, None, &command)?;
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
                 Self::execute_in_database(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
-                let database_path = catalog_validation::database_path_from_name(
-                    &self.root_directory,
-                    &format!("{database}/{schema}"),
-                )?;
+                let database_path =
+                    routing::schema_scope_path(&self.root_directory, &database, &schema)?;
                 Self::append_wal_for_command(&database_path, Some(&schema), &command)?;
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
@@ -778,21 +756,7 @@ impl WardrobeEngine {
     }
 
     fn database_for_route(&self, route: DatabaseRoute) -> Result<Arc<RwLock<Database>>> {
-        let storage_path = match &route {
-            DatabaseRoute::Coordinate(coordinate) => {
-                coordinate.validate()?;
-                coordinate.path_under(&self.root_directory)
-            }
-            DatabaseRoute::Database(database) => {
-                catalog_validation::validate_storage_coordinate_component("database", database)?;
-                self.root_directory.join(database)
-            }
-            DatabaseRoute::Schema { database, schema } => {
-                catalog_validation::validate_storage_coordinate_component("database", database)?;
-                catalog_validation::validate_storage_coordinate_component("schema", schema)?;
-                self.root_directory.join(database).join(schema)
-            }
-        };
+        let storage_path = route.storage_path(&self.root_directory)?;
 
         if let Some(database) = Self::read_lock(&self.routed_databases)?
             .get(&route)
@@ -1610,7 +1574,7 @@ impl WardrobeEngine {
         if let Value::Object(map) = payload {
             let target_primary_key = "_id";
             let physical_drawer_name =
-                pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
+                routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
 
             let record_key = match map.get(target_primary_key).and_then(|v| v.as_str()) {
                 Some(existing_id) => {
@@ -1665,7 +1629,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> std::io::Result<Vec<Value>> {
         let physical_drawer_name =
-            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let mut records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1698,7 +1662,7 @@ impl WardrobeEngine {
     ) -> Result<Vec<Value>> {
         let filter_map = Self::filter_map(&filter)?;
         let physical_drawer_name =
-            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
 
         let mut records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
@@ -1733,7 +1697,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<usize> {
         let physical_drawer_name =
-            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let Some(filter) = filter else {
             let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
                 database_core,
@@ -1773,7 +1737,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<VacuumReport> {
         let physical_drawer_name =
-            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1796,7 +1760,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<VacuumReport> {
         let physical_drawer_name =
-            pointer::scoped_drawer_name(drawer_name, context.drawer_namespace);
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
@@ -1818,7 +1782,7 @@ impl WardrobeEngine {
         pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<Option<Value>> {
-        let physical_pointer = pointer::scoped_pointer(pointer, context.drawer_namespace);
+        let physical_pointer = routing::scoped_pointer(pointer, context.drawer_namespace);
         let (drawer_name, record_key) = pointer::parse_pointer(&physical_pointer)?;
 
         if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
@@ -1889,7 +1853,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
         let mut active_delete_path = HashSet::new();
-        let physical_pointer = pointer::scoped_pointer(pointer, context.drawer_namespace);
+        let physical_pointer = routing::scoped_pointer(pointer, context.drawer_namespace);
         Self::delete_by_id_inner(
             database_core,
             &physical_pointer,
@@ -2055,7 +2019,7 @@ impl WardrobeEngine {
             )?;
 
             let physical_target_drawer =
-                pointer::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
+                routing::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
             for record in child_records {
                 if let Some(child_key) = record.get("_id").and_then(|value| value.as_str()) {
                     pointers.push(pointer::format_pointer(&physical_target_drawer, child_key));
@@ -2090,7 +2054,7 @@ impl WardrobeEngine {
 
             for child_record in child_records {
                 let physical_target_drawer =
-                    pointer::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
+                    routing::scoped_drawer_name(&rule.target_drawer, context.drawer_namespace);
                 let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
                     database_core,
                     &physical_target_drawer,
@@ -2127,7 +2091,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
         let physical_target_drawer =
-            pointer::scoped_drawer_name(target_drawer, context.drawer_namespace);
+            routing::scoped_drawer_name(target_drawer, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_target_drawer,
@@ -2723,7 +2687,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
         let physical_target_drawer =
-            pointer::scoped_drawer_name(target_drawer, context.drawer_namespace);
+            routing::scoped_drawer_name(target_drawer, context.drawer_namespace);
         let mut child_records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_target_drawer,
