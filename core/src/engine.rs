@@ -4,20 +4,17 @@ use crate::wrdb_lib::command_dispatch;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
+use crate::wrdb_lib::engine_wal;
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
-use crate::wrdb_lib::wal::{WalJournal, WalOperation as DurableWalOperation, WalVerification};
-use serde::{Deserialize, Serialize};
+use crate::wrdb_lib::wal::WalVerification;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::io::{Error, ErrorKind, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub use crate::wrdb_lib::command::{Command, CommandResult};
@@ -49,40 +46,6 @@ enum RelationTarget {
     SelfReference,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum WalOperation {
-    Upsert {
-        drawer_name: String,
-        payload: Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        drawer_namespace: Option<String>,
-    },
-    DeleteById {
-        pointer: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        drawer_namespace: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-enum WalRecord {
-    Begin {
-        tx_id: String,
-        operation: WalOperation,
-        #[serde(default)]
-        ts: u64,
-    },
-
-    Commit {
-        tx_id: String,
-    },
-    Abort {
-        tx_id: String,
-    },
-}
-
 pub struct WardrobeEngine {
     root_directory: PathBuf,
     registry: RwLock<CatalogRegistry>,
@@ -112,7 +75,7 @@ impl WardrobeEngine {
         let database_core =
             Database::initialize_with_cache_limit(&root_directory, max_cached_drawers)?;
         let database_core = RwLock::new(database_core);
-        Self::recover_database(&database_core)?;
+        engine_wal::recover_database::<Self>(&database_core)?;
         Ok(Self {
             root_directory,
             registry: RwLock::new(registry),
@@ -223,51 +186,7 @@ impl WardrobeEngine {
     }
 
     pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
-        let database_path = match database_name {
-            Some(database_name) => {
-                catalog_validation::database_path_from_name(&self.root_directory, database_name)?
-            }
-            None => self.root_directory.clone(),
-        };
-        WalJournal::at_database_path(database_path).verify()
-    }
-
-    fn append_wal_for_command(
-        database_path: &Path,
-        schema_name: Option<&str>,
-        command: &Command,
-    ) -> Result<()> {
-        let Some(operation) = Self::wal_operation(command) else {
-            return Ok(());
-        };
-
-        let scope = schema_name
-            .map(|schema_name| format!("schema:{schema_name}"))
-            .unwrap_or_else(|| "database".to_string());
-        let payload = serde_json::to_vec(command).map_err(|error| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Failed to serialize WAL command payload: {error}"),
-            )
-        })?;
-
-        WalJournal::at_database_path(database_path).append(operation, &scope, &payload)?;
-        Ok(())
-    }
-
-    fn wal_operation(command: &Command) -> Option<DurableWalOperation> {
-        match command {
-            Command::Upsert { .. } => Some(DurableWalOperation::Upsert),
-            Command::Delete { .. } => Some(DurableWalOperation::Delete),
-            Command::Vacuum { .. } | Command::Migrate { .. } => {
-                Some(DurableWalOperation::Maintenance)
-            }
-            Command::DefineDatabase { .. }
-            | Command::DefineSchema { .. }
-            | Command::DefineDrawer { .. }
-            | Command::DefineTenantRoute { .. } => Some(DurableWalOperation::Define),
-            _ => None,
-        }
+        engine_wal::verify(&self.root_directory, database_name)
     }
 
     pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
@@ -309,7 +228,7 @@ impl WardrobeEngine {
             &command,
         )?;
         let database_path = routing::coordinate_database_path(&self.root_directory, &coordinate)?;
-        Self::append_wal_for_command(&database_path, Some(coordinate.schema()), &command)?;
+        engine_wal::append_command(&database_path, Some(coordinate.schema()), &command)?;
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
         command_dispatch::execute_in_database::<Self>(&database, command, None)
     }
@@ -331,20 +250,20 @@ impl WardrobeEngine {
             } => self.execute_for_tenant(&tenant_id, &database, &schema, command),
             StorageScope::Database { database } => {
                 let database_path = routing::database_scope_path(&self.root_directory, &database)?;
-                Self::append_wal_for_command(&database_path, None, &command)?;
+                engine_wal::append_command(&database_path, None, &command)?;
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
                 command_dispatch::execute_in_database::<Self>(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
                 let database_path =
                     routing::schema_scope_path(&self.root_directory, &database, &schema)?;
-                Self::append_wal_for_command(&database_path, Some(&schema), &command)?;
+                engine_wal::append_command(&database_path, Some(&schema), &command)?;
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
                 command_dispatch::execute_in_database::<Self>(&database, command, None)
             }
             StorageScope::Drawer { namespace } => {
-                Self::append_wal_for_command(&self.root_directory, Some(&namespace), &command)?;
+                engine_wal::append_command(&self.root_directory, Some(&namespace), &command)?;
                 command_dispatch::execute_in_database::<Self>(
                     &self.database_core,
                     command,
@@ -359,7 +278,7 @@ impl WardrobeEngine {
             &self.root_directory,
             &self.registry,
             database_name,
-            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+            |command| engine_wal::append_command(&self.root_directory, None, command),
         )
     }
 
@@ -373,7 +292,7 @@ impl WardrobeEngine {
             &self.registry,
             database_name,
             schema_name,
-            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+            |command| engine_wal::append_command(&self.root_directory, None, command),
         )
     }
 
@@ -389,7 +308,7 @@ impl WardrobeEngine {
             database_name,
             schema_name,
             drawer_name,
-            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+            |command| engine_wal::append_command(&self.root_directory, None, command),
         )
     }
 
@@ -405,7 +324,7 @@ impl WardrobeEngine {
             tenant_id,
             database_name,
             location,
-            |command| Self::append_wal_for_command(&self.root_directory, None, command),
+            |command| engine_wal::append_command(&self.root_directory, None, command),
         )
     }
 
@@ -448,12 +367,12 @@ impl WardrobeEngine {
         let route_path =
             catalog_validation::catalog_location_path(&self.root_directory, &tenant_route.location);
         let schema_path = routing::tenant_schema_path(&route_path, schema_name);
-        Self::append_wal_for_command(&schema_path, Some(schema_name), &command)?;
+        engine_wal::append_command(&schema_path, Some(schema_name), &command)?;
         let routed_database = RwLock::new(Database::initialize_with_cache_limit(
             &schema_path,
             self.max_cached_drawers,
         )?);
-        Self::recover_database(&routed_database)?;
+        engine_wal::recover_database::<Self>(&routed_database)?;
         command_dispatch::execute_in_database::<Self>(&routed_database, command, None)
     }
 
@@ -476,7 +395,7 @@ impl WardrobeEngine {
             let database =
                 Database::initialize_with_cache_limit(storage_path, self.max_cached_drawers)?;
             let database = Arc::new(RwLock::new(database));
-            Self::recover_database(&database)?;
+            engine_wal::recover_database::<Self>(&database)?;
             routed_databases.insert(route.clone(), database);
         }
 
@@ -528,209 +447,20 @@ impl WardrobeEngine {
         database.active_drawer_or_load_from_disk(drawer_name, primary_key, unique_constraints)
     }
 
-    fn wal_path(database_core: &RwLock<Database>) -> Result<PathBuf> {
-        Ok(Self::read_lock(database_core)?
-            .storage_directory_path()
-            .join("wardrobe.wal"))
-    }
-
-    fn append_wal_record(database_core: &RwLock<Database>, record: &WalRecord) -> Result<()> {
-        let wal_path = Self::wal_path(database_core)?;
-        let mut wal_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(wal_path)?;
-        let serialized = serde_json::to_vec(record)?;
-        wal_file.write_all(&serialized)?;
-        wal_file.write_all(b"\n")?;
-        wal_file.sync_all()?;
-        let bytes_written = serialized.len() as u64 + 1;
-        {
-            let db = Self::read_lock(database_core)?;
-            db.record_wal_activity(bytes_written, 1);
-        }
-        Self::check_wal_thresholds(database_core)?;
-        Ok(())
-    }
-
-    fn recover_database(database_core: &RwLock<Database>) -> Result<()> {
-        let wal_path = Self::wal_path(database_core)?;
-        if !wal_path.exists() {
-            return Ok(());
-        }
-
-        let checkpoint_path = wal_path.with_extension("wal.meta");
-        let mut last_checkpoint: u64 = 0;
-        let mut checkpoint_found = false;
-        if checkpoint_path.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&checkpoint_path) {
-                if let Ok(value) = serde_json::from_str::<Value>(&contents) {
-                    last_checkpoint = value
-                        .get("last_checkpoint")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    checkpoint_found = true;
-                }
-            }
-        }
-
-        let contents = std::fs::read_to_string(wal_path)?;
-        let mut begun_transactions = Vec::new();
-        let mut closed_transactions = HashSet::new();
-
-        for line in contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            let record: WalRecord = serde_json::from_str(line).map_err(|error| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Failed to parse WAL record during recovery: {error}"),
-                )
-            })?;
-
-            match record {
-                WalRecord::Begin {
-                    tx_id,
-                    operation,
-                    ts,
-                } => {
-                    if checkpoint_found && ts <= last_checkpoint {
-                        continue;
-                    }
-                    begun_transactions.push((tx_id, operation));
-                }
-                WalRecord::Commit { tx_id } => {
-                    closed_transactions.insert(tx_id);
-                }
-                WalRecord::Abort { tx_id } => {
-                    closed_transactions.insert(tx_id);
-                }
-            }
-        }
-
-        for (tx_id, operation) in begun_transactions {
-            if closed_transactions.contains(&tx_id) {
-                continue;
-            }
-
-            Self::replay_wal_operation(database_core, &operation)?;
-            Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
-        }
-
-        Ok(())
-    }
-
-    fn replay_wal_operation(
-        database_core: &RwLock<Database>,
-        operation: &WalOperation,
-    ) -> Result<()> {
-        match operation {
-            WalOperation::Upsert {
-                drawer_name,
-                payload,
-                drawer_namespace,
-            } => {
-                let context = ExecutionContext {
-                    drawer_namespace: drawer_namespace.as_deref(),
-                };
-                Self::upsert_in_database_unlogged(
-                    database_core,
-                    drawer_name,
-                    payload.clone(),
-                    context,
-                )?;
-            }
-            WalOperation::DeleteById {
-                pointer,
-                drawer_namespace,
-            } => {
-                let context = ExecutionContext {
-                    drawer_namespace: drawer_namespace.as_deref(),
-                };
-                Self::delete_by_id_in_database_unlogged(database_core, pointer, context)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn check_wal_thresholds(database_core: &RwLock<Database>) -> Result<()> {
-        let (bytes, ops) = Self::read_lock(database_core)?.get_wal_counters();
-        let (threshold_bytes, threshold_ops) = Self::read_lock(database_core)?.wal_thresholds();
-        if bytes >= threshold_bytes || ops >= threshold_ops {
-            Self::flush_checkpoint(database_core)?;
-        }
-        Ok(())
-    }
-
-    fn flush_checkpoint(database_core: &RwLock<Database>) -> Result<()> {
-        let wal_path = Self::wal_path(database_core)?;
-        let wal_file = OpenOptions::new().write(true).open(&wal_path)?;
-        wal_file.sync_all()?;
-
-        let drawers = Self::read_lock(database_core)?.get_all_drawers();
-        for (_name, drawer) in drawers {
-            let mut guard = Self::write_lock(&drawer)?;
-            guard.checkpoint()?;
-        }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let checkpoint_path = wal_path.with_extension("wal.meta");
-        let checkpoint_body = serde_json::json!({"last_checkpoint": now});
-        let serialized = serde_json::to_vec(&checkpoint_body)?;
-        std::fs::write(&checkpoint_path, &serialized)?;
-        let meta_f = OpenOptions::new().write(true).open(&checkpoint_path)?;
-        meta_f.sync_all()?;
-
-        let wal_handle = OpenOptions::new().write(true).open(&wal_path)?;
-        wal_handle.set_len(0)?;
-        wal_handle.sync_all()?;
-
-        Self::read_lock(database_core)?.reset_wal_counters();
-
-        Ok(())
-    }
-
     fn upsert_in_database(
         database_core: &RwLock<Database>,
         drawer_name: &str,
         payload: Value,
         context: ExecutionContext<'_>,
     ) -> Result<String> {
-        let operation = WalOperation::Upsert {
-            drawer_name: drawer_name.to_string(),
-            payload: payload.clone(),
-            drawer_namespace: context.drawer_namespace.map(str::to_string),
-        };
-        let tx_id = Uuid::new_v4().simple().to_string();
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Self::append_wal_record(
+        let wal_payload = payload.clone();
+        engine_wal::run_upsert_transaction(
             database_core,
-            &WalRecord::Begin {
-                tx_id: tx_id.clone(),
-                operation,
-                ts: now,
-            },
-        )?;
-        let result =
-            Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context);
-
-        if result.is_ok() {
-            Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
-        } else {
-            let _ = Self::append_wal_record(database_core, &WalRecord::Abort { tx_id });
-        }
-
-        result
+            drawer_name,
+            &wal_payload,
+            context,
+            || Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context),
+        )
     }
 
     fn upsert_in_database_unlogged(
@@ -990,33 +720,9 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
         let pointer = pointer::locator_to_pointer(locator);
-        let operation = WalOperation::DeleteById {
-            pointer: pointer.clone(),
-            drawer_namespace: context.drawer_namespace.map(str::to_string),
-        };
-        let tx_id = Uuid::new_v4().simple().to_string();
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Self::append_wal_record(
-            database_core,
-            &WalRecord::Begin {
-                tx_id: tx_id.clone(),
-                operation,
-                ts: now,
-            },
-        )?;
-        let result = Self::delete_by_id_in_database_unlogged(database_core, &pointer, context);
-
-        if result.is_ok() {
-            Self::append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
-        } else {
-            let _ = Self::append_wal_record(database_core, &WalRecord::Abort { tx_id });
-        }
-
-        result
+        engine_wal::run_delete_transaction(database_core, &pointer, context, || {
+            Self::delete_by_id_in_database_unlogged(database_core, &pointer, context)
+        })
     }
 
     fn delete_by_id_in_database_unlogged(
@@ -1818,7 +1524,7 @@ impl WardrobeEngine {
 
 impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
     fn append_boundary_wal(&self, command: &Command) -> Result<()> {
-        Self::append_wal_for_command(&self.root_directory, None, command)
+        engine_wal::append_command(&self.root_directory, None, command)
     }
 
     fn show_tenants(&self) -> Result<Vec<String>> {
@@ -1968,5 +1674,26 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<VacuumReport> {
         WardrobeEngine::migrate_drawer_in_database(database, drawer_name, context)
+    }
+}
+
+impl engine_wal::WalReplayExecutor for WardrobeEngine {
+    fn replay_upsert(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<()> {
+        WardrobeEngine::upsert_in_database_unlogged(database_core, drawer_name, payload, context)
+            .map(|_| ())
+    }
+
+    fn replay_delete(
+        database_core: &RwLock<Database>,
+        pointer: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<()> {
+        WardrobeEngine::delete_by_id_in_database_unlogged(database_core, pointer, context)
+            .map(|_| ())
     }
 }

@@ -6,6 +6,7 @@ pub mod connection;
 pub mod database;
 pub(crate) mod discovery;
 pub mod drawer;
+pub(crate) mod engine_wal;
 pub(crate) mod pointer;
 pub mod protocol;
 pub(crate) mod query;
