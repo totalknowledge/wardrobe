@@ -1,8 +1,14 @@
-mod commands;
-mod services;
+pub mod commands;
+pub mod services;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    build_app()
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+pub fn build_app() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -18,6 +24,4 @@ pub fn run() {
             commands::wardrobe::wardrobe_test_database_access,
             commands::wardrobe::wardrobe_create_source_location
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }
