@@ -5,14 +5,15 @@ use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
 use crate::wrdb_lib::engine_wal;
+use crate::wrdb_lib::nested_decomposition;
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query;
 use crate::wrdb_lib::registry::CatalogRegistry;
-use crate::wrdb_lib::relationship::{self, DeleteAction, InverseDeleteRule, RelationTarget};
+use crate::wrdb_lib::relationship::{self, DeleteAction, InverseDeleteRule};
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::wal::WalVerification;
-use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind, Result};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -513,17 +514,28 @@ impl WardrobeEngine {
             )?;
             let mut relationship_constraints =
                 Self::read_lock(&drawer_handle)?.relationship_constraints();
-            Self::register_inline_relationship_aliases(
-                &drawer_handle,
+            nested_decomposition::register_inline_relationship_aliases(
                 &map,
                 &mut relationship_constraints,
+                |field_name, rule| {
+                    Self::write_lock(&drawer_handle)?
+                        .register_relationship_constraint(field_name, rule)
+                        .map_err(|error| Error::new(ErrorKind::InvalidData, error))
+                },
             )?;
-            let processed_map = Self::decompose_nested_objects(
-                database_core,
+            let processed_map = nested_decomposition::decompose_nested_objects(
                 map,
                 &physical_drawer_name,
                 &relationship_constraints,
                 context,
+                |drawer_name, value, child_context| {
+                    Self::upsert_in_database_unlogged(
+                        database_core,
+                        drawer_name,
+                        value,
+                        child_context,
+                    )
+                },
             )?;
 
             let mut full_record = processed_map;
@@ -1038,128 +1050,6 @@ impl WardrobeEngine {
         }
 
         changed
-    }
-
-    fn decompose_nested_objects(
-        database_core: &RwLock<Database>,
-        map: Map<String, Value>,
-        current_drawer_name: &str,
-        relationship_constraints: &BTreeMap<String, Value>,
-        context: ExecutionContext<'_>,
-    ) -> Result<Map<String, Value>> {
-        let mut continuous_map = Map::new();
-
-        for (key, value) in map {
-            let relation_target = relationship::relation_target_for_field(
-                &key,
-                current_drawer_name,
-                relationship_constraints,
-            );
-            let drawer_name = relationship::drawer_name_for_relation_target(
-                &relation_target,
-                &key,
-                current_drawer_name,
-            );
-            let processed_value = Self::decompose_relationship_value(
-                database_core,
-                &drawer_name,
-                value,
-                relation_target,
-                context,
-            )?;
-            continuous_map.insert(key, processed_value);
-        }
-
-        Ok(continuous_map)
-    }
-
-    fn register_inline_relationship_aliases(
-        drawer_handle: &Arc<RwLock<Drawer>>,
-        map: &Map<String, Value>,
-        relationship_constraints: &mut BTreeMap<String, Value>,
-    ) -> Result<()> {
-        let aliases = relationship::inline_relationship_aliases(map, relationship_constraints);
-
-        if aliases.is_empty() {
-            return Ok(());
-        }
-
-        let mut drawer = Self::write_lock(drawer_handle)?;
-        for (field_name, rule) in aliases {
-            drawer.register_relationship_constraint(&field_name, rule.clone())?;
-            relationship_constraints.insert(field_name, rule);
-        }
-
-        Ok(())
-    }
-
-    fn decompose_relationship_value(
-        database_core: &RwLock<Database>,
-        drawer_name: &str,
-        value: Value,
-        relation_target: RelationTarget,
-        context: ExecutionContext<'_>,
-    ) -> Result<Value> {
-        match value {
-            Value::Object(child_map) => {
-                if let Some(reference_id) = Self::id_only_reference(&child_map) {
-                    let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
-                        drawer_name,
-                        reference_id,
-                        context.drawer_namespace,
-                    );
-                    Ok(Value::String(normalized_pointer))
-                } else {
-                    let child_pointer = Self::upsert_in_database_unlogged(
-                        database_core,
-                        drawer_name,
-                        Value::Object(child_map),
-                        context,
-                    )?;
-                    Ok(Value::String(child_pointer))
-                }
-            }
-            Value::Array(values) => values
-                .into_iter()
-                .map(|item| {
-                    Self::decompose_relationship_value(
-                        database_core,
-                        drawer_name,
-                        item,
-                        relation_target.clone(),
-                        context,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()
-                .map(Value::Array),
-            Value::String(pointer) if pointer::is_pointer(&pointer) => Ok(Value::String(
-                pointer::normalize_reference_pointer_for_namespace(
-                    drawer_name,
-                    &pointer,
-                    context.drawer_namespace,
-                ),
-            )),
-            Value::String(reference_id)
-                if relationship::should_normalize_plain_string(&relation_target) =>
-            {
-                Ok(Value::String(
-                    pointer::normalize_reference_pointer_for_namespace(
-                        drawer_name,
-                        &reference_id,
-                        context.drawer_namespace,
-                    ),
-                ))
-            }
-            other => Ok(other),
-        }
-    }
-
-    fn id_only_reference(map: &Map<String, Value>) -> Option<&str> {
-        if map.len() == 1 {
-            map.get("_id").and_then(|value| value.as_str())
-        } else {
-            None
-        }
     }
 
     fn collect_cascade_pointers(record: &Value, cascade_fields: &[String]) -> Vec<String> {
