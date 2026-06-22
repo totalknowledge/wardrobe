@@ -313,3 +313,5 @@ cargo test --workspace
 For a coverage summary, install `cargo-llvm-cov` and run:
 
 ```text
+cargo llvm-cov --workspace
+```

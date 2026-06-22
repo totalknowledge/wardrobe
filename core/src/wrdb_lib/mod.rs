@@ -2,6 +2,7 @@ pub(crate) mod catalog_validation;
 pub(crate) mod command;
 pub mod connection;
 pub mod database;
+pub(crate) mod discovery;
 pub mod drawer;
 pub(crate) mod pointer;
 pub mod protocol;
