@@ -40,6 +40,33 @@ fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
 }
 
 #[test]
+fn us_071_reader_reuses_handle_for_successive_reads_and_closes_cleanly() {
+    let file_path = temp_file_path("persistent_reader_successive_reads");
+    let mut file = fs::File::create(&file_path).expect("file should create");
+    writeln!(file, r#"{{"_id":"@gem:fire","element":"Fire"}}"#).expect("write should succeed");
+    writeln!(file, r#"{{"_id":"@gem:water","element":"Water"}}"#).expect("write should succeed");
+    file.sync_all().expect("sync should succeed");
+
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let first_raw = reader
+        .read_raw_bytes_at_offset(0)
+        .expect("first raw read should succeed")
+        .expect("first record should exist");
+    let first = reader
+        .read_record_at_offset(0)
+        .expect("first read should succeed")
+        .expect("first record should exist");
+    let second = reader
+        .read_record_at_offset(first_raw.len() as u64)
+        .expect("second read should succeed")
+        .expect("second record should exist");
+
+    assert_eq!(first["element"], "Fire");
+    assert_eq!(second["element"], "Water");
+    reader.close().expect("reader should close cleanly");
+}
+
+#[test]
 fn stream_with_offsets_reports_each_line_offset() {
     let file_path = temp_file_path("reader_stream_with_offsets");
     let mut file = fs::File::create(&file_path).expect("file should create");
