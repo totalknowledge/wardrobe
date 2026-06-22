@@ -8,6 +8,7 @@ use crate::wrdb_lib::engine_wal;
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query;
 use crate::wrdb_lib::registry::CatalogRegistry;
+use crate::wrdb_lib::relationship::{self, DeleteAction, InverseDeleteRule, RelationTarget};
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::wal::WalVerification;
 use serde_json::{Map, Value};
@@ -22,29 +23,6 @@ pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 pub use crate::wrdb_lib::storage::{
     StorageCoordinate, StorageInventory, StorageLocator, StorageScope,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeleteAction {
-    Cascade,
-    Restrict,
-    SetNull,
-}
-
-#[derive(Clone, Debug)]
-struct InverseDeleteRule {
-    field_name: String,
-    action: DeleteAction,
-    target_drawer: String,
-    mapped_by: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RelationTarget {
-    Inferred(String),
-    Static(String),
-    Polymorphic,
-    SelfReference,
-}
 
 pub struct WardrobeEngine {
     root_directory: PathBuf,
@@ -814,7 +792,7 @@ impl WardrobeEngine {
             (
                 drawer.find_by_primary_key_with_migration(&record_key)?,
                 drawer.cascade_delete_fields(),
-                Self::inverse_delete_rules(
+                relationship::inverse_delete_rules(
                     drawer.delete_rules(),
                     drawer.relationship_constraints(),
                 ),
@@ -869,28 +847,6 @@ impl WardrobeEngine {
         active_delete_path.remove(pointer);
 
         Ok(deleted_record.is_some())
-    }
-
-    fn inverse_delete_rules(
-        delete_rules: BTreeMap<String, Value>,
-        relationship_constraints: BTreeMap<String, Value>,
-    ) -> Vec<InverseDeleteRule> {
-        delete_rules
-            .into_iter()
-            .filter_map(|(field_name, rule)| {
-                let action = Self::delete_rule_action(&rule)?;
-                let relationship_rule = relationship_constraints.get(&field_name)?;
-                let target_drawer = Self::relationship_target_drawer(relationship_rule)?;
-                let mapped_by = Self::relationship_mapped_by(relationship_rule)?;
-
-                Some(InverseDeleteRule {
-                    field_name,
-                    action,
-                    target_drawer: target_drawer.to_string(),
-                    mapped_by: mapped_by.to_string(),
-                })
-            })
-            .collect()
     }
 
     fn evaluate_restrict_delete_rules(
@@ -1084,22 +1040,6 @@ impl WardrobeEngine {
         changed
     }
 
-    fn delete_rule_action(rule: &Value) -> Option<DeleteAction> {
-        let action = rule
-            .as_str()
-            .or_else(|| rule.get("action").and_then(|action| action.as_str()))?;
-
-        if action.eq_ignore_ascii_case("Cascade") {
-            Some(DeleteAction::Cascade)
-        } else if action.eq_ignore_ascii_case("Restrict") {
-            Some(DeleteAction::Restrict)
-        } else if action.eq_ignore_ascii_case("SetNull") {
-            Some(DeleteAction::SetNull)
-        } else {
-            None
-        }
-    }
-
     fn decompose_nested_objects(
         database_core: &RwLock<Database>,
         map: Map<String, Value>,
@@ -1110,13 +1050,16 @@ impl WardrobeEngine {
         let mut continuous_map = Map::new();
 
         for (key, value) in map {
-            let relation_target = Self::relation_target_for_field(
+            let relation_target = relationship::relation_target_for_field(
                 &key,
                 current_drawer_name,
                 relationship_constraints,
             );
-            let drawer_name =
-                Self::drawer_name_for_relation_target(&relation_target, &key, current_drawer_name);
+            let drawer_name = relationship::drawer_name_for_relation_target(
+                &relation_target,
+                &key,
+                current_drawer_name,
+            );
             let processed_value = Self::decompose_relationship_value(
                 database_core,
                 &drawer_name,
@@ -1135,25 +1078,7 @@ impl WardrobeEngine {
         map: &Map<String, Value>,
         relationship_constraints: &mut BTreeMap<String, Value>,
     ) -> Result<()> {
-        let aliases = map
-            .iter()
-            .filter(|(field_name, _)| field_name.as_str() != "_id")
-            .filter(|(field_name, _)| !relationship_constraints.contains_key(field_name.as_str()))
-            .filter_map(|(field_name, value)| {
-                let drawer_names = pointer::inline_pointer_drawer_names(value);
-                if drawer_names.is_empty() {
-                    return None;
-                }
-
-                Some((
-                    field_name.clone(),
-                    serde_json::json!({
-                        "type": "polymorphic",
-                        "target_drawers": drawer_names
-                    }),
-                ))
-            })
-            .collect::<Vec<_>>();
+        let aliases = relationship::inline_relationship_aliases(map, relationship_constraints);
 
         if aliases.is_empty() {
             return Ok(());
@@ -1215,7 +1140,7 @@ impl WardrobeEngine {
                 ),
             )),
             Value::String(reference_id)
-                if Self::should_normalize_plain_string(&relation_target) =>
+                if relationship::should_normalize_plain_string(&relation_target) =>
             {
                 Ok(Value::String(
                     pointer::normalize_reference_pointer_for_namespace(
@@ -1235,72 +1160,6 @@ impl WardrobeEngine {
         } else {
             None
         }
-    }
-
-    fn relationship_drawer_name(field_name: &str) -> String {
-        if let Some(stem) = field_name.strip_suffix("ies") {
-            return format!("{}y", stem);
-        }
-
-        if field_name.ends_with('s')
-            && !field_name.ends_with("ss")
-            && !field_name.ends_with("us")
-            && field_name.len() > 1
-        {
-            return field_name[..field_name.len() - 1].to_string();
-        }
-
-        field_name.to_string()
-    }
-
-    fn relation_target_for_field(
-        field_name: &str,
-        current_drawer_name: &str,
-        relationship_constraints: &BTreeMap<String, Value>,
-    ) -> RelationTarget {
-        let Some(rule) = relationship_constraints.get(field_name) else {
-            return RelationTarget::Inferred(Self::relationship_drawer_name(field_name));
-        };
-
-        if Self::relationship_constraint_type(rule)
-            .is_some_and(|relationship_type| relationship_type.eq_ignore_ascii_case("polymorphic"))
-        {
-            return RelationTarget::Polymorphic;
-        }
-
-        let Some(target_drawer) = Self::relationship_target_drawer(rule) else {
-            return RelationTarget::Inferred(Self::relationship_drawer_name(field_name));
-        };
-
-        if target_drawer == current_drawer_name
-            || current_drawer_name
-                .strip_suffix(target_drawer)
-                .is_some_and(|prefix| prefix.ends_with('_'))
-        {
-            RelationTarget::SelfReference
-        } else {
-            RelationTarget::Static(target_drawer.to_string())
-        }
-    }
-
-    fn drawer_name_for_relation_target(
-        target: &RelationTarget,
-        field_name: &str,
-        current_drawer_name: &str,
-    ) -> String {
-        match target {
-            RelationTarget::Inferred(drawer_name) => drawer_name.clone(),
-            RelationTarget::Static(drawer_name) => drawer_name.clone(),
-            RelationTarget::SelfReference => current_drawer_name.to_string(),
-            RelationTarget::Polymorphic => Self::relationship_drawer_name(field_name),
-        }
-    }
-
-    fn should_normalize_plain_string(target: &RelationTarget) -> bool {
-        matches!(
-            target,
-            RelationTarget::Static(_) | RelationTarget::SelfReference
-        )
     }
 
     fn collect_cascade_pointers(record: &Value, cascade_fields: &[String]) -> Vec<String> {
@@ -1353,19 +1212,9 @@ impl WardrobeEngine {
                 return Ok(());
             };
 
-            Self::read_lock(&drawer)?
-                .relationship_constraints()
-                .into_iter()
-                .filter_map(|(field_name, rule)| {
-                    if Self::relationship_constraint_type(&rule) != Some("1:M") {
-                        return None;
-                    }
-
-                    let target_drawer = Self::relationship_target_drawer(&rule)?.to_string();
-                    let mapped_by = Self::relationship_mapped_by(&rule)?.to_string();
-                    Some((field_name, target_drawer, mapped_by))
-                })
-                .collect::<Vec<_>>()
+            relationship::virtual_relationships(
+                Self::read_lock(&drawer)?.relationship_constraints(),
+            )
         };
 
         if virtual_relationships.is_empty() {
@@ -1381,11 +1230,11 @@ impl WardrobeEngine {
             };
             let parent_pointer = pointer::format_pointer(drawer_name, parent_key);
 
-            for (field_name, target_drawer, mapped_by) in &virtual_relationships {
+            for relationship in &virtual_relationships {
                 let mut child_records = Self::virtual_relationship_children(
                     database_core,
-                    target_drawer,
-                    mapped_by,
+                    &relationship.target_drawer,
+                    &relationship.mapped_by,
                     &parent_pointer,
                     include_ids,
                     context,
@@ -1393,7 +1242,7 @@ impl WardrobeEngine {
                 if !include_ids {
                     Self::remove_root_ids(&mut child_records);
                 }
-                record_map.insert(field_name.clone(), Value::Array(child_records));
+                record_map.insert(relationship.field_name.clone(), Value::Array(child_records));
             }
         }
 
@@ -1435,18 +1284,6 @@ impl WardrobeEngine {
                 map.remove("_id");
             }
         }
-    }
-
-    fn relationship_constraint_type(rule: &Value) -> Option<&str> {
-        rule.get("type").and_then(|value| value.as_str())
-    }
-
-    fn relationship_target_drawer(rule: &Value) -> Option<&str> {
-        rule.get("target_drawer").and_then(|value| value.as_str())
-    }
-
-    fn relationship_mapped_by(rule: &Value) -> Option<&str> {
-        rule.get("mapped_by").and_then(|value| value.as_str())
     }
 
     fn hydrate_value(

@@ -13,6 +13,7 @@ pub(crate) mod query;
 pub mod reader;
 pub mod recycler;
 pub mod registry;
+pub(crate) mod relationship;
 pub(crate) mod routing;
 pub(crate) mod storage;
 pub mod storage_format;
