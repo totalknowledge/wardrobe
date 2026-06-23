@@ -307,62 +307,10 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                 Ok(())
             }
         }
-        "inspect" => {
-            if parts.len() < 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "inspect requires a drawer name",
-                ));
-            }
-            if client.requires_embedded_engine() {
-                let data_dir = match client.connection_target() {
-                    ConnectionTarget::EmbeddedPath(p) => p.clone(),
-                    _ => PathBuf::from("./wardrobe"),
-                };
-                let target = resolve_inspect_target(&data_dir, &parts[1..])?;
-                inspect_drawer_target(&target)
-            } else {
-                eprintln!("inspect is only available for embedded connections");
-                Ok(())
-            }
-        }
-        "records" => {
-            if parts.len() < 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "records requires a drawer name",
-                ));
-            }
-            let mut records = client
-                .find_all(&parts[1])
-                .map_err(|e| Error::new(ErrorKind::Other, format!("client error: {e}")))?;
-            if let Ok(raw) = serde_json::to_string(&records) {
-                eprintln!("DEBUG-RAW-RECORDS: {raw}");
-            }
-            pub_normalize_record_ids(&mut records);
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&records).map_err(|e| Error::new(
-                    ErrorKind::InvalidData,
-                    format!("JSON serialization error: {e}")
-                ))?
-            );
-            Ok(())
-        }
-        "find" | "get" | "query" => {
-            if parts.len() < 3 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("{} requires a drawer name and JSON filter", parts[0]),
-                ));
-            }
-            let filter = parse_json_arg(&parts[2], "query filter")?;
-            let mut records = client
-                .find_by_filter(&parts[1], filter, None)
-                .map_err(client_error)?;
-            pub_normalize_record_ids(&mut records);
-            print_json(&records, pretty)
-        }
+        "inspect" => run_inspect_command(client, parts, pretty),
+        "records" => run_records_command(client, parts, pretty, false),
+        "find" | "get" | "query" => run_records_command(client, parts, pretty, true),
+        "count" => run_count_command(client, parts, pretty),
         "upsert" | "insert" => run_upsert_command(client, parts),
         "create" => {
             if parts
@@ -386,25 +334,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             println!("deleted: {deleted}");
             Ok(())
         }
-        "delete" | "remove" => {
-            if parts.len() < 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("{} requires a pointer or <drawer> <json>", parts[0]),
-                ));
-            }
-            let pointer = if parts.len() == 2 {
-                parts[1].clone()
-            } else {
-                pointer_from_delete_payload(
-                    &parts[1],
-                    &parse_json_arg(&parts[2], "delete payload")?,
-                )?
-            };
-            let deleted = client.delete_by_id(&pointer).map_err(client_error)?;
-            println!("deleted: {deleted}");
-            Ok(())
-        }
+        "delete" | "remove" => run_delete_command(client, parts),
         "define" => run_define_command(client, parts, pretty),
         "create-db" => {
             if parts.len() < 2 {
@@ -489,6 +419,221 @@ fn run_upsert_command(client: &WardrobeClient, parts: &[String]) -> io::Result<(
     let pointer = client.upsert(&parts[1], payload).map_err(client_error)?;
     println!("{pointer}");
     Ok(())
+}
+
+fn run_count_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "count requires a drawer path",
+        ));
+    }
+
+    let filter = if parts.len() >= 3 {
+        Some(parse_json_arg(&parts[2], "count filter")?)
+    } else {
+        None
+    };
+    let count = client
+        .count(&parts[1], filter, None)
+        .map_err(client_error)?;
+    print_json(&count, pretty)
+}
+
+fn run_records_command(
+    client: &WardrobeClient,
+    parts: &[String],
+    pretty: bool,
+    require_filter: bool,
+) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} requires a drawer path", parts[0]),
+        ));
+    }
+    if require_filter && parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} requires a drawer path and JSON filter", parts[0]),
+        ));
+    }
+
+    let mut records = if parts.len() >= 3 {
+        let filter = parse_json_arg(&parts[2], "query filter")?;
+        client
+            .find_by_filter(&parts[1], filter, None)
+            .map_err(client_error)?
+    } else {
+        client.find_all(&parts[1]).map_err(client_error)?
+    };
+    pub_normalize_record_ids(&mut records);
+    print_json(&records, pretty)
+}
+
+#[derive(serde::Serialize)]
+struct DrawerInspectionMetrics {
+    path: String,
+    data_bytes: u64,
+    index_bytes: u64,
+    meta_bytes: u64,
+    total_bytes: u64,
+    record_count: usize,
+    register_file_count: usize,
+    tombstone_fragmentation_percent: Option<f64>,
+}
+
+fn run_inspect_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "inspect requires a drawer path",
+        ));
+    }
+    if !client.requires_embedded_engine() {
+        eprintln!("inspect is only available for embedded connections");
+        return Ok(());
+    }
+
+    let data_dir = embedded_data_dir(client);
+    let target = resolve_inspect_target(&data_dir, &parts[1..])?;
+    let metrics = inspect_drawer_metrics(client, &target)?;
+    print_json(&metrics, pretty)
+}
+
+fn inspect_drawer_metrics(
+    client: &WardrobeClient,
+    target: &InspectTarget,
+) -> io::Result<DrawerInspectionMetrics> {
+    let files = drawer_files(&target.data_dir, &target.drawer_name);
+    let data_bytes = file_size_or_zero(&files.data)?;
+    let index_bytes = file_size_or_zero(&files.index)?;
+    let meta_bytes = file_size_or_zero(&files.meta)?;
+    let total_bytes = data_bytes
+        .saturating_add(index_bytes)
+        .saturating_add(meta_bytes);
+    let register_file_count = [&files.data, &files.index, &files.meta]
+        .iter()
+        .filter(|path| path.is_file())
+        .count();
+    let record_count = client
+        .count(&target.label, None, None)
+        .map_err(client_error)?;
+
+    Ok(DrawerInspectionMetrics {
+        path: target.label.clone(),
+        data_bytes,
+        index_bytes,
+        meta_bytes,
+        total_bytes,
+        record_count,
+        register_file_count,
+        tombstone_fragmentation_percent: None,
+    })
+}
+
+fn file_size_or_zero(path: &Path) -> io::Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+enum DeleteTarget {
+    Id(String),
+    Filter(Value),
+}
+
+fn run_delete_command(client: &WardrobeClient, parts: &[String]) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{} requires a pointer or <path> <json_filter_or_id>",
+                parts[0]
+            ),
+        ));
+    }
+
+    if parts.len() == 2 {
+        let deleted = client.delete_by_id(&parts[1]).map_err(client_error)?;
+        println!("deleted: {deleted}");
+        return Ok(());
+    }
+
+    match parse_delete_target(&parts[2])? {
+        DeleteTarget::Id(record_id) => {
+            let pointer = pointer_from_record_id(&parts[1], &record_id);
+            let deleted = client.delete_by_id(&pointer).map_err(client_error)?;
+            println!("deleted: {deleted}");
+        }
+        DeleteTarget::Filter(filter) => {
+            let (matched, deleted) = delete_by_filter(client, &parts[1], filter)?;
+            println!("matched: {matched}");
+            println!("deleted: {deleted}");
+        }
+    }
+    Ok(())
+}
+
+fn parse_delete_target(raw: &str) -> io::Result<DeleteTarget> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"') {
+        let payload = parse_json_arg(raw, "delete filter or id")?;
+        match payload {
+            Value::String(record_id) => Ok(DeleteTarget::Id(record_id)),
+            Value::Object(map) => {
+                if map.len() == 1 {
+                    if let Some(Value::String(record_id)) = map.get("_id") {
+                        return Ok(DeleteTarget::Id(record_id.clone()));
+                    }
+                }
+                Ok(DeleteTarget::Filter(Value::Object(map)))
+            }
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "delete target must be a structural ID string or JSON object filter",
+            )),
+        }
+    } else {
+        Ok(DeleteTarget::Id(trimmed.to_string()))
+    }
+}
+
+fn delete_by_filter(
+    client: &WardrobeClient,
+    drawer_name: &str,
+    filter: Value,
+) -> io::Result<(usize, usize)> {
+    let records = client
+        .find_by_filter(drawer_name, filter, None)
+        .map_err(client_error)?;
+    let matched = records.len();
+    let mut deleted = 0;
+
+    for record in records {
+        let record_id = record_id_for_delete(&record)?;
+        let pointer = pointer_from_record_id(drawer_name, &record_id);
+        if client.delete_by_id(&pointer).map_err(client_error)? {
+            deleted += 1;
+        }
+    }
+
+    Ok((matched, deleted))
+}
+
+fn record_id_for_delete(record: &Value) -> io::Result<String> {
+    record
+        .get("_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "record matched for deletion did not include a string _id",
+            )
+        })
 }
 
 fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
@@ -796,22 +941,15 @@ fn parse_json_arg(raw: &str, label: &str) -> io::Result<Value> {
     })
 }
 
-fn pointer_from_delete_payload(drawer_name: &str, payload: &Value) -> io::Result<String> {
-    let record_id = payload.get("_id").and_then(Value::as_str).ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            "delete payload must include a string _id",
-        )
-    })?;
-
+fn pointer_from_record_id(drawer_name: &str, record_id: &str) -> String {
     if record_id.starts_with('@') {
-        Ok(record_id.to_string())
+        record_id.to_string()
     } else {
-        Ok(format!(
+        format!(
             "@{}:{}",
             drawer_name.trim_start_matches('@'),
             record_id.trim_start_matches("lnk_")
-        ))
+        )
     }
 }
 

@@ -208,6 +208,9 @@ fn test_command_routing_guards_and_failures() {
     let res_records = run_command(&client, &["records".to_string()], false);
     assert!(res_records.is_err());
 
+    let res_count = run_command(&client, &["count".to_string()], false);
+    assert!(res_count.is_err());
+
     let res_upsert = run_command(&client, &["upsert".to_string()], false);
     assert!(res_upsert.is_err());
 
@@ -381,6 +384,184 @@ fn test_structural_lifecycle_commands_execution_paths() {
 
     let clean_wardrobe = vec!["clean".to_string(), "armory".to_string()];
     assert!(run_command(&client, &clean_wardrobe, false).is_ok());
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn test_document_query_and_inspection_commands_match_help_paths() {
+    let storage_directory = temp_storage_directory("document_query_paths");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    assert!(
+        run_command(
+            &client,
+            &[
+                "create".to_string(),
+                "wardrobe".to_string(),
+                "armory".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &[
+                "create".to_string(),
+                "bay".to_string(),
+                "armory/public".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &[
+                "create".to_string(),
+                "drawer".to_string(),
+                "armory/public/gem".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+
+    let ruby = vec![
+        "upsert".to_string(),
+        "armory/public/gem".to_string(),
+        "{\"_id\":\"ruby\",\"power\":42,\"element\":\"fire\"}".to_string(),
+    ];
+    assert!(run_command(&client, &ruby, false).is_ok());
+
+    let sapphire = vec![
+        "upsert".to_string(),
+        "armory/public/gem".to_string(),
+        "{\"_id\":\"sapphire\",\"power\":7,\"element\":\"water\"}".to_string(),
+    ];
+    assert!(run_command(&client, &sapphire, false).is_ok());
+
+    assert!(
+        run_command(
+            &client,
+            &["records".to_string(), "armory/public/gem".to_string()],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &[
+                "records".to_string(),
+                "armory/public/gem".to_string(),
+                "{\"power\":42}".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &[
+                "find".to_string(),
+                "armory/public/gem".to_string(),
+                "{\"element\":\"water\"}".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &["count".to_string(), "armory/public/gem".to_string()],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &[
+                "count".to_string(),
+                "armory/public/gem".to_string(),
+                "{\"power\":42}".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert!(
+        run_command(
+            &client,
+            &["inspect".to_string(), "armory/public/gem".to_string()],
+            true
+        )
+        .is_ok()
+    );
+
+    assert!(
+        run_command(
+            &client,
+            &[
+                "delete".to_string(),
+                "armory/public/gem".to_string(),
+                "ruby".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        client
+            .count("armory/public/gem", Some(json!({"element": "fire"})), None)
+            .unwrap(),
+        0
+    );
+
+    assert!(
+        run_command(
+            &client,
+            &[
+                "delete".to_string(),
+                "armory/public/gem".to_string(),
+                "{\"power\":7}".to_string()
+            ],
+            false
+        )
+        .is_ok()
+    );
+    assert_eq!(client.count("armory/public/gem", None, None).unwrap(), 0);
+
+    assert!(
+        run_command(
+            &client,
+            &[
+                "count".to_string(),
+                "armory/public/gem".to_string(),
+                "{invalid-json".to_string()
+            ],
+            false
+        )
+        .is_err()
+    );
+    assert!(
+        run_command(
+            &client,
+            &[
+                "records".to_string(),
+                "armory/public/gem".to_string(),
+                "{invalid-json".to_string()
+            ],
+            false
+        )
+        .is_err()
+    );
 
     let _ = fs::remove_dir_all(storage_directory);
 }
