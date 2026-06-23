@@ -37,6 +37,9 @@ fn binary_help_flag_exits_successfully() {
     assert!(stdout.contains("CORE ARCHITECTURAL RULES"));
     assert!(stdout.contains("Example: create drawer my_wardrobe/my_bay/user"));
     assert!(stdout.contains("Example: backup my_wardrobe/my_bay ./backups/bay_snapshot.wrb"));
+    assert!(stdout.contains("add user <json_user_payload>"));
+    assert!(stdout.contains("grant permission <username> <permission_scope>"));
+    assert!(stdout.contains("revoke permission <username> <permission_scope>"));
 }
 
 #[test]

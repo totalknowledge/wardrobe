@@ -313,6 +313,9 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         "find" | "get" | "query" => run_records_command(client, parts, pretty, true),
         "count" => run_count_command(client, parts, pretty),
         "upsert" | "insert" => run_upsert_command(client, parts),
+        "add" if parts.get(1).map(String::as_str) == Some("user") => {
+            run_add_user_command(client, parts, pretty)
+        }
         "add" => run_schema_management_command(client, parts, pretty),
         "create" => {
             if parts
@@ -381,6 +384,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         }
         "manage" => run_manage_user_command(client, parts, pretty),
         "auth" | "rbac" => run_manage_user_alias(client, parts, pretty),
+        "grant" | "revoke" => run_permission_command(client, parts, pretty),
         "show" | "ls" | "list" => run_show_command(client, parts, pretty),
         "check" => run_check_command(client, parts),
         "clean" => run_clean_command(client, parts, pretty),
@@ -1677,6 +1681,69 @@ fn hex_value(byte: u8) -> io::Result<u8> {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct PermissionScope {
+    normalized: String,
+    path: String,
+    rights: String,
+}
+
+fn run_add_user_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "add user requires <json_user_payload>",
+        ));
+    }
+
+    let raw_payload = parts[2..].join(" ");
+    let payload = parse_user_admin_payload(&raw_payload)?;
+    let response = client
+        .manage_user("add_user", payload)
+        .map_err(client_error)?;
+    print_json(&response, pretty)
+}
+
+fn run_permission_command(
+    client: &WardrobeClient,
+    parts: &[String],
+    pretty: bool,
+) -> io::Result<()> {
+    if parts.len() < 4 || parts.get(1).map(String::as_str) != Some("permission") {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{} requires permission <username> <permission_scope>",
+                parts[0]
+            ),
+        ));
+    }
+    if parts.len() > 4 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope must be a single <path>:<rights> argument",
+        ));
+    }
+
+    let username = validate_permission_username(&parts[2])?;
+    let scope = parse_permission_scope(&parts[3])?;
+    let action = format!("{}_permission", parts[0]);
+    let response = client
+        .manage_user(
+            &action,
+            json!({
+                "username": username,
+                "permission_scope": scope.normalized,
+                "scope": {
+                    "path": scope.path,
+                    "rights": scope.rights,
+                }
+            }),
+        )
+        .map_err(client_error)?;
+    print_json(&response, pretty)
+}
+
 fn run_manage_user_command(
     client: &WardrobeClient,
     parts: &[String],
@@ -1695,7 +1762,8 @@ fn run_manage_user_command(
         ));
     }
 
-    let payload = parse_json_arg(&parts[3], "user admin payload")?;
+    let raw_payload = parts[3..].join(" ");
+    let payload = parse_json_arg(&raw_payload, "user admin payload")?;
     let response = client
         .manage_user(&parts[2], payload)
         .map_err(client_error)?;
@@ -1720,11 +1788,106 @@ fn run_manage_user_alias(
         ));
     }
 
-    let payload = parse_json_arg(&parts[payload_index], "user admin payload")?;
+    let raw_payload = parts[payload_index..].join(" ");
+    let payload = parse_json_arg(&raw_payload, "user admin payload")?;
     let response = client
         .manage_user(&parts[action_index], payload)
         .map_err(client_error)?;
     print_json(&response, pretty)
+}
+
+fn parse_user_admin_payload(raw: &str) -> io::Result<Value> {
+    let payload = parse_json_arg(raw, "user admin payload")?;
+    let user = payload.as_object().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "user admin payload must be a JSON object",
+        )
+    })?;
+
+    let username = user
+        .get("username")
+        .or_else(|| user.get("user"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if username.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "user admin payload requires a non-empty username",
+        ));
+    }
+
+    Ok(payload)
+}
+
+fn validate_permission_username(username: &str) -> io::Result<String> {
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission username cannot be empty",
+        ));
+    }
+    if username.chars().any(char::is_whitespace) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission username cannot contain whitespace",
+        ));
+    }
+    Ok(username.to_string())
+}
+
+fn parse_permission_scope(raw: &str) -> io::Result<PermissionScope> {
+    let raw = raw.trim();
+    let mut parts = raw.split(':');
+    let path_part = parts.next().unwrap_or_default().trim();
+    let rights_part = parts.next().unwrap_or_default().trim();
+    if parts.next().is_some() || path_part.is_empty() || rights_part.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope must use <path>:<rights>",
+        ));
+    }
+
+    let segments = split_structural_path(path_part, "permission scope path")?;
+    if segments.len() > 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope path must identify a wardrobe, bay, or drawer",
+        ));
+    }
+
+    let mut rights = String::new();
+    for right in rights_part.chars().map(|right| right.to_ascii_lowercase()) {
+        if !matches!(right, 'r' | 'u' | 'd' | 'i') {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "permission rights must contain only r, u, d, or i",
+            ));
+        }
+        if rights.contains(right) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("permission right '{right}' cannot be repeated"),
+            ));
+        }
+        rights.push(right);
+    }
+
+    if rights.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope requires at least one right",
+        ));
+    }
+
+    let path = segments.join("/");
+    Ok(PermissionScope {
+        normalized: format!("{path}:{rights}"),
+        path,
+        rights,
+    })
 }
 
 fn parse_json_arg(raw: &str, label: &str) -> io::Result<Value> {

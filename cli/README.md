@@ -174,13 +174,39 @@ wardrobe-cli --target ./my-db create-drawer admin_db public gem
 
 ---
 
-### `manage user <action> <json>`
+### `add user <json_user_payload>`
 
-Send a user administration request through the remote client protocol.
-
-Aliases: `auth <action> <json>`, `rbac <action> <json>`.
+Register an administrative or client identity through the remote client protocol.
 
 Embedded mode rejects this command because local file permissions are the embedded authorization boundary. Remote servers remain responsible for validating privileges and applying credential changes.
+
+```sh
+wardrobe-cli --target wardrobe://localhost:7777 add user '{"username":"dev_admin","role":"operator"}'
+```
+
+### `grant permission <username> <permission_scope>`
+
+Grant access rights to a structural path scope.
+
+The permission scope must use `<path>:<rights>`, where the path is a wardrobe, bay, or drawer path and rights are a non-empty combination of `r`, `u`, `d`, and `i`.
+
+```sh
+wardrobe-cli --target wardrobe://localhost:7777 grant permission dev_admin my_wardrobe/my_bay:rud
+```
+
+### `revoke permission <username> <permission_scope>`
+
+Remove access rights from a structural path scope.
+
+```sh
+wardrobe-cli --target wardrobe://localhost:7777 revoke permission dev_admin my_wardrobe/my_bay:d
+```
+
+### `manage user <action> <json>`
+
+Legacy form for sending a user administration request through the remote client protocol.
+
+Aliases: `auth <action> <json>`, `rbac <action> <json>`.
 
 ```sh
 wardrobe-cli --target wardrobe://localhost:7777 manage user grant '{"user":"alice","role":"admin"}'

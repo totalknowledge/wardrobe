@@ -217,6 +217,19 @@ fn test_command_routing_guards_and_failures() {
     let res_restore = run_command(&client, &["restore".to_string()], false);
     assert!(res_restore.is_err());
 
+    let res_add_user = run_command(&client, &["add".to_string(), "user".to_string()], false);
+    assert!(res_add_user.is_err());
+
+    let res_grant = run_command(&client, &["grant".to_string()], false);
+    assert!(res_grant.is_err());
+
+    let res_revoke = run_command(
+        &client,
+        &["revoke".to_string(), "permission".to_string()],
+        false,
+    );
+    assert!(res_revoke.is_err());
+
     let res_upsert = run_command(&client, &["upsert".to_string()], false);
     assert!(res_upsert.is_err());
 
@@ -975,6 +988,50 @@ fn test_network_administrative_commands_routing() {
 }
 
 #[test]
+fn test_documented_user_admin_permission_commands_routing() {
+    assert_manage_user_command(
+        &[
+            "add",
+            "user",
+            "{\"username\":\"dev_admin\",\"role\":\"operator\"}",
+        ],
+        "add_user",
+        json!({"username": "dev_admin", "role": "operator"}),
+    );
+
+    assert_manage_user_command(
+        &["grant", "permission", "dev_admin", "my_wardrobe/my_bay:rud"],
+        "grant_permission",
+        json!({
+            "username": "dev_admin",
+            "permission_scope": "my_wardrobe/my_bay:rud",
+            "scope": {
+                "path": "my_wardrobe/my_bay",
+                "rights": "rud"
+            }
+        }),
+    );
+
+    assert_manage_user_command(
+        &[
+            "revoke",
+            "permission",
+            "dev_admin",
+            "my_wardrobe/my_bay/user:D",
+        ],
+        "revoke_permission",
+        json!({
+            "username": "dev_admin",
+            "permission_scope": "my_wardrobe/my_bay/user:d",
+            "scope": {
+                "path": "my_wardrobe/my_bay/user",
+                "rights": "d"
+            }
+        }),
+    );
+}
+
+#[test]
 fn test_rbac_aliases_parse_nested_user_payloads() {
     assert_manage_user_command(
         &["auth", "user", "grant", "{\"user\":\"alice\"}"],
@@ -1007,6 +1064,49 @@ fn test_embedded_manage_user_is_rejected() {
         "{\"user\":\"alice\"}".to_string(),
     ];
     assert!(run_command(&client, &args, false).is_err());
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn test_documented_user_admin_validation_errors() {
+    let storage_directory = temp_storage_directory("documented_user_admin_validation");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let missing_username = vec![
+        "add".to_string(),
+        "user".to_string(),
+        "{\"role\":\"operator\"}".to_string(),
+    ];
+    let err = run_command(&client, &missing_username, false).expect_err("username guard");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+    let invalid_scope_right = vec![
+        "grant".to_string(),
+        "permission".to_string(),
+        "dev_admin".to_string(),
+        "my_wardrobe/my_bay:x".to_string(),
+    ];
+    let err = run_command(&client, &invalid_scope_right, false).expect_err("right guard");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+    let invalid_scope_path = vec![
+        "revoke".to_string(),
+        "permission".to_string(),
+        "dev_admin".to_string(),
+        "my_wardrobe/my_bay/user/extra:r".to_string(),
+    ];
+    let err = run_command(&client, &invalid_scope_path, false).expect_err("path guard");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+    let valid_embedded_scope = vec![
+        "grant".to_string(),
+        "permission".to_string(),
+        "dev_admin".to_string(),
+        "my_wardrobe:r".to_string(),
+    ];
+    let err = run_command(&client, &valid_embedded_scope, false).expect_err("embedded guard");
+    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
 
     let _ = fs::remove_dir_all(storage_directory);
 }
