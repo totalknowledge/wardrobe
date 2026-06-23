@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Error, ErrorKind, Read, Write};
@@ -312,6 +312,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         "find" | "get" | "query" => run_records_command(client, parts, pretty, true),
         "count" => run_count_command(client, parts, pretty),
         "upsert" | "insert" => run_upsert_command(client, parts),
+        "add" => run_schema_management_command(client, parts, pretty),
         "create" => {
             if parts
                 .get(1)
@@ -333,6 +334,13 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             let deleted = client.delete_by_id(&parts[1]).map_err(client_error)?;
             println!("deleted: {deleted}");
             Ok(())
+        }
+        "remove"
+            if parts
+                .get(1)
+                .is_some_and(|kind| is_schema_management_type(kind)) =>
+        {
+            run_schema_management_command(client, parts, pretty)
         }
         "delete" | "remove" => run_delete_command(client, parts),
         "define" => run_define_command(client, parts, pretty),
@@ -634,6 +642,145 @@ fn record_id_for_delete(record: &Value) -> io::Result<String> {
                 "record matched for deletion did not include a string _id",
             )
         })
+}
+
+fn run_schema_management_command(
+    client: &WardrobeClient,
+    parts: &[String],
+    pretty: bool,
+) -> io::Result<()> {
+    if parts.len() < 4 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{} requires <type> <path> <target_field> <?extra_args>",
+                parts[0]
+            ),
+        ));
+    }
+
+    let action = parts[0].as_str();
+    let kind = normalize_schema_command_type(&parts[1])?;
+    let drawer_path = normalize_drawer_path(&parts[2], "schema command path")?;
+    let field_name = &parts[3];
+    let payload = schema_management_payload(action, &kind, field_name, parts)?;
+    let response = client
+        .manage_schema(&drawer_path, action, &kind, field_name, payload)
+        .map_err(client_error)?;
+    print_json(&response, pretty)
+}
+
+fn is_schema_management_type(kind: &str) -> bool {
+    normalize_schema_command_type(kind).is_ok()
+}
+
+fn normalize_schema_command_type(kind: &str) -> io::Result<String> {
+    match kind.to_ascii_lowercase().as_str() {
+        "index" | "indexes" => Ok("index".to_string()),
+        "key" | "keys" => Ok("key".to_string()),
+        "constraint" | "constraints" => Ok("constraint".to_string()),
+        "trigger" | "triggers" => Ok("trigger".to_string()),
+        "relationship" | "relationships" => Ok("relationship".to_string()),
+        "cascade-delete" | "cascade_delete" | "cascade" | "delete-rule" | "delete-rules" => {
+            Ok("cascade-delete".to_string())
+        }
+        _ => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown schema command type: {kind}"),
+        )),
+    }
+}
+
+fn normalize_drawer_path(raw_path: &str, label: &str) -> io::Result<String> {
+    let segments = split_structural_path(raw_path, label)?;
+    if segments.len() != 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} must identify a wardrobe/bay/drawer path"),
+        ));
+    }
+    Ok(segments.join("/"))
+}
+
+fn schema_management_payload(
+    action: &str,
+    kind: &str,
+    field_name: &str,
+    parts: &[String],
+) -> io::Result<Value> {
+    if field_name.trim().is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "schema command target field cannot be empty",
+        ));
+    }
+
+    match kind {
+        "index" => Ok(json!({ "kind": "index" })),
+        "key" => {
+            let key_type = parts.get(4).map(String::as_str).unwrap_or("secondary");
+            if !matches!(key_type, "primary" | "secondary") {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "key requires primary or secondary as the optional key type",
+                ));
+            }
+            Ok(json!({ "key_type": key_type }))
+        }
+        "constraint" => {
+            let Some(constraint) = parts.get(4) else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "constraint requires a constraint type such as unique or non-null",
+                ));
+            };
+            Ok(json!({ "constraint": constraint }))
+        }
+        "trigger" => {
+            if action == "add" && parts.len() < 5 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "trigger requires a script path or command",
+                ));
+            }
+            Ok(json!({
+                "event": field_name,
+                "command": parts.get(4).cloned().unwrap_or_default()
+            }))
+        }
+        "relationship" => {
+            if action == "remove" && parts.len() < 5 {
+                return Ok(json!({}));
+            }
+            let Some(target_path) = parts.get(4) else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "relationship requires a target drawer path",
+                ));
+            };
+            let relationship_type = parts.get(5).map(String::as_str).unwrap_or("M:1");
+            let target_drawer = normalize_drawer_path(target_path, "relationship target path")?;
+            let mut payload = json!({
+                "type": relationship_type,
+                "target_drawer": target_drawer
+            });
+            if relationship_type == "1:M" {
+                let Some(mapped_by) = parts.get(6) else {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "1:M relationship requires a mapped_by field",
+                    ));
+                };
+                payload["mapped_by"] = Value::String(mapped_by.clone());
+            }
+            Ok(payload)
+        }
+        "cascade-delete" => Ok(json!({ "action": "Cascade" })),
+        _ => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown schema command type: {kind}"),
+        )),
+    }
 }
 
 fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {

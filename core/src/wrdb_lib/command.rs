@@ -65,6 +65,13 @@ pub enum Command {
         database_name: String,
         location: String,
     },
+    ManageSchema {
+        action: String,
+        kind: String,
+        drawer_name: String,
+        field_name: String,
+        payload: Value,
+    },
     ManageUser {
         action: String,
         payload: Value,

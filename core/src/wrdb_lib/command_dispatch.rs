@@ -87,6 +87,16 @@ pub(crate) trait DatabaseCommandExecutor {
         context: ExecutionContext<'_>,
     ) -> Result<bool>;
 
+    fn manage_schema_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        action: &str,
+        kind: &str,
+        field_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<Value>;
+
     fn vacuum_drawer_in_database(
         database: &RwLock<Database>,
         drawer_name: &str,
@@ -230,6 +240,22 @@ where
             E::delete_by_id_in_database(database, StorageLocator::Inline(pointer), context)
                 .map(CommandResult::Deleted)
         }
+        Command::ManageSchema {
+            action,
+            kind,
+            drawer_name,
+            field_name,
+            payload,
+        } => E::manage_schema_in_database(
+            database,
+            &drawer_name,
+            &action,
+            &kind,
+            &field_name,
+            payload,
+            context,
+        )
+        .map(CommandResult::Admin),
         Command::Vacuum { drawer_name } => {
             E::vacuum_drawer_in_database(database, &drawer_name, context)
                 .map(CommandResult::Vacuumed)
@@ -285,6 +311,7 @@ pub(crate) fn command_drawer_name(command: &Command) -> Option<String> {
         | Command::FindAll { drawer_name }
         | Command::FindByFilter { drawer_name, .. }
         | Command::Count { drawer_name, .. }
+        | Command::ManageSchema { drawer_name, .. }
         | Command::Vacuum { drawer_name }
         | Command::Migrate { drawer_name } => Some(drawer_name.clone()),
         Command::FindById { pointer } | Command::Delete { pointer } => {

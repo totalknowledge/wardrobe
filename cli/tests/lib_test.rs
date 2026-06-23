@@ -567,6 +567,147 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
 }
 
 #[test]
+fn test_schema_and_relationship_management_commands_execution_paths() {
+    let storage_directory = temp_storage_directory("schema_relationship_management");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    for args in [
+        vec!["create", "wardrobe", "armory"],
+        vec!["create", "bay", "armory/public"],
+        vec!["create", "drawer", "armory/public/user"],
+        vec!["create", "drawer", "armory/public/tool"],
+    ] {
+        let args = args.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
+        assert!(run_command(&client, &args, false).is_ok());
+    }
+
+    for args in [
+        vec!["add", "index", "armory/public/user", "tool.type"],
+        vec![
+            "add",
+            "key",
+            "armory/public/user",
+            "profile_id",
+            "secondary",
+        ],
+        vec!["add", "constraint", "armory/public/user", "email", "unique"],
+        vec!["add", "constraint", "armory/public/user", "age", "non-null"],
+        vec![
+            "add",
+            "relationship",
+            "armory/public/user",
+            "tool_id",
+            "armory/public/tool",
+        ],
+        vec!["add", "cascade-delete", "armory/public/user", "tool_id"],
+        vec![
+            "add",
+            "trigger",
+            "armory/public/user",
+            "on_upsert",
+            "./scripts/sync_profile.sh",
+        ],
+    ] {
+        let args = args.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
+        assert!(run_command(&client, &args, true).is_ok());
+    }
+
+    let metadata_path = storage_directory
+        .join("armory")
+        .join("public")
+        .join("user_meta.drw");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    assert_eq!(
+        metadata["relationship_constraints"]["tool_id"]["target_drawer"],
+        "armory/public/tool"
+    );
+    assert_eq!(
+        metadata["relationship_constraints"]["tool_id"]["type"],
+        "M:1"
+    );
+    assert_eq!(metadata["cascade_delete_rules"]["tool_id"], true);
+    assert_eq!(metadata["delete_rules"]["tool_id"]["action"], "Cascade");
+    assert!(
+        metadata["unique_constraints"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("email"))
+    );
+    assert!(
+        metadata["unique_constraints"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("profile_id"))
+    );
+    assert!(
+        metadata["schema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("age"))
+    );
+    assert!(metadata["schema"]["x-wardrobe-cli"]["indexes"]["tool.type"].is_object());
+    assert_eq!(
+        metadata["schema"]["x-wardrobe-cli"]["triggers"]["on_upsert"]["command"],
+        "./scripts/sync_profile.sh"
+    );
+
+    for args in [
+        vec!["remove", "index", "armory/public/user", "tool.type"],
+        vec![
+            "remove",
+            "constraint",
+            "armory/public/user",
+            "email",
+            "unique",
+        ],
+        vec![
+            "remove",
+            "constraint",
+            "armory/public/user",
+            "age",
+            "non-null",
+        ],
+        vec!["remove", "relationship", "armory/public/user", "tool_id"],
+        vec!["remove", "cascade-delete", "armory/public/user", "tool_id"],
+        vec!["remove", "trigger", "armory/public/user", "on_upsert"],
+    ] {
+        let args = args.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
+        assert!(run_command(&client, &args, false).is_ok());
+    }
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    assert!(metadata["relationship_constraints"]["tool_id"].is_null());
+    assert!(metadata["cascade_delete_rules"]["tool_id"].is_null());
+    assert!(metadata["delete_rules"]["tool_id"].is_null());
+    assert!(
+        !metadata["unique_constraints"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("email"))
+    );
+    assert!(
+        !metadata["schema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("age"))
+    );
+    assert!(metadata["schema"]["x-wardrobe-cli"]["indexes"]["tool.type"].is_null());
+    assert!(metadata["schema"]["x-wardrobe-cli"]["triggers"]["on_upsert"].is_null());
+
+    let invalid_relationship = vec![
+        "add".to_string(),
+        "relationship".to_string(),
+        "armory/public/user".to_string(),
+        "tool_id".to_string(),
+    ];
+    assert!(run_command(&client, &invalid_relationship, false).is_err());
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn test_schema_creation_rejects_missing_parent_database() {
     let storage_directory = temp_storage_directory("missing_parent");
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();

@@ -312,6 +312,35 @@ impl WardrobeClient {
         }
     }
 
+    pub fn manage_schema(
+        &self,
+        drawer_name: &str,
+        action: &str,
+        kind: &str,
+        field_name: &str,
+        payload: Value,
+    ) -> Result<Value> {
+        match &self.driver {
+            Driver::Embedded(engine) => {
+                engine.manage_schema(drawer_name, action, kind, field_name, payload)
+            }
+            Driver::Network(driver) => expect_admin(driver.execute(Command::ManageSchema {
+                action: action.to_string(),
+                kind: kind.to_string(),
+                drawer_name: drawer_name.to_string(),
+                field_name: field_name.to_string(),
+                payload,
+            })?),
+            Driver::UnixSocket(driver) => expect_admin(driver.execute(Command::ManageSchema {
+                action: action.to_string(),
+                kind: kind.to_string(),
+                drawer_name: drawer_name.to_string(),
+                field_name: field_name.to_string(),
+                payload,
+            })?),
+        }
+    }
+
     pub fn show_tenants(&self) -> Result<Vec<String>> {
         match &self.driver {
             Driver::Embedded(engine) => engine.show_tenants(),

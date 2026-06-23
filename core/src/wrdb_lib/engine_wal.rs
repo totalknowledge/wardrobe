@@ -208,7 +208,8 @@ fn command_operation(command: &Command) -> Option<DurableWalOperation> {
         Command::DefineDatabase { .. }
         | Command::DefineSchema { .. }
         | Command::DefineDrawer { .. }
-        | Command::DefineTenantRoute { .. } => Some(DurableWalOperation::Define),
+        | Command::DefineTenantRoute { .. }
+        | Command::ManageSchema { .. } => Some(DurableWalOperation::Define),
         _ => None,
     }
 }

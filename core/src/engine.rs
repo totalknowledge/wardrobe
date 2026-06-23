@@ -182,6 +182,25 @@ impl WardrobeEngine {
         Self::migrate_drawer_in_database(&self.database_core, drawer_name, ExecutionContext::root())
     }
 
+    pub fn manage_schema(
+        &self,
+        drawer_name: &str,
+        action: &str,
+        kind: &str,
+        field_name: &str,
+        payload: Value,
+    ) -> Result<Value> {
+        Self::manage_schema_in_database(
+            &self.database_core,
+            drawer_name,
+            action,
+            kind,
+            field_name,
+            payload,
+            ExecutionContext::root(),
+        )
+    }
+
     pub fn cached_drawer_count(&self) -> Result<usize> {
         Ok(Self::read_lock(&self.database_core)?.cached_drawer_count())
     }
@@ -927,6 +946,33 @@ impl WardrobeEngine {
         Ok(deleted_record.is_some())
     }
 
+    fn manage_schema_in_database(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        action: &str,
+        kind: &str,
+        field_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<Value> {
+        let physical_drawer_name =
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{drawer_name}' could not be loaded for schema management"),
+            ));
+        };
+
+        Self::write_lock(&drawer)?.manage_schema_rule(action, kind, field_name, payload)
+    }
+
     fn records_matching_parent_pointer(
         database_core: &RwLock<Database>,
         target_drawer: &str,
@@ -1190,6 +1236,26 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
         WardrobeEngine::delete_by_id_in_database(database, locator, context)
+    }
+
+    fn manage_schema_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        action: &str,
+        kind: &str,
+        field_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<Value> {
+        WardrobeEngine::manage_schema_in_database(
+            database,
+            drawer_name,
+            action,
+            kind,
+            field_name,
+            payload,
+            context,
+        )
     }
 
     fn vacuum_drawer_in_database(
