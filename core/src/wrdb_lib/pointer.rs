@@ -13,6 +13,12 @@ pub(crate) fn try_parse_pointer(pointer: &str) -> Option<(String, String)> {
     Some((drawer_name.to_string(), record_key.to_string()))
 }
 
+fn try_parse_pointer_reference(pointer: &str) -> Option<(String, String)> {
+    let (drawer_name, record_key) =
+        try_parse_pointer_parts(pointer).or_else(|| try_parse_structural_pointer_parts(pointer))?;
+    Some((drawer_name.to_string(), record_key.to_string()))
+}
+
 pub(crate) fn try_parse_pointer_parts(pointer: &str) -> Option<(&str, &str)> {
     let clean_pointer = pointer.strip_prefix('@')?;
     let (drawer_name, record_key) = clean_pointer.split_once(':')?;
@@ -25,8 +31,28 @@ pub(crate) fn try_parse_pointer_parts(pointer: &str) -> Option<(&str, &str)> {
     Some((drawer_name, record_key))
 }
 
+fn try_parse_structural_pointer_parts(pointer: &str) -> Option<(&str, &str)> {
+    if pointer.starts_with('@') || pointer.contains(':') || pointer.contains('\\') {
+        return None;
+    }
+
+    let (drawer_name, record_key) = pointer.rsplit_once('/')?;
+    let record_key = record_key.strip_prefix("lnk_").unwrap_or(record_key);
+
+    if drawer_name.split('/').count() < 2
+        || drawer_name
+            .split('/')
+            .chain(std::iter::once(record_key))
+            .any(is_invalid_structural_segment)
+    {
+        return None;
+    }
+
+    Some((drawer_name, record_key))
+}
+
 pub(crate) fn parse_pointer(pointer: &str) -> Result<(String, String)> {
-    try_parse_pointer(pointer).ok_or_else(|| {
+    try_parse_pointer_reference(pointer).ok_or_else(|| {
         Error::new(
             ErrorKind::InvalidData,
             format!("Malformed pointer reference encountered: {}", pointer),
@@ -108,7 +134,7 @@ pub(crate) fn scoped_drawer_name(drawer_name: &str, drawer_namespace: Option<&st
 }
 
 pub(crate) fn scoped_pointer(pointer: &str, drawer_namespace: Option<&str>) -> String {
-    let Some((drawer_name, record_key)) = try_parse_pointer(pointer) else {
+    let Some((drawer_name, record_key)) = try_parse_pointer_reference(pointer) else {
         return pointer.to_string();
     };
 
@@ -124,6 +150,28 @@ pub(crate) fn locator_to_pointer(locator: StorageLocator) -> String {
     match locator {
         StorageLocator::Explicit { drawer, id } => format_pointer(&drawer, &id),
         StorageLocator::Inline(pointer) => pointer,
+    }
+}
+
+fn is_invalid_structural_segment(segment: &str) -> bool {
+    segment.is_empty() || segment == "." || segment == ".."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_deep_structural_pointer_reference() {
+        assert_eq!(
+            parse_pointer("basic-usage/public/user/user-02").expect("structural pointer"),
+            ("basic-usage/public/user".to_string(), "user-02".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_shallow_structural_pointer_reference() {
+        assert!(parse_pointer("user/user-02").is_err());
     }
 }
 

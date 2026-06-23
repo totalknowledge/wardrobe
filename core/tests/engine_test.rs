@@ -1079,6 +1079,38 @@ fn us_054_delete_accepts_inline_storage_locator() {
 }
 
 #[test]
+fn delete_by_id_accepts_deep_structural_pointer() {
+    let database = TempDatabase::new("bug_005_deep_structural_delete");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    fs::create_dir_all(database.path.join("basic-usage").join("public"))
+        .expect("nested storage path should exist");
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let pointer = engine
+        .upsert(
+            "basic-usage/public/user",
+            json!({
+                "_id": "user-02",
+                "name": "Marcus"
+            }),
+        )
+        .expect("nested user should upsert");
+    assert_eq!(pointer, "@basic-usage/public/user:user-02");
+
+    let deleted = engine
+        .delete_by_id("basic-usage/public/user/user-02")
+        .expect("structural pointer delete should succeed");
+
+    assert!(deleted);
+    assert!(
+        engine
+            .find_by_id("@basic-usage/public/user:user-02")
+            .expect("lookup should succeed")
+            .is_none()
+    );
+}
+
+#[test]
 fn us_054_delete_by_id_accepts_tuple_locator_conversion() {
     let database = TempDatabase::new("us_054_delete_tuple_locator");
     let database_directory = database.path.to_string_lossy().into_owned();
