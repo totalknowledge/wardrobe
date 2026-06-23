@@ -211,6 +211,12 @@ fn test_command_routing_guards_and_failures() {
     let res_count = run_command(&client, &["count".to_string()], false);
     assert!(res_count.is_err());
 
+    let res_backup = run_command(&client, &["backup".to_string()], false);
+    assert!(res_backup.is_err());
+
+    let res_restore = run_command(&client, &["restore".to_string()], false);
+    assert!(res_restore.is_err());
+
     let res_upsert = run_command(&client, &["upsert".to_string()], false);
     assert!(res_upsert.is_err());
 
@@ -704,6 +710,105 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
     ];
     assert!(run_command(&client, &invalid_relationship, false).is_err());
 
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn test_backup_and_restore_commands_execution_paths() {
+    let storage_directory = temp_storage_directory("backup_restore_workflows");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    for args in [
+        vec!["create", "wardrobe", "armory"],
+        vec!["create", "bay", "armory/public"],
+        vec!["create", "drawer", "armory/public/gem"],
+    ] {
+        let args = args.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
+        assert!(run_command(&client, &args, false).is_ok());
+    }
+
+    let upsert = vec![
+        "upsert".to_string(),
+        "armory/public/gem".to_string(),
+        "{\"_id\":\"ruby\",\"power\":42}".to_string(),
+    ];
+    assert!(run_command(&client, &upsert, false).is_ok());
+
+    let drawer_archive = temp_storage_directory("drawer_backup").with_extension("wrb");
+    let drawer_backup = vec![
+        "backup".to_string(),
+        "armory/public/gem".to_string(),
+        drawer_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &drawer_backup, true).is_ok());
+    assert!(drawer_archive.is_file());
+
+    let drawer_restore = vec![
+        "restore".to_string(),
+        "armory/public/gem_copy".to_string(),
+        drawer_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &drawer_restore, false).is_ok());
+    assert_eq!(
+        client.count("armory/public/gem_copy", None, None).unwrap(),
+        1
+    );
+
+    let bay_archive = temp_storage_directory("bay_backup").with_extension("wrb");
+    let bay_backup = vec![
+        "backup".to_string(),
+        "armory/public".to_string(),
+        bay_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &bay_backup, false).is_ok());
+
+    let bay_restore = vec![
+        "restore".to_string(),
+        "armory_copy/public".to_string(),
+        bay_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &bay_restore, false).is_ok());
+    assert_eq!(
+        client.count("armory_copy/public/gem", None, None).unwrap(),
+        1
+    );
+
+    let wardrobe_archive = temp_storage_directory("wardrobe_backup").with_extension("wrb");
+    let wardrobe_backup = vec![
+        "backup".to_string(),
+        "armory".to_string(),
+        wardrobe_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &wardrobe_backup, false).is_ok());
+
+    let wardrobe_restore = vec![
+        "restore".to_string(),
+        "vault".to_string(),
+        wardrobe_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &wardrobe_restore, false).is_ok());
+    assert_eq!(client.count("vault/public/gem", None, None).unwrap(), 1);
+
+    let invalid_archive = temp_storage_directory("invalid_backup").with_extension("wrb");
+    fs::write(&invalid_archive, "not a wardrobe archive").unwrap();
+    let invalid_restore = vec![
+        "restore".to_string(),
+        "broken/public".to_string(),
+        invalid_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &invalid_restore, false).is_err());
+
+    let mismatched_scope_restore = vec![
+        "restore".to_string(),
+        "armory/mismatch".to_string(),
+        drawer_archive.to_string_lossy().to_string(),
+    ];
+    assert!(run_command(&client, &mismatched_scope_restore, false).is_err());
+
+    let _ = fs::remove_file(drawer_archive);
+    let _ = fs::remove_file(bay_archive);
+    let _ = fs::remove_file(wardrobe_archive);
+    let _ = fs::remove_file(invalid_archive);
     let _ = fs::remove_dir_all(storage_directory);
 }
 

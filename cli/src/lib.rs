@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
@@ -383,6 +384,8 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         "show" | "ls" | "list" => run_show_command(client, parts, pretty),
         "check" => run_check_command(client, parts),
         "clean" => run_clean_command(client, parts, pretty),
+        "backup" => run_backup_command(client, parts, pretty),
+        "restore" => run_restore_command(client, parts, pretty),
         "show-databases" => {
             let dbs = client.show_databases().map_err(client_error)?;
             print_json(&dbs, pretty)
@@ -1025,6 +1028,651 @@ fn clean_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<Stri
         _ => Err(Error::new(
             ErrorKind::InvalidInput,
             "clean path must identify a wardrobe, bay, or drawer",
+        )),
+    }
+}
+
+const BACKUP_ARCHIVE_FORMAT: &str = "wardrobe-cli-backup-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackupScope {
+    Wardrobe,
+    Bay,
+    Drawer,
+}
+
+impl BackupScope {
+    fn from_segment_count(segment_count: usize, label: &str) -> io::Result<Self> {
+        match segment_count {
+            1 => Ok(Self::Wardrobe),
+            2 => Ok(Self::Bay),
+            3 => Ok(Self::Drawer),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{label} must identify a wardrobe, bay, or drawer"),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Wardrobe => "wardrobe",
+            Self::Bay => "bay",
+            Self::Drawer => "drawer",
+        }
+    }
+
+    fn expected_segments(self) -> usize {
+        match self {
+            Self::Wardrobe => 1,
+            Self::Bay => 2,
+            Self::Drawer => 3,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StructuralBackupTarget {
+    scope: BackupScope,
+    segments: Vec<String>,
+    logical_path: String,
+    storage_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BackupArchive {
+    format: String,
+    source_path: String,
+    scope: String,
+    files: Vec<BackupArchiveFile>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BackupArchiveFile {
+    path: String,
+    bytes_hex: String,
+}
+
+#[derive(Serialize)]
+struct BackupCommandResult {
+    source_path: String,
+    destination_archive_path: String,
+    scope: String,
+    file_count: usize,
+    byte_count: usize,
+}
+
+#[derive(Serialize)]
+struct RestoreCommandResult {
+    destination_path: String,
+    source_archive_path: String,
+    scope: String,
+    file_count: usize,
+    byte_count: usize,
+}
+
+fn run_backup_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "backup requires <source_path> <destination_archive_path>",
+        ));
+    }
+
+    let data_dir = embedded_data_dir_for_recovery(client, "backup")?;
+    let target = structural_backup_target(&data_dir, &parts[1], "backup source path")?;
+    let files = collect_backup_archive_files(&target)?;
+    let byte_count = files
+        .iter()
+        .map(|file| file.bytes_hex.len() / 2)
+        .sum::<usize>();
+    let archive = BackupArchive {
+        format: BACKUP_ARCHIVE_FORMAT.to_string(),
+        source_path: target.logical_path.clone(),
+        scope: target.scope.as_str().to_string(),
+        files,
+    };
+
+    let archive_path = PathBuf::from(&parts[2]);
+    if let Some(parent) = archive_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let serialized = serde_json::to_vec_pretty(&archive).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Failed to serialize backup archive: {error}"),
+        )
+    })?;
+    fs::write(&archive_path, serialized)?;
+
+    print_json(
+        &BackupCommandResult {
+            source_path: target.logical_path,
+            destination_archive_path: archive_path.display().to_string(),
+            scope: target.scope.as_str().to_string(),
+            file_count: archive.files.len(),
+            byte_count,
+        },
+        pretty,
+    )
+}
+
+fn run_restore_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "restore requires <destination_path> <source_archive_path>",
+        ));
+    }
+
+    let data_dir = embedded_data_dir_for_recovery(client, "restore")?;
+    let target = structural_backup_target(&data_dir, &parts[1], "restore destination path")?;
+    let archive_path = PathBuf::from(&parts[2]);
+    let archive = read_backup_archive(&archive_path)?;
+    validate_archive_scope(&archive, &target)?;
+    let decoded_files = decoded_restore_files(&archive, &target)?;
+    let byte_count = decoded_files
+        .iter()
+        .map(|(_, bytes)| bytes.len())
+        .sum::<usize>();
+
+    clear_restore_target(&data_dir, &target)?;
+    for (relative_path, bytes) in &decoded_files {
+        let destination = target.storage_path.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(destination, bytes)?;
+    }
+    register_restored_catalog(client, &target)?;
+
+    print_json(
+        &RestoreCommandResult {
+            destination_path: target.logical_path,
+            source_archive_path: archive_path.display().to_string(),
+            scope: target.scope.as_str().to_string(),
+            file_count: decoded_files.len(),
+            byte_count,
+        },
+        pretty,
+    )
+}
+
+fn embedded_data_dir_for_recovery(client: &WardrobeClient, command: &str) -> io::Result<PathBuf> {
+    if !client.requires_embedded_engine() {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!("{command} is only available for embedded connections"),
+        ));
+    }
+
+    Ok(embedded_data_dir(client))
+}
+
+fn structural_backup_target(
+    data_dir: &Path,
+    raw_path: &str,
+    label: &str,
+) -> io::Result<StructuralBackupTarget> {
+    let segments = split_structural_path(raw_path, label)?;
+    let scope = BackupScope::from_segment_count(segments.len(), label)?;
+    let storage_path = match scope {
+        BackupScope::Wardrobe | BackupScope::Bay => segments
+            .iter()
+            .fold(data_dir.to_path_buf(), |path, segment| path.join(segment)),
+        BackupScope::Drawer => data_dir.join(&segments[0]).join(&segments[1]),
+    };
+
+    Ok(StructuralBackupTarget {
+        scope,
+        logical_path: segments.join("/"),
+        segments,
+        storage_path,
+    })
+}
+
+fn collect_backup_archive_files(
+    target: &StructuralBackupTarget,
+) -> io::Result<Vec<BackupArchiveFile>> {
+    match target.scope {
+        BackupScope::Wardrobe | BackupScope::Bay => {
+            if !target.storage_path.is_dir() {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "{} '{}' does not exist",
+                        target.scope.as_str(),
+                        target.logical_path
+                    ),
+                ));
+            }
+
+            let mut files = Vec::new();
+            collect_directory_archive_files(
+                &target.storage_path,
+                &target.storage_path,
+                &mut files,
+            )?;
+            Ok(files)
+        }
+        BackupScope::Drawer => {
+            let drawer_name = target.segments.last().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "drawer backup requires a drawer path",
+                )
+            })?;
+            let drawer_files = drawer_files(&target.storage_path, drawer_name);
+            let mut files = Vec::new();
+            for path in [&drawer_files.data, &drawer_files.index, &drawer_files.meta] {
+                if path.is_file() {
+                    let relative_path = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                format!("Invalid drawer file name: {}", path.display()),
+                            )
+                        })?
+                        .to_string();
+                    files.push(BackupArchiveFile {
+                        path: relative_path,
+                        bytes_hex: encode_hex(&fs::read(path)?),
+                    });
+                }
+            }
+
+            if files.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "drawer '{}' does not have any storage files",
+                        target.logical_path
+                    ),
+                ));
+            }
+
+            Ok(files)
+        }
+    }
+}
+
+fn collect_directory_archive_files(
+    base_dir: &Path,
+    current_dir: &Path,
+    files: &mut Vec<BackupArchiveFile>,
+) -> io::Result<()> {
+    let mut entries = fs::read_dir(current_dir)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    for path in entries {
+        if path.is_dir() {
+            collect_directory_archive_files(base_dir, &path, files)?;
+        } else if path.is_file() {
+            let relative_path = path.strip_prefix(base_dir).map_err(|error| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Failed to compute backup relative path: {error}"),
+                )
+            })?;
+            files.push(BackupArchiveFile {
+                path: archive_path_string(relative_path)?,
+                bytes_hex: encode_hex(&fs::read(&path)?),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn read_backup_archive(path: &Path) -> io::Result<BackupArchive> {
+    let bytes = fs::read(path)?;
+    let archive = serde_json::from_slice::<BackupArchive>(&bytes).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Invalid backup archive JSON: {error}"),
+        )
+    })?;
+
+    if archive.format != BACKUP_ARCHIVE_FORMAT {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Invalid backup archive format: expected {BACKUP_ARCHIVE_FORMAT}, found {}",
+                archive.format
+            ),
+        ));
+    }
+
+    Ok(archive)
+}
+
+fn validate_archive_scope(
+    archive: &BackupArchive,
+    target: &StructuralBackupTarget,
+) -> io::Result<()> {
+    if archive.scope != target.scope.as_str() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "restore destination '{}' is a {}, but archive contains a {} backup",
+                target.logical_path,
+                target.scope.as_str(),
+                archive.scope
+            ),
+        ));
+    }
+
+    if target.segments.len() != target.scope.expected_segments() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "restore destination path does not match archive scope",
+        ));
+    }
+
+    Ok(())
+}
+
+fn decoded_restore_files(
+    archive: &BackupArchive,
+    target: &StructuralBackupTarget,
+) -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for file in &archive.files {
+        let relative_path = restore_relative_path(archive, target, &file.path)?;
+        let bytes = decode_hex(&file.bytes_hex)?;
+        files.push((relative_path, bytes));
+    }
+
+    Ok(files)
+}
+
+fn restore_relative_path(
+    archive: &BackupArchive,
+    target: &StructuralBackupTarget,
+    raw_path: &str,
+) -> io::Result<PathBuf> {
+    let relative_path = validate_archive_relative_path(raw_path)?;
+    if target.scope != BackupScope::Drawer {
+        return Ok(relative_path);
+    }
+
+    let source_drawer = archive.source_path.split('/').next_back().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "drawer archive is missing source path",
+        )
+    })?;
+    let destination_drawer = target.segments.last().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "drawer restore requires a destination drawer path",
+        )
+    })?;
+    let file_name = relative_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid drawer archive file path: {raw_path}"),
+            )
+        })?;
+
+    if relative_path.components().count() != 1 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "drawer backup archive cannot contain nested file paths",
+        ));
+    }
+
+    let mapped_name = if file_name == format!("{source_drawer}.drw") {
+        format!("{destination_drawer}.drw")
+    } else if file_name == format!("{source_drawer}_index.drw") {
+        format!("{destination_drawer}_index.drw")
+    } else if file_name == format!("{source_drawer}_meta.drw") {
+        format!("{destination_drawer}_meta.drw")
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Unexpected drawer archive file: {file_name}"),
+        ));
+    };
+
+    Ok(PathBuf::from(mapped_name))
+}
+
+fn clear_restore_target(data_dir: &Path, target: &StructuralBackupTarget) -> io::Result<()> {
+    match target.scope {
+        BackupScope::Wardrobe | BackupScope::Bay => {
+            ensure_restore_path_is_under_data_dir(data_dir, &target.storage_path)?;
+            if target.storage_path.exists() {
+                fs::remove_dir_all(&target.storage_path)?;
+            }
+        }
+        BackupScope::Drawer => {
+            let drawer_name = target.segments.last().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "drawer restore requires a drawer path",
+                )
+            })?;
+            ensure_restore_path_is_under_data_dir(data_dir, &target.storage_path)?;
+            let files = drawer_files(&target.storage_path, drawer_name);
+            for path in [&files.data, &files.index, &files.meta] {
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn register_restored_catalog(
+    client: &WardrobeClient,
+    target: &StructuralBackupTarget,
+) -> io::Result<()> {
+    let wardrobe = &target.segments[0];
+    client.create_database(wardrobe).map_err(client_error)?;
+
+    match target.scope {
+        BackupScope::Wardrobe => {
+            for bay in restored_bay_names(&target.storage_path)? {
+                client.create_schema(wardrobe, &bay).map_err(client_error)?;
+                let bay_path = target.storage_path.join(&bay);
+                for drawer in restored_drawer_names(&bay_path)? {
+                    client
+                        .create_drawer(wardrobe, &bay, &drawer)
+                        .map_err(client_error)?;
+                }
+            }
+        }
+        BackupScope::Bay => {
+            let bay = &target.segments[1];
+            client.create_schema(wardrobe, bay).map_err(client_error)?;
+            for drawer in restored_drawer_names(&target.storage_path)? {
+                client
+                    .create_drawer(wardrobe, bay, &drawer)
+                    .map_err(client_error)?;
+            }
+        }
+        BackupScope::Drawer => {
+            let bay = &target.segments[1];
+            let drawer = &target.segments[2];
+            client.create_schema(wardrobe, bay).map_err(client_error)?;
+            client
+                .create_drawer(wardrobe, bay, drawer)
+                .map_err(client_error)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn restored_bay_names(wardrobe_path: &Path) -> io::Result<Vec<String>> {
+    if !wardrobe_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut names = fs::read_dir(wardrobe_path)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(ToOwned::to_owned)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+fn restored_drawer_names(bay_path: &Path) -> io::Result<Vec<String>> {
+    if !bay_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut names = fs::read_dir(bay_path)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("drw") {
+                return None;
+            }
+            let stem = path.file_stem().and_then(|stem| stem.to_str())?;
+            if stem.ends_with("_index") || stem.ends_with("_meta") {
+                return None;
+            }
+            Some(stem.to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn archive_path_string(path: &Path) -> io::Result<String> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                let Some(segment) = value.to_str() else {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Archive path is not valid UTF-8: {}", path.display()),
+                    ));
+                };
+                segments.push(segment.to_string());
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid archive relative path: {}", path.display()),
+                ));
+            }
+        }
+    }
+
+    Ok(segments.join("/"))
+}
+
+fn validate_archive_relative_path(raw_path: &str) -> io::Result<PathBuf> {
+    if raw_path.trim().is_empty() || raw_path.contains('\\') || Path::new(raw_path).is_absolute() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Invalid archive relative path: {raw_path}"),
+        ));
+    }
+
+    let mut path = PathBuf::new();
+    for segment in raw_path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid archive relative path segment: {segment}"),
+            ));
+        }
+        path.push(segment);
+    }
+
+    Ok(path)
+}
+
+fn ensure_restore_path_is_under_data_dir(data_dir: &Path, target: &Path) -> io::Result<()> {
+    let data_dir = absolute_lexical_path(data_dir)?;
+    let target = absolute_lexical_path(target)?;
+    if target == data_dir || !target.starts_with(&data_dir) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "Refusing to restore outside the embedded storage root: {}",
+                target.display()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn absolute_lexical_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex(raw: &str) -> io::Result<Vec<u8>> {
+    if raw.len() % 2 != 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid backup archive hex payload length",
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    let raw_bytes = raw.as_bytes();
+    for pair in raw_bytes.chunks_exact(2) {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_value(byte: u8) -> io::Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid backup archive hex payload",
         )),
     }
 }
