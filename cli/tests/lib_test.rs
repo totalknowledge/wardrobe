@@ -30,6 +30,35 @@ where
     format!("wardrobe://{}", addr)
 }
 
+fn assert_manage_user_command(args: &[&str], action: &str, payload: serde_json::Value) {
+    let expected_action = action.to_string();
+    let target = spawn_protocol_server(move |mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(
+            command,
+            Command::ManageUser {
+                action: expected_action.clone(),
+                payload: payload.clone()
+            }
+        );
+        let payload = serde_json::to_vec(&CommandResult::Admin(serde_json::json!({"ok": true})))
+            .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+
+    let client = WardrobeClient::open(&target).unwrap();
+    let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    assert!(run_command(&client, &args, false).is_ok());
+}
+
 #[test]
 fn test_cli_config_clean_parsing() {
     let args = vec![
@@ -445,6 +474,27 @@ fn test_network_administrative_commands_routing() {
         "{\"user\":\"alice\"}".to_string(),
     ];
     assert!(run_command(&client_manage, &manage_args, false).is_ok());
+}
+
+#[test]
+fn test_rbac_aliases_parse_nested_user_payloads() {
+    assert_manage_user_command(
+        &["auth", "user", "grant", "{\"user\":\"alice\"}"],
+        "grant",
+        json!({"user": "alice"}),
+    );
+
+    assert_manage_user_command(
+        &["rbac", "user", "revoke", "{\"user\":\"bob\"}"],
+        "revoke",
+        json!({"user": "bob"}),
+    );
+
+    assert_manage_user_command(
+        &["auth", "grant", "{\"user\":\"carol\"}"],
+        "grant",
+        json!({"user": "carol"}),
+    );
 }
 
 #[test]

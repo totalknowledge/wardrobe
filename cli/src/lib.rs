@@ -484,16 +484,22 @@ fn run_manage_user_alias(
     parts: &[String],
     pretty: bool,
 ) -> io::Result<()> {
-    if parts.len() < 3 {
+    let (action_index, payload_index) = if parts.get(1).map(String::as_str) == Some("user") {
+        (2, 3)
+    } else {
+        (1, 2)
+    };
+
+    if parts.len() <= payload_index {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!("{} requires <action> <json>", parts[0]),
         ));
     }
 
-    let payload = parse_json_arg(&parts[2], "user admin payload")?;
+    let payload = parse_json_arg(&parts[payload_index], "user admin payload")?;
     let response = client
-        .manage_user(&parts[1], payload)
+        .manage_user(&parts[action_index], payload)
         .map_err(client_error)?;
     print_json(&response, pretty)
 }
