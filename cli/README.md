@@ -72,8 +72,11 @@ wardrobe-cli --target ./my-db --pretty records gem
 
 Insert or update a record in a drawer. Prints the assigned record pointer on success.
 
+Aliases: `insert`, `create`.
+
 ```sh
 wardrobe-cli --target ./wardrobe upsert gem '{"_id":"@gem:lnk_fire","element":"Fire"}'
+wardrobe-cli --target ./wardrobe insert gem '{"_id":"@gem:lnk_ice","element":"Ice"}'
 ```
 
 ```
@@ -92,6 +95,32 @@ wardrobe-cli --target ./my-db upsert gem '{"element":"Wind"}'
 
 ---
 
+### `find <drawer> <json>`
+
+Query records in a drawer with a JSON filter. Prints matching hydrated records as JSON.
+
+Aliases: `get`, `query`.
+
+```sh
+wardrobe-cli --target ./my-db find gem '{"element":"Fire"}'
+wardrobe-cli --target ./my-db --pretty query gem '{"power":88}'
+```
+
+---
+
+### `delete <drawer> <json>`
+
+Delete a record identified by the `_id` field in the JSON payload.
+
+Alias: `remove`.
+
+```sh
+wardrobe-cli --target ./my-db delete gem '{"_id":"@gem:fire"}'
+wardrobe-cli --target ./my-db remove gem '{"_id":"fire"}'
+```
+
+---
+
 ### `delete-by-id <pointer>`
 
 Delete the record identified by its pointer. Prints `deleted: true` when the record was found and removed, or `deleted: false` when no matching record existed.
@@ -102,6 +131,59 @@ wardrobe-cli --target ./my-db delete-by-id @gem:lnk_fire
 
 ```
 deleted: true
+```
+
+---
+
+### `define database <name>`
+
+Create and register a database through the Wardrobe engine catalog.
+
+Alias: `create-db <name>`.
+
+```sh
+wardrobe-cli --target ./my-db define database admin_db
+wardrobe-cli --target ./my-db create-db admin_db
+```
+
+---
+
+### `define schema <database> <name>`
+
+Create and register a schema under an existing database. If the parent database does not exist, the command fails with a non-zero exit status.
+
+Alias: `create-schema <database> <name>`.
+
+```sh
+wardrobe-cli --target ./my-db define schema admin_db public
+wardrobe-cli --target ./my-db create-schema admin_db public
+```
+
+---
+
+### `define drawer <database> <schema> <name>`
+
+Create and register a drawer under an existing database/schema pair.
+
+Alias: `create-drawer <database> <schema> <name>`.
+
+```sh
+wardrobe-cli --target ./my-db define drawer admin_db public gem
+wardrobe-cli --target ./my-db create-drawer admin_db public gem
+```
+
+---
+
+### `manage user <action> <json>`
+
+Send a user administration request through the remote client protocol.
+
+Aliases: `auth <action> <json>`, `rbac <action> <json>`.
+
+Embedded mode rejects this command because local file permissions are the embedded authorization boundary. Remote servers remain responsible for validating privileges and applying credential changes.
+
+```sh
+wardrobe-cli --target wardrobe://localhost:7777 manage user grant '{"user":"alice","role":"admin"}'
 ```
 
 ---
@@ -148,6 +230,23 @@ Storage directory: ./my-db
 Drawer count: 3
 Status: issues found
 weapon: missing index file
+```
+
+---
+
+### `show <type>`
+
+List catalog and discovery information.
+
+Aliases: `ls`, `list`.
+
+Supported forms:
+
+```sh
+wardrobe-cli --target ./my-db show tenants
+wardrobe-cli --target ./my-db show databases
+wardrobe-cli --target ./my-db list schemas admin_db
+wardrobe-cli --target ./my-db ls drawers admin_db public
 ```
 
 ---

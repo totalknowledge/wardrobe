@@ -110,6 +110,7 @@ where
             | Command::DefineSchema { .. }
             | Command::DefineDrawer { .. }
             | Command::DefineTenantRoute { .. }
+            | Command::ManageUser { .. }
     ) {
         engine.append_boundary_wal(&command)?;
     }
@@ -152,6 +153,10 @@ where
         } => engine
             .register_tenant_route(&tenant_id, &database_name, &location)
             .map(CommandResult::StorageInventory),
+        Command::ManageUser { .. } => Err(Error::new(
+            ErrorKind::Unsupported,
+            "user management must be handled by an authenticated Wardrobe server",
+        )),
         Command::ExecuteForTenant {
             tenant_id,
             database_name,
@@ -237,6 +242,7 @@ where
         | Command::DefineSchema { .. }
         | Command::DefineDrawer { .. }
         | Command::DefineTenantRoute { .. }
+        | Command::ManageUser { .. }
         | Command::ExecuteForTenant { .. }
         | Command::Execute { .. }
         | Command::ExecuteInScope { .. } => Err(Error::new(
@@ -291,6 +297,7 @@ pub(crate) fn command_drawer_name(command: &Command) -> Option<String> {
         | Command::DefineSchema { .. }
         | Command::DefineDrawer { .. }
         | Command::DefineTenantRoute { .. }
+        | Command::ManageUser { .. }
         | Command::ExecuteForTenant { .. }
         | Command::ShowTenants
         | Command::ShowDatabases

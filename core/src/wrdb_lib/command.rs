@@ -65,6 +65,10 @@ pub enum Command {
         database_name: String,
         location: String,
     },
+    ManageUser {
+        action: String,
+        payload: Value,
+    },
     ExecuteForTenant {
         tenant_id: String,
         database_name: String,
@@ -96,4 +100,5 @@ pub enum CommandResult {
     Deleted(bool),
     Vacuumed(VacuumReport),
     Migrated(VacuumReport),
+    Admin(Value),
 }

@@ -493,6 +493,100 @@ fn client_show_drawers_unexpected_result_returns_invaliddata() {
 }
 
 #[test]
+fn client_admin_setup_commands_route_over_network() {
+    let database_inventory = StorageInventory {
+        name: "admin_db".to_string(),
+        record_count: 0,
+        disk_size_bytes: 0,
+        register_file_count: 1,
+    };
+    let schema_inventory = StorageInventory {
+        name: "public".to_string(),
+        record_count: 0,
+        disk_size_bytes: 0,
+        register_file_count: 1,
+    };
+    let drawer_inventory = StorageInventory {
+        name: "gem".to_string(),
+        record_count: 0,
+        disk_size_bytes: 0,
+        register_file_count: 1,
+    };
+
+    let (connection, handle) = spawn_tcp_protocol_server(vec![
+        (
+            Command::DefineDatabase {
+                database_name: "admin_db".to_string(),
+            },
+            CommandResult::StorageInventory(database_inventory.clone()),
+        ),
+        (
+            Command::DefineSchema {
+                database_name: "admin_db".to_string(),
+                schema_name: "public".to_string(),
+            },
+            CommandResult::StorageInventory(schema_inventory.clone()),
+        ),
+        (
+            Command::DefineDrawer {
+                database_name: "admin_db".to_string(),
+                schema_name: "public".to_string(),
+                drawer_name: "gem".to_string(),
+            },
+            CommandResult::StorageInventory(drawer_inventory.clone()),
+        ),
+        (
+            Command::DefineTenantRoute {
+                tenant_id: "tenant_a".to_string(),
+                database_name: "admin_db".to_string(),
+                location: "tenant_a/admin_db/public".to_string(),
+            },
+            CommandResult::StorageInventory(database_inventory.clone()),
+        ),
+        (
+            Command::ManageUser {
+                action: "grant".to_string(),
+                payload: json!({"user": "alice"}),
+            },
+            CommandResult::Admin(json!({"ok": true})),
+        ),
+    ]);
+
+    let client = WardrobeClient::open(connection).expect("open failed");
+
+    assert_eq!(
+        client.create_database("admin_db").expect("create database"),
+        database_inventory
+    );
+    assert_eq!(
+        client
+            .create_schema("admin_db", "public")
+            .expect("create schema"),
+        schema_inventory
+    );
+    assert_eq!(
+        client
+            .create_drawer("admin_db", "public", "gem")
+            .expect("create drawer"),
+        drawer_inventory
+    );
+    assert_eq!(
+        client
+            .register_tenant_route("tenant_a", "admin_db", "tenant_a/admin_db/public")
+            .expect("register route"),
+        database_inventory
+    );
+    assert_eq!(
+        client
+            .manage_user("grant", json!({"user": "alice"}))
+            .expect("manage user"),
+        json!({"ok": true})
+    );
+
+    handle.join().expect("join failed");
+}
+
+#[test]
 fn client_unexpected_result_on_upsert_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
         Command::Upsert {

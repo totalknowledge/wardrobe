@@ -203,6 +203,115 @@ impl WardrobeClient {
         }
     }
 
+    pub fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.create_database(database_name),
+            Driver::Network(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineDatabase {
+                    database_name: database_name.to_string(),
+                })?)
+            }
+            Driver::UnixSocket(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineDatabase {
+                    database_name: database_name.to_string(),
+                })?)
+            }
+        }
+    }
+
+    pub fn create_schema(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> Result<StorageInventory> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.create_schema(database_name, schema_name),
+            Driver::Network(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineSchema {
+                    database_name: database_name.to_string(),
+                    schema_name: schema_name.to_string(),
+                })?)
+            }
+            Driver::UnixSocket(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineSchema {
+                    database_name: database_name.to_string(),
+                    schema_name: schema_name.to_string(),
+                })?)
+            }
+        }
+    }
+
+    pub fn create_drawer(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+        drawer_name: &str,
+    ) -> Result<StorageInventory> {
+        match &self.driver {
+            Driver::Embedded(engine) => {
+                engine.create_drawer(database_name, schema_name, drawer_name)
+            }
+            Driver::Network(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineDrawer {
+                    database_name: database_name.to_string(),
+                    schema_name: schema_name.to_string(),
+                    drawer_name: drawer_name.to_string(),
+                })?)
+            }
+            Driver::UnixSocket(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineDrawer {
+                    database_name: database_name.to_string(),
+                    schema_name: schema_name.to_string(),
+                    drawer_name: drawer_name.to_string(),
+                })?)
+            }
+        }
+    }
+
+    pub fn register_tenant_route(
+        &self,
+        tenant_id: &str,
+        database_name: &str,
+        location: &str,
+    ) -> Result<StorageInventory> {
+        match &self.driver {
+            Driver::Embedded(engine) => {
+                engine.register_tenant_route(tenant_id, database_name, location)
+            }
+            Driver::Network(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineTenantRoute {
+                    tenant_id: tenant_id.to_string(),
+                    database_name: database_name.to_string(),
+                    location: location.to_string(),
+                })?)
+            }
+            Driver::UnixSocket(driver) => {
+                expect_storage_inventory(driver.execute(Command::DefineTenantRoute {
+                    tenant_id: tenant_id.to_string(),
+                    database_name: database_name.to_string(),
+                    location: location.to_string(),
+                })?)
+            }
+        }
+    }
+
+    pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value> {
+        match &self.driver {
+            Driver::Embedded(_) => Err(Error::new(
+                ErrorKind::Unsupported,
+                "manage user requires a remote Wardrobe server with administrative authorization",
+            )),
+            Driver::Network(driver) => expect_admin(driver.execute(Command::ManageUser {
+                action: action.to_string(),
+                payload,
+            })?),
+            Driver::UnixSocket(driver) => expect_admin(driver.execute(Command::ManageUser {
+                action: action.to_string(),
+                payload,
+            })?),
+        }
+    }
+
     pub fn show_tenants(&self) -> Result<Vec<String>> {
         match &self.driver {
             Driver::Embedded(engine) => engine.show_tenants(),
@@ -457,6 +566,20 @@ fn expect_migrated(result: CommandResult) -> Result<VacuumReport> {
     match result {
         CommandResult::Migrated(report) => Ok(report),
         other => unexpected_result("migration report", other),
+    }
+}
+
+fn expect_storage_inventory(result: CommandResult) -> Result<StorageInventory> {
+    match result {
+        CommandResult::StorageInventory(inventory) => Ok(inventory),
+        other => unexpected_result("storage inventory", other),
+    }
+}
+
+fn expect_admin(result: CommandResult) -> Result<Value> {
+    match result {
+        CommandResult::Admin(payload) => Ok(payload),
+        other => unexpected_result("admin response", other),
     }
 }
 

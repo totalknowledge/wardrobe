@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use wardrobe_cli::{
     CliConfig, print_json, pub_normalize_record_ids, run_cli_logic, run_command, shell_split,
 };
-use wardrobe_core::{CommandResult, StorageInventory, WardrobeClient, WardrobeEngine};
+use wardrobe_core::{Command, CommandResult, StorageInventory, WardrobeClient, WardrobeEngine};
 
 fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -227,6 +227,116 @@ fn test_embedded_write_commands_execution_paths() {
 }
 
 #[test]
+fn test_embedded_administrative_setup_commands_execution_paths() {
+    let storage_directory = temp_storage_directory("admin_setup");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let define_database = vec![
+        "define".to_string(),
+        "database".to_string(),
+        "admin_db".to_string(),
+    ];
+    assert!(run_command(&client, &define_database, false).is_ok());
+
+    let define_schema = vec![
+        "define".to_string(),
+        "schema".to_string(),
+        "admin_db".to_string(),
+        "public".to_string(),
+    ];
+    assert!(run_command(&client, &define_schema, false).is_ok());
+
+    let define_drawer = vec![
+        "define".to_string(),
+        "drawer".to_string(),
+        "admin_db".to_string(),
+        "public".to_string(),
+        "gem".to_string(),
+    ];
+    assert!(run_command(&client, &define_drawer, true).is_ok());
+
+    let show_databases = vec!["show".to_string(), "databases".to_string()];
+    assert!(run_command(&client, &show_databases, false).is_ok());
+
+    let list_schemas = vec![
+        "list".to_string(),
+        "schemas".to_string(),
+        "admin_db".to_string(),
+    ];
+    assert!(run_command(&client, &list_schemas, false).is_ok());
+
+    let ls_drawers = vec![
+        "ls".to_string(),
+        "drawers".to_string(),
+        "admin_db".to_string(),
+        "public".to_string(),
+    ];
+    assert!(run_command(&client, &ls_drawers, false).is_ok());
+
+    let databases = client.show_databases().expect("databases");
+    assert!(databases.iter().any(|db| db.name == "admin_db"));
+    assert!(
+        client
+            .show_schemas("admin_db")
+            .expect("schemas")
+            .contains(&"public".to_string())
+    );
+    assert!(
+        client
+            .show_drawers("admin_db", "public")
+            .expect("drawers")
+            .iter()
+            .any(|drawer| drawer.name == "gem")
+    );
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn test_schema_creation_rejects_missing_parent_database() {
+    let storage_directory = temp_storage_directory("missing_parent");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let args = vec![
+        "create-schema".to_string(),
+        "missing_db".to_string(),
+        "public".to_string(),
+    ];
+    assert!(run_command(&client, &args, false).is_err());
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
+fn test_data_command_aliases_execution_paths() {
+    let storage_directory = temp_storage_directory("data_aliases");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let insert_args = vec![
+        "insert".to_string(),
+        "gem".to_string(),
+        "{\"_id\":\"@gem:lnk_amethyst\",\"power\":88}".to_string(),
+    ];
+    assert!(run_command(&client, &insert_args, false).is_ok());
+
+    let find_args = vec![
+        "find".to_string(),
+        "gem".to_string(),
+        "{\"power\":88}".to_string(),
+    ];
+    assert!(run_command(&client, &find_args, false).is_ok());
+
+    let remove_args = vec![
+        "remove".to_string(),
+        "gem".to_string(),
+        "{\"_id\":\"@gem:amethyst\"}".to_string(),
+    ];
+    assert!(run_command(&client, &remove_args, false).is_ok());
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn test_network_metadata_commands_routing() {
     let target = spawn_protocol_server(|mut stream| {
         let _req = wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
@@ -271,6 +381,86 @@ fn test_network_metadata_commands_routing() {
         "public".to_string(),
     ];
     assert!(run_command(&client_drawers, &drawer_args, false).is_ok());
+}
+
+#[test]
+fn test_network_administrative_commands_routing() {
+    let target = spawn_protocol_server(|mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(
+            command,
+            Command::DefineDatabase {
+                database_name: "admin_db".to_string()
+            }
+        );
+        let payload = serde_json::to_vec(&CommandResult::StorageInventory(StorageInventory {
+            name: "admin_db".to_string(),
+            record_count: 0,
+            disk_size_bytes: 0,
+            register_file_count: 1,
+        }))
+        .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+
+    let client = WardrobeClient::open(&target).unwrap();
+    let create_db_args = vec!["create-db".to_string(), "admin_db".to_string()];
+    assert!(run_command(&client, &create_db_args, false).is_ok());
+
+    let target_manage = spawn_protocol_server(|mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(
+            command,
+            Command::ManageUser {
+                action: "grant".to_string(),
+                payload: serde_json::json!({"user": "alice"})
+            }
+        );
+        let payload = serde_json::to_vec(&CommandResult::Admin(serde_json::json!({"ok": true})))
+            .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+
+    let client_manage = WardrobeClient::open(&target_manage).unwrap();
+    let manage_args = vec![
+        "manage".to_string(),
+        "user".to_string(),
+        "grant".to_string(),
+        "{\"user\":\"alice\"}".to_string(),
+    ];
+    assert!(run_command(&client_manage, &manage_args, false).is_ok());
+}
+
+#[test]
+fn test_embedded_manage_user_is_rejected() {
+    let storage_directory = temp_storage_directory("embedded_manage_user");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let args = vec![
+        "manage".to_string(),
+        "user".to_string(),
+        "grant".to_string(),
+        "{\"user\":\"alice\"}".to_string(),
+    ];
+    assert!(run_command(&client, &args, false).is_err());
+
+    let _ = fs::remove_dir_all(storage_directory);
 }
 
 #[test]

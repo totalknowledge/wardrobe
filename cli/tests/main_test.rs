@@ -67,6 +67,15 @@ fn binary_missing_command_arguments_validation_guards() {
     let show_drawers_out = run_cli(&["--target", &target, "show-drawers"]);
     assert!(!show_drawers_out.status.success());
 
+    let define_out = run_cli(&["--target", &target, "define"]);
+    assert!(!define_out.status.success());
+
+    let create_schema_out = run_cli(&["--target", &target, "create-schema"]);
+    assert!(!create_schema_out.status.success());
+
+    let manage_user_out = run_cli(&["--target", &target, "manage", "user"]);
+    assert!(!manage_user_out.status.success());
+
     let _ = fs::remove_dir_all(tmp);
 }
 

@@ -60,13 +60,30 @@ pub fn print_help() {
     println!("  diagnose                  Run structural diagnostics (embedded only)");
     println!("  inspect <drawer>          Inspect drawer companion files (embedded only)");
     println!("  records <drawer>          Print hydrated records for a drawer");
+    println!("  upsert <drawer> <json>    Insert or update a record (aliases: insert, create)");
+    println!("  find <drawer> <json>      Query records with a JSON filter (aliases: get, query)");
+    println!("  delete <drawer> <json>    Delete a record by JSON _id (alias: remove)");
+    println!("  define database <name>    Create/register a database (alias: create-db)");
+    println!("  define schema <db> <name> Create/register a schema (alias: create-schema)");
+    println!(
+        "  define drawer <db> <schema> <name> Create/register a drawer (alias: create-drawer)"
+    );
+    println!("  manage user <action> <json> Send a user admin request to a remote server");
+    println!(
+        "  show <type>               List tenants/databases/schemas/drawers (aliases: ls, list)"
+    );
     println!("  show-databases            List discovered databases (network+embedded)");
     println!("  show-schemas <database>   List schemas for a database");
+    println!("  show-drawers <db> <schema> List drawers for a schema");
 }
 
 pub fn run_cli_logic(config: CliConfig) -> io::Result<()> {
     let client = WardrobeClient::open(&config.connection)
         .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to open connection: {e}")))?;
+
+    if !config.command_parts.is_empty() {
+        return run_command(&client, &config.command_parts, config.pretty);
+    }
 
     let stdin_is_tty = atty::is(atty::Stream::Stdin);
     if !stdin_is_tty {
@@ -77,10 +94,6 @@ pub fn run_cli_logic(config: CliConfig) -> io::Result<()> {
             let parts = shell_split(buffer);
             return run_command(&client, &parts, config.pretty);
         }
-    }
-
-    if !config.command_parts.is_empty() {
-        return run_command(&client, &config.command_parts, config.pretty);
     }
 
     repl(&client, config.pretty)
@@ -202,22 +215,29 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             );
             Ok(())
         }
-        "upsert" => {
+        "find" | "get" | "query" => {
             if parts.len() < 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    "upsert requires a drawer name and JSON payload",
+                    format!("{} requires a drawer name and JSON filter", parts[0]),
                 ));
             }
-            let payload = serde_json::from_str::<Value>(&parts[2]).map_err(|e| {
-                Error::new(
+            let filter = parse_json_arg(&parts[2], "query filter")?;
+            let mut records = client
+                .find_by_filter(&parts[1], filter, None)
+                .map_err(client_error)?;
+            pub_normalize_record_ids(&mut records);
+            print_json(&records, pretty)
+        }
+        "upsert" | "insert" | "create" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    format!("invalid JSON payload: {e}"),
-                )
-            })?;
-            let pointer = client
-                .upsert(&parts[1], payload)
-                .map_err(|e| Error::new(ErrorKind::Other, format!("client error: {e}")))?;
+                    format!("{} requires a drawer name and JSON payload", parts[0]),
+                ));
+            }
+            let payload = parse_json_arg(&parts[2], "payload")?;
+            let pointer = client.upsert(&parts[1], payload).map_err(client_error)?;
             println!("{pointer}");
             Ok(())
         }
@@ -228,16 +248,69 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "delete-by-id requires a pointer",
                 ));
             }
-            let deleted = client
-                .delete_by_id(&parts[1])
-                .map_err(|e| Error::new(ErrorKind::Other, format!("client error: {e}")))?;
+            let deleted = client.delete_by_id(&parts[1]).map_err(client_error)?;
             println!("deleted: {deleted}");
             Ok(())
         }
+        "delete" | "remove" => {
+            if parts.len() < 2 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{} requires a pointer or <drawer> <json>", parts[0]),
+                ));
+            }
+            let pointer = if parts.len() == 2 {
+                parts[1].clone()
+            } else {
+                pointer_from_delete_payload(
+                    &parts[1],
+                    &parse_json_arg(&parts[2], "delete payload")?,
+                )?
+            };
+            let deleted = client.delete_by_id(&pointer).map_err(client_error)?;
+            println!("deleted: {deleted}");
+            Ok(())
+        }
+        "define" => run_define_command(client, parts, pretty),
+        "create-db" => {
+            if parts.len() < 2 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "create-db requires a database name",
+                ));
+            }
+            let inventory = client.create_database(&parts[1]).map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "create-schema" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "create-schema requires <database> <schema>",
+                ));
+            }
+            let inventory = client
+                .create_schema(&parts[1], &parts[2])
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "create-drawer" => {
+            if parts.len() < 4 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "create-drawer requires <database> <schema> <drawer>",
+                ));
+            }
+            let inventory = client
+                .create_drawer(&parts[1], &parts[2], &parts[3])
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "manage" => run_manage_user_command(client, parts, pretty),
+        "auth" | "rbac" => run_manage_user_alias(client, parts, pretty),
+        "show" | "ls" | "list" => run_show_command(client, parts, pretty),
         "show-databases" => {
-            let dbs = client
-                .show_databases()
-                .map_err(|e| Error::new(ErrorKind::Other, format!("client error: {e}")))?;
+            let dbs = client.show_databases().map_err(client_error)?;
             print_json(&dbs, pretty)
         }
         "show-schemas" => {
@@ -247,9 +320,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "show-schemas requires a database name",
                 ));
             }
-            let schemas = client
-                .show_schemas(&parts[1])
-                .map_err(|e| Error::new(ErrorKind::Other, format!("client error: {e}")))?;
+            let schemas = client.show_schemas(&parts[1]).map_err(client_error)?;
             print_json(&schemas, pretty)
         }
         "show-drawers" => {
@@ -261,7 +332,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             }
             let drawers = client
                 .show_drawers(&parts[1], &parts[2])
-                .map_err(|e| Error::new(ErrorKind::Other, format!("client error: {e}")))?;
+                .map_err(client_error)?;
             print_json(&drawers, pretty)
         }
         _ => Err(Error::new(
@@ -269,6 +340,193 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             format!("Unknown command: {}", parts[0]),
         )),
     }
+}
+
+fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "define requires database, schema, or drawer",
+        ));
+    }
+
+    match parts[1].as_str() {
+        "database" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "define database requires a database name",
+                ));
+            }
+            let inventory = client.create_database(&parts[2]).map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "schema" => {
+            if parts.len() < 4 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "define schema requires <database> <schema>",
+                ));
+            }
+            let inventory = client
+                .create_schema(&parts[2], &parts[3])
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "drawer" => {
+            if parts.len() < 5 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "define drawer requires <database> <schema> <drawer>",
+                ));
+            }
+            let inventory = client
+                .create_drawer(&parts[2], &parts[3], &parts[4])
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "tenant-route" => {
+            if parts.len() < 5 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "define tenant-route requires <tenant> <database> <location>",
+                ));
+            }
+            let inventory = client
+                .register_tenant_route(&parts[2], &parts[3], &parts[4])
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown define target: {other}"),
+        )),
+    }
+}
+
+fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{} requires tenants, databases, schemas, or drawers",
+                parts[0]
+            ),
+        ));
+    }
+
+    match parts[1].as_str() {
+        "tenant" | "tenants" => {
+            let tenants = client.show_tenants().map_err(client_error)?;
+            print_json(&tenants, pretty)
+        }
+        "database" | "databases" => {
+            let dbs = client.show_databases().map_err(client_error)?;
+            print_json(&dbs, pretty)
+        }
+        "schema" | "schemas" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{} schemas requires a database name", parts[0]),
+                ));
+            }
+            let schemas = client.show_schemas(&parts[2]).map_err(client_error)?;
+            print_json(&schemas, pretty)
+        }
+        "drawer" | "drawers" => {
+            if parts.len() < 4 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{} drawers requires <database> <schema>", parts[0]),
+                ));
+            }
+            let drawers = client
+                .show_drawers(&parts[2], &parts[3])
+                .map_err(client_error)?;
+            print_json(&drawers, pretty)
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown show target: {other}"),
+        )),
+    }
+}
+
+fn run_manage_user_command(
+    client: &WardrobeClient,
+    parts: &[String],
+    pretty: bool,
+) -> io::Result<()> {
+    if parts.len() < 2 || parts[1] != "user" {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "manage requires user <action> <json>",
+        ));
+    }
+    if parts.len() < 4 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "manage user requires <action> <json>",
+        ));
+    }
+
+    let payload = parse_json_arg(&parts[3], "user admin payload")?;
+    let response = client
+        .manage_user(&parts[2], payload)
+        .map_err(client_error)?;
+    print_json(&response, pretty)
+}
+
+fn run_manage_user_alias(
+    client: &WardrobeClient,
+    parts: &[String],
+    pretty: bool,
+) -> io::Result<()> {
+    if parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} requires <action> <json>", parts[0]),
+        ));
+    }
+
+    let payload = parse_json_arg(&parts[2], "user admin payload")?;
+    let response = client
+        .manage_user(&parts[1], payload)
+        .map_err(client_error)?;
+    print_json(&response, pretty)
+}
+
+fn parse_json_arg(raw: &str, label: &str) -> io::Result<Value> {
+    serde_json::from_str::<Value>(raw).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid JSON {label}: {e}"),
+        )
+    })
+}
+
+fn pointer_from_delete_payload(drawer_name: &str, payload: &Value) -> io::Result<String> {
+    let record_id = payload.get("_id").and_then(Value::as_str).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "delete payload must include a string _id",
+        )
+    })?;
+
+    if record_id.starts_with('@') {
+        Ok(record_id.to_string())
+    } else {
+        Ok(format!(
+            "@{}:{}",
+            drawer_name.trim_start_matches('@'),
+            record_id.trim_start_matches("lnk_")
+        ))
+    }
+}
+
+fn client_error(error: std::io::Error) -> std::io::Error {
+    Error::new(error.kind(), format!("client error: {error}"))
 }
 
 pub fn print_json<T: serde::Serialize>(v: &T, pretty: bool) -> io::Result<()> {
