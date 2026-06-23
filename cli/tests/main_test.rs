@@ -23,13 +23,41 @@ fn binary_help_flag_exits_successfully() {
     let output = run_cli(&["--help"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("wardrobe-cli"));
+    assert!(stdout.contains("wardrobe-cli:"));
+    assert!(stdout.contains("-h, --help"));
+    assert!(stdout.contains("-v, --version"));
+    assert!(
+        stdout.contains("The first argument to the CLI is always the target connection context.")
+    );
+    assert!(stdout.contains("STRUCTURAL & LIFECYCLE MANAGEMENT"));
+    assert!(stdout.contains("DOCUMENT MUTATIONS & QUERIES (RUDI)"));
+    assert!(stdout.contains("SCHEMA ENGINE & RELATIONSHIP MANAGEMENT"));
+    assert!(stdout.contains("BACKUP & DISASTER RECOVERY"));
+    assert!(stdout.contains("SERVER ACCESS CONTROL & USER ADMINISTRATION"));
+    assert!(stdout.contains("CORE ARCHITECTURAL RULES"));
+    assert!(stdout.contains("Example: create drawer my_wardrobe/my_bay/user"));
+    assert!(stdout.contains("Example: backup my_wardrobe/my_bay ./backups/bay_snapshot.wrb"));
 }
 
 #[test]
 fn binary_short_help_flag_exits_successfully() {
-    let output = run_cli(&["-h"]);
-    assert!(output.status.success());
+    let long_output = run_cli(&["--help"]);
+    let short_output = run_cli(&["-h"]);
+    assert!(short_output.status.success());
+    assert_eq!(short_output.stdout, long_output.stdout);
+}
+
+#[test]
+fn binary_version_flags_exit_successfully() {
+    let long_output = run_cli(&["--version"]);
+    assert!(long_output.status.success());
+    let stdout = String::from_utf8_lossy(&long_output.stdout);
+    assert!(stdout.contains("wardrobe-cli"));
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+
+    let short_output = run_cli(&["-v"]);
+    assert!(short_output.status.success());
+    assert_eq!(short_output.stdout, long_output.stdout);
 }
 
 #[test]

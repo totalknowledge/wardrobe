@@ -40,6 +40,10 @@ impl CliConfig {
                     print_help();
                     std::process::exit(0);
                 }
+                "--version" | "-v" => {
+                    print_version();
+                    std::process::exit(0);
+                }
                 _ => command_parts.push(arg),
             }
         }
@@ -52,29 +56,158 @@ impl CliConfig {
     }
 }
 
+const HELP_TEXT: &str = r#"wardrobe-cli:
+    -h, --help                  Show this message and exit
+    -v, --version               Show the version and exit
+
+    The first argument to the CLI is always the target connection context.
+    It can be a filesystem path (e.g., ./wardrobe) for embedded mode, or a network connection string or socket location
+    (e.g., wardrobe://127.0.0.1:24842) for remote execution.
+
+    If a targeted filesystem path does not explicitly point to a database or bay context,
+    the engine transparently routes execution into system defaults:
+    - Default Wardrobe fallback:         "default"
+    - Default Bay fallback:              "default"
+
+    ===========================================================================
+    STRUCTURAL & LIFECYCLE MANAGEMENT
+    ===========================================================================
+    show <type> <?parent_path>
+        List structural elements. <type> must be one of: wardrobes, bays, drawers, tenants.
+        Example: show bays my_wardrobe
+
+    create <type> <path>
+        Provision a new structural resource. <type> must be one of: wardrobe, bay, drawer.
+        Example: create drawer my_wardrobe/my_bay/user
+
+    check <path>
+        Run physical presence and sanity verification checks on a structural layer.
+        Example: check my_wardrobe/my_bay/user
+
+    clean <path>
+        Execute a space-reclaiming vacuum process on a drawer or group of drawers.
+        Example: clean my_wardrobe/my_bay (cleans all drawers in bay)
+
+    ===========================================================================
+    DOCUMENT MUTATIONS & QUERIES (RUDI)
+    ===========================================================================
+    upsert <path> <json_payload>
+        Insert a new document or completely overwrite an existing document by its _id.
+        Example: upsert my_wardrobe/my_bay/user '{"_id": "user-01", "name": "Marcus"}'
+
+    count <path> <?json_filter>
+        Count documents matching an optional criteria filter.
+        Example: count my_wardrobe/my_bay/user '{"tool.type": "Hammer"}'
+
+    inspect <path>
+        Expose raw storage metrics (sizes, record counts, tombstone fragmentation percentages).
+        Does not output data records.
+        Example: inspect my_wardrobe/my_bay/user
+
+    records <path> <?json_filter>
+        Retrieve a list of documents matching an optional criteria filter.
+        Example: records my_wardrobe/my_bay/user '{"tool._id": "298234789328923489"}'
+        Example: records my_wardrobe/my_bay/user '{"_id": "@tool:298234789328923489"}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type": "Hammer"}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$in": ["Hammer", "Sword"]}}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$nin": ["Hammer", "Sword"]}}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$exists": true}}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$exists": false}}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$regex": ".*Sword.*"}}'
+        Example: records my_wardrobe/my_bay/user '{"tool.type.owner": "@user:8723478929234786234"}'
+
+    delete <path> <json_filter_or_id>
+        Remove documents from a drawer matching a specific structural ID or JSON filter criteria.
+        Example: delete my_wardrobe/my_bay/user '{"_id": "user-02"}'
+
+    ===========================================================================
+    SCHEMA ENGINE & RELATIONSHIP MANAGEMENT
+    ===========================================================================
+    add <type> <path> <target_field> <?extra_args>
+        Attach a structural modifier, index, rule, or side-effect routine to a field.
+        <type> must be one of: index, key, constraint, trigger, relationship, cascade-delete.
+
+        Examples:
+        add index my_wardrobe/my_bay/user tool.type
+        add key my_wardrobe/my_bay/user profile_id secondary
+        add constraint my_wardrobe/my_bay/user email unique
+        add constraint my_wardrobe/my_bay/user age non-null
+        add relationship my_wardrobe/my_bay/user tool_id my_wardrobe/my_bay/tool
+        add cascade-delete my_wardrobe/my_bay/user tool_id
+        add trigger my_wardrobe/my_bay/user on_upsert ./scripts/sync_profile.sh
+
+    remove <type> <path> <target_field> <?extra_args>
+        Detach or drop an active modifier, index, rule, or routine from a field context.
+        <type> must be one of: index, key, constraint, trigger, relationship, cascade-delete.
+
+        Examples:
+        remove index my_wardrobe/my_bay/user tool.type
+        remove constraint my_wardrobe/my_bay/user email unique
+        remove cascade-delete my_wardrobe/my_bay/user tool_id
+
+    ===========================================================================
+    BACKUP & DISASTER RECOVERY
+    ===========================================================================
+    backup <source_path> <destination_archive_path>
+        Snapshot a targeted layer (Wardrobe, Bay, or individual Drawer) into an isolated archive file.
+        Example: backup my_wardrobe/my_bay ./backups/bay_snapshot.wrb
+
+    restore <destination_path> <source_archive_path>
+        Hydrate and replace a target storage layer from a valid backup archive file.
+        Example: restore my_wardrobe/my_bay ./backups/bay_snapshot.wrb
+
+    ===========================================================================
+    SERVER ACCESS CONTROL & USER ADMINISTRATION
+    ===========================================================================
+    add user <json_user_payload>
+        Register an authorized administrative or client identity with the Wardrobe instance.
+        Example: add user '{"username": "dev_admin", "role": "operator"}'
+
+    grant permission <username> <permission_scope>
+        Delegate functional access rights (Read, Update, Delete, Inspect) across a path scope.
+        Example: grant permission dev_admin my_wardrobe/my_bay:rud
+
+    revoke permission <username> <permission_scope>
+        Strip functional access rights from a user identity.
+        Example: revoke permission dev_admin my_wardrobe/my_bay:d
+
+    ===========================================================================
+    CORE ARCHITECTURAL RULES
+    ===========================================================================
+    * Addressing Resolution: Document IDs can be targeted explicitly or implicitly. Fully
+      qualified URI references bypass path parameter dependencies entirely by mapping the
+      exact storage boundaries directly into the key token:
+      @storage_root/wardrobe_name/bay_name/drawer_name:document_id
+
+    * Cross-Boundary Traversal: Multi-wardrobe or cross-bay queries are explicitly allowed,
+      provided the executing context has been granted direct security clearance. These
+      requests require the fully qualified path string (wardrobe_name.bay_name.drawer_name)
+      to ensure the coordinator engine paths resolve without name collisions.
+
+    * Hierarchical Isolation Constraints: Bays are completely flat structures and cannot
+      be nested. When executing inquiries inside an explicitly passed tenant context,
+      the core boundary manager will explicitly block and reject any cross-tenant data traversal.
+
+    * Storage Strategy: Tenant data lives inside separate files underneath the drawer level
+      (e.g., drawername.tenant.drw), while the indexes and metadata remain per drawer name
+      to allow high-performance uniqueness constraints and fast non-tenant aggregation.
+
+    * Non-Tenant Inquiries: Executing a structural inquiry (inspect/count) without passing a
+      tenant context instructs the storage engine to aggregate results across all active tenant
+      sibling files, returning total global space and metadata metrics.
+
+    * Relational Document Graph Hydration: Nested JSON objects containing an "_id" field
+      trigger transactional graph processing. If a full object payload is passed with an "_id",
+      the engine initiates a Cascade Upsert across targeted drawers. If only an "_id" field
+      is present, the engine treats it as a strict reference link mutation. Omitting the field
+      entirely breaks and dissolves the underlying database relationship graph."#;
+
 pub fn print_help() {
-    println!("wardrobe-cli");
-    println!("  --target <connection>     Wardrobe connection string (defaults to ./wardrobe)");
-    println!("  --pretty                  Pretty-print JSON output (default: compact)");
-    println!("  drawers                   Show known drawers (embedded only)");
-    println!("  diagnose                  Run structural diagnostics (embedded only)");
-    println!("  inspect <drawer>          Inspect drawer companion files (embedded only)");
-    println!("  records <drawer>          Print hydrated records for a drawer");
-    println!("  upsert <drawer> <json>    Insert or update a record (aliases: insert, create)");
-    println!("  find <drawer> <json>      Query records with a JSON filter (aliases: get, query)");
-    println!("  delete <drawer> <json>    Delete a record by JSON _id (alias: remove)");
-    println!("  define database <name>    Create/register a database (alias: create-db)");
-    println!("  define schema <db> <name> Create/register a schema (alias: create-schema)");
-    println!(
-        "  define drawer <db> <schema> <name> Create/register a drawer (alias: create-drawer)"
-    );
-    println!("  manage user <action> <json> Send a user admin request to a remote server");
-    println!(
-        "  show <type>               List tenants/databases/schemas/drawers (aliases: ls, list)"
-    );
-    println!("  show-databases            List discovered databases (network+embedded)");
-    println!("  show-schemas <database>   List schemas for a database");
-    println!("  show-drawers <db> <schema> List drawers for a schema");
+    println!("{HELP_TEXT}");
+}
+
+pub fn print_version() {
+    println!("wardrobe-cli {}", env!("CARGO_PKG_VERSION"));
 }
 
 pub fn run_cli_logic(config: CliConfig) -> io::Result<()> {
