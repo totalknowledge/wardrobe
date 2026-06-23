@@ -14,14 +14,18 @@ use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::relationship;
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::wal::WalVerification;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{Error, ErrorKind, Result};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
-pub use crate::wrdb_lib::command::{Command, CommandResult};
+pub use crate::wrdb_lib::command::{
+    BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command, CommandResult,
+    DrawerInspectionMetrics, RestoreReport, StorageDiagnosis,
+};
 pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 pub use crate::wrdb_lib::storage::{
     StorageCoordinate, StorageInventory, StorageLocator, StorageScope,
@@ -35,6 +39,67 @@ pub struct WardrobeEngine {
     max_cached_drawers: Option<usize>,
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
+}
+
+const BACKUP_ARCHIVE_FORMAT: &str = "wardrobe-cli-backup-v1";
+const ACCESS_CONTROL_FILE_NAME: &str = "_wardrobe_access_control.json";
+
+#[derive(Debug)]
+struct InspectTarget {
+    data_dir: PathBuf,
+    drawer_name: String,
+    label: String,
+}
+
+struct DrawerFiles {
+    data: PathBuf,
+    index: PathBuf,
+    meta: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackupScope {
+    Wardrobe,
+    Bay,
+    Drawer,
+}
+
+impl BackupScope {
+    fn from_segment_count(segment_count: usize, label: &str) -> Result<Self> {
+        match segment_count {
+            1 => Ok(Self::Wardrobe),
+            2 => Ok(Self::Bay),
+            3 => Ok(Self::Drawer),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{label} must identify a wardrobe, bay, or drawer"),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Wardrobe => "wardrobe",
+            Self::Bay => "bay",
+            Self::Drawer => "drawer",
+        }
+    }
+
+    fn expected_segments(self) -> usize {
+        match self {
+            Self::Wardrobe => 1,
+            Self::Bay => 2,
+            Self::Drawer => 3,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StructuralBackupTarget {
+    scope: BackupScope,
+    segments: Vec<String>,
+    logical_path: String,
+    storage_path: PathBuf,
 }
 
 impl WardrobeEngine {
@@ -199,6 +264,250 @@ impl WardrobeEngine {
             payload,
             ExecutionContext::root(),
         )
+    }
+
+    pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics> {
+        let target = inspect_target(&self.root_directory, drawer_name)?;
+        let files = drawer_files(&target.data_dir, &target.drawer_name);
+        let data_bytes = file_size_or_zero(&files.data)?;
+        let index_bytes = file_size_or_zero(&files.index)?;
+        let meta_bytes = file_size_or_zero(&files.meta)?;
+        let total_bytes = data_bytes
+            .saturating_add(index_bytes)
+            .saturating_add(meta_bytes);
+        let register_file_count = [&files.data, &files.index, &files.meta]
+            .iter()
+            .filter(|path| path.is_file())
+            .count();
+        let record_count = self.count(&target.label, None, None)?;
+
+        Ok(DrawerInspectionMetrics {
+            path: target.label,
+            data_bytes,
+            index_bytes,
+            meta_bytes,
+            total_bytes,
+            record_count,
+            register_file_count,
+            tombstone_fragmentation_percent: None,
+        })
+    }
+
+    pub fn check_path(&self, raw_path: &str) -> Result<CheckReport> {
+        let segments = split_structural_path(raw_path, "check path")?;
+        let logical_path = segments.join("/");
+        let mut entries = Vec::new();
+
+        let kind = match segments.len() {
+            1 => {
+                let path = self.root_directory.join(&segments[0]);
+                entries.push(check_entry("directory", &path)?);
+                "wardrobe"
+            }
+            2 => {
+                let path = self.root_directory.join(&segments[0]).join(&segments[1]);
+                entries.push(check_entry("directory", &path)?);
+                "bay"
+            }
+            3 => {
+                let files = drawer_files(&self.root_directory, &logical_path);
+                entries.push(check_entry("data", &files.data)?);
+                entries.push(check_entry("index", &files.index)?);
+                entries.push(check_entry("meta", &files.meta)?);
+                "drawer"
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "check path must identify a wardrobe, bay, or drawer",
+                ));
+            }
+        };
+
+        Ok(CheckReport {
+            path: logical_path,
+            kind: kind.to_string(),
+            entries,
+        })
+    }
+
+    pub fn diagnose_storage(&self) -> Result<StorageDiagnosis> {
+        let drawers = self.list_drawer_names()?;
+        Ok(StorageDiagnosis {
+            storage_directory: self.root_directory.display().to_string(),
+            drawer_count: drawers.len(),
+            status: if drawers.is_empty() {
+                "empty".to_string()
+            } else {
+                "ok".to_string()
+            },
+            drawers,
+        })
+    }
+
+    pub fn list_drawer_names(&self) -> Result<Vec<String>> {
+        let mut drawers = Vec::new();
+        collect_drawer_names(&self.root_directory, &self.root_directory, &mut drawers)?;
+        drawers.sort();
+        drawers.dedup();
+        Ok(drawers)
+    }
+
+    pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive> {
+        let target =
+            structural_backup_target(&self.root_directory, source_path, "backup source path")?;
+        let files = collect_backup_archive_files(&target)?;
+        Ok(BackupArchive {
+            format: BACKUP_ARCHIVE_FORMAT.to_string(),
+            source_path: target.logical_path,
+            scope: target.scope.as_str().to_string(),
+            files,
+        })
+    }
+
+    pub fn restore_archive(
+        &self,
+        destination_path: &str,
+        archive: BackupArchive,
+    ) -> Result<RestoreReport> {
+        validate_backup_archive_format(&archive)?;
+        let target = structural_backup_target(
+            &self.root_directory,
+            destination_path,
+            "restore destination path",
+        )?;
+        validate_archive_scope(&archive, &target)?;
+        let decoded_files = decoded_restore_files(&archive, &target)?;
+        let byte_count = decoded_files
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>();
+
+        clear_restore_target(&self.root_directory, &target)?;
+        for (relative_path, bytes) in &decoded_files {
+            let destination = target.storage_path.join(relative_path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(destination, bytes)?;
+        }
+        self.register_restored_catalog(&target)?;
+
+        Ok(RestoreReport {
+            destination_path: target.logical_path,
+            scope: target.scope.as_str().to_string(),
+            file_count: decoded_files.len(),
+            byte_count,
+        })
+    }
+
+    fn register_restored_catalog(&self, target: &StructuralBackupTarget) -> Result<()> {
+        let Some(wardrobe) = target.segments.first() else {
+            return Ok(());
+        };
+
+        self.create_database(wardrobe)?;
+        match target.scope {
+            BackupScope::Wardrobe => {
+                for bay in restored_bay_names(&target.storage_path)? {
+                    self.create_schema(wardrobe, &bay)?;
+                    let bay_path = target.storage_path.join(&bay);
+                    for drawer in restored_drawer_names(&bay_path)? {
+                        self.create_drawer(wardrobe, &bay, &drawer)?;
+                    }
+                }
+            }
+            BackupScope::Bay => {
+                let Some(bay) = target.segments.get(1) else {
+                    return Ok(());
+                };
+                self.create_schema(wardrobe, bay)?;
+                for drawer in restored_drawer_names(&target.storage_path)? {
+                    self.create_drawer(wardrobe, bay, &drawer)?;
+                }
+            }
+            BackupScope::Drawer => {
+                let (Some(bay), Some(drawer)) = (target.segments.get(1), target.segments.get(2))
+                else {
+                    return Ok(());
+                };
+                self.create_schema(wardrobe, bay)?;
+                self.create_drawer(wardrobe, bay, drawer)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value> {
+        let normalized_action = action.replace('-', "_").to_ascii_lowercase();
+        let mut registry = read_access_control_registry(&self.root_directory)?;
+
+        match normalized_action.as_str() {
+            "add_user" | "add" | "create_user" => {
+                let username = user_payload_username(&payload)?;
+                let users = access_control_users_mut(&mut registry)?;
+                let mut user_payload = payload;
+                if let Value::Object(map) = &mut user_payload {
+                    map.insert("username".to_string(), Value::String(username.clone()));
+                }
+                users.insert(username.clone(), user_payload);
+                write_access_control_registry(&self.root_directory, &registry)?;
+                Ok(json!({
+                    "ok": true,
+                    "action": "add_user",
+                    "username": username,
+                }))
+            }
+            "grant_permission" | "revoke_permission" => {
+                let username = permission_payload_username(&payload)?;
+                let scope = permission_payload_scope(&payload)?;
+                let users = access_control_users_mut(&mut registry)?;
+                let user = users
+                    .entry(username.clone())
+                    .or_insert_with(|| json!({ "username": username.clone() }));
+                let permissions = access_control_permissions_mut(user)?;
+
+                if normalized_action == "grant_permission" {
+                    if !permissions
+                        .iter()
+                        .any(|permission| permission.as_str() == Some(scope.as_str()))
+                    {
+                        permissions.push(Value::String(scope.clone()));
+                    }
+                } else {
+                    permissions.retain(|permission| permission.as_str() != Some(scope.as_str()));
+                }
+
+                write_access_control_registry(&self.root_directory, &registry)?;
+                Ok(json!({
+                    "ok": true,
+                    "action": normalized_action,
+                    "username": username,
+                    "permission_scope": scope,
+                }))
+            }
+            _ => {
+                let username = payload
+                    .get("username")
+                    .or_else(|| payload.get("user"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let operations = access_control_operations_mut(&mut registry)?;
+                operations.push(json!({
+                    "action": action,
+                    "username": username,
+                    "payload": payload,
+                }));
+                write_access_control_registry(&self.root_directory, &registry)?;
+                Ok(json!({
+                    "ok": true,
+                    "action": action,
+                    "username": username,
+                }))
+            }
+        }
     }
 
     pub fn cached_drawer_count(&self) -> Result<usize> {
@@ -1100,6 +1409,697 @@ impl WardrobeEngine {
     }
 }
 
+fn inspect_target(root_directory: &Path, raw_path: &str) -> Result<InspectTarget> {
+    let mut segments = split_structural_path(raw_path, "inspect path")?;
+    let drawer_name = segments
+        .pop()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "inspect requires a drawer name"))?;
+    let mut data_dir = root_directory.to_path_buf();
+    for segment in &segments {
+        data_dir.push(segment);
+    }
+    let label = if segments.is_empty() {
+        drawer_name.clone()
+    } else {
+        format!("{}/{}", segments.join("/"), drawer_name)
+    };
+
+    Ok(InspectTarget {
+        data_dir,
+        drawer_name,
+        label,
+    })
+}
+
+fn split_structural_path(raw_path: &str, label: &str) -> Result<Vec<String>> {
+    let mut segments = Vec::new();
+    for segment in raw_path.split(|c| c == '/' || c == '\\') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Invalid {label} segment: {segment}"),
+            ));
+        }
+        segments.push(segment.to_string());
+    }
+    if segments.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} cannot be empty"),
+        ));
+    }
+    Ok(segments)
+}
+
+fn drawer_files(data_dir: &Path, drawer_name: &str) -> DrawerFiles {
+    DrawerFiles {
+        data: data_dir.join(format!("{drawer_name}.drw")),
+        index: data_dir.join(format!("{drawer_name}_index.drw")),
+        meta: data_dir.join(format!("{drawer_name}_meta.drw")),
+    }
+}
+
+fn file_size_or_zero(path: &Path) -> Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+fn check_entry(label: &str, path: &Path) -> Result<CheckEntry> {
+    let metadata = fs::metadata(path);
+    let (exists, bytes) = match metadata {
+        Ok(metadata) => (
+            true,
+            if metadata.is_file() {
+                Some(metadata.len())
+            } else {
+                None
+            },
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => (false, None),
+        Err(error) => return Err(error),
+    };
+    Ok(CheckEntry {
+        label: label.to_string(),
+        path: path.display().to_string(),
+        exists,
+        bytes,
+    })
+}
+
+fn collect_drawer_names(root: &Path, current: &Path, drawers: &mut Vec<String>) -> Result<()> {
+    if !current.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_drawer_names(root, &path, drawers)?;
+            continue;
+        }
+        if !is_drawer_data_file(&path) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let parent = path.parent().unwrap_or(current);
+        let relative_parent = parent.strip_prefix(root).unwrap_or(parent);
+        let name = if relative_parent.as_os_str().is_empty() {
+            stem.to_string()
+        } else {
+            format!("{}/{}", relative_path_string(relative_parent), stem)
+        };
+        drawers.push(name);
+    }
+    Ok(())
+}
+
+fn is_drawer_data_file(path: &Path) -> bool {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("drw") {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    !stem.ends_with("_index") && !stem.ends_with("_meta")
+}
+
+fn structural_backup_target(
+    root_directory: &Path,
+    raw_path: &str,
+    label: &str,
+) -> Result<StructuralBackupTarget> {
+    let segments = split_structural_path(raw_path, label)?;
+    let scope = BackupScope::from_segment_count(segments.len(), label)?;
+    let storage_path = match scope {
+        BackupScope::Wardrobe | BackupScope::Bay => segments
+            .iter()
+            .fold(root_directory.to_path_buf(), |path, segment| {
+                path.join(segment)
+            }),
+        BackupScope::Drawer => root_directory.join(&segments[0]).join(&segments[1]),
+    };
+    Ok(StructuralBackupTarget {
+        scope,
+        logical_path: segments.join("/"),
+        segments,
+        storage_path,
+    })
+}
+
+fn collect_backup_archive_files(target: &StructuralBackupTarget) -> Result<Vec<BackupArchiveFile>> {
+    match target.scope {
+        BackupScope::Wardrobe | BackupScope::Bay => {
+            if !target.storage_path.is_dir() {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!("backup source path does not exist: {}", target.logical_path),
+                ));
+            }
+            let mut files = Vec::new();
+            collect_directory_archive_files(
+                &target.storage_path,
+                &target.storage_path,
+                &mut files,
+            )?;
+            if files.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "backup source path contains no files: {}",
+                        target.logical_path
+                    ),
+                ));
+            }
+            files.sort_by(|left, right| left.path.cmp(&right.path));
+            Ok(files)
+        }
+        BackupScope::Drawer => {
+            let Some(drawer) = target.segments.get(2) else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drawer backup requires a drawer path",
+                ));
+            };
+            let mut files = Vec::new();
+            for file_name in [
+                format!("{drawer}.drw"),
+                format!("{drawer}_index.drw"),
+                format!("{drawer}_meta.drw"),
+            ] {
+                let path = target.storage_path.join(&file_name);
+                if path.is_file() {
+                    files.push(BackupArchiveFile {
+                        path: file_name,
+                        bytes_hex: encode_hex(&fs::read(path)?),
+                    });
+                }
+            }
+            if files.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "drawer backup source contains no drawer files: {}",
+                        target.logical_path
+                    ),
+                ));
+            }
+            Ok(files)
+        }
+    }
+}
+
+fn collect_directory_archive_files(
+    base: &Path,
+    current: &Path,
+    files: &mut Vec<BackupArchiveFile>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_directory_archive_files(base, &path, files)?;
+        } else if path.is_file() {
+            let relative_path = path.strip_prefix(base).map_err(|error| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Failed to compute backup relative path: {error}"),
+                )
+            })?;
+            files.push(BackupArchiveFile {
+                path: relative_path_string(relative_path),
+                bytes_hex: encode_hex(&fs::read(path)?),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_backup_archive_format(archive: &BackupArchive) -> Result<()> {
+    if archive.format != BACKUP_ARCHIVE_FORMAT {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Invalid backup archive format: expected {BACKUP_ARCHIVE_FORMAT}, found {}",
+                archive.format
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_archive_scope(archive: &BackupArchive, target: &StructuralBackupTarget) -> Result<()> {
+    let archive_scope = match archive.scope.as_str() {
+        "wardrobe" => BackupScope::Wardrobe,
+        "bay" => BackupScope::Bay,
+        "drawer" => BackupScope::Drawer,
+        other => {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid backup archive scope: {other}"),
+            ));
+        }
+    };
+    if archive_scope != target.scope {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "restore destination '{}' is a {}, but archive contains a {} backup",
+                target.logical_path,
+                target.scope.as_str(),
+                archive.scope
+            ),
+        ));
+    }
+    let source_segments =
+        split_structural_path(&archive.source_path, "backup archive source path")?;
+    if source_segments.len() != target.scope.expected_segments() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "restore destination path does not match archive scope",
+        ));
+    }
+    Ok(())
+}
+
+fn decoded_restore_files(
+    archive: &BackupArchive,
+    target: &StructuralBackupTarget,
+) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for file in &archive.files {
+        let relative_path = restore_relative_path(archive, target, &file.path)?;
+        let bytes = decode_hex(&file.bytes_hex)?;
+        files.push((relative_path, bytes));
+    }
+    Ok(files)
+}
+
+fn restore_relative_path(
+    archive: &BackupArchive,
+    target: &StructuralBackupTarget,
+    archive_path: &str,
+) -> Result<PathBuf> {
+    validate_archive_relative_path(archive_path)?;
+    if target.scope != BackupScope::Drawer {
+        return Ok(PathBuf::from(archive_path));
+    }
+
+    let source_segments =
+        split_structural_path(&archive.source_path, "backup archive source path")?;
+    let source_drawer = source_segments.last().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "drawer archive source path does not include a drawer",
+        )
+    })?;
+    let destination_drawer = target.segments.get(2).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "drawer restore requires a destination drawer path",
+        )
+    })?;
+    let archive_file = Path::new(archive_path);
+    if archive_file.components().count() != 1 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "drawer backup archive cannot contain nested file paths",
+        ));
+    }
+    let Some(file_name) = archive_file.file_name().and_then(|file| file.to_str()) else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "drawer backup archive contains an invalid file path",
+        ));
+    };
+
+    let mapped_name = if file_name == format!("{source_drawer}.drw") {
+        format!("{destination_drawer}.drw")
+    } else if file_name == format!("{source_drawer}_index.drw") {
+        format!("{destination_drawer}_index.drw")
+    } else if file_name == format!("{source_drawer}_meta.drw") {
+        format!("{destination_drawer}_meta.drw")
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Unexpected drawer backup file: {file_name}"),
+        ));
+    };
+
+    Ok(PathBuf::from(mapped_name))
+}
+
+fn clear_restore_target(root_directory: &Path, target: &StructuralBackupTarget) -> Result<()> {
+    match target.scope {
+        BackupScope::Wardrobe | BackupScope::Bay => {
+            ensure_path_is_under_root(root_directory, &target.storage_path)?;
+            if target.storage_path.exists() {
+                fs::remove_dir_all(&target.storage_path)?;
+            }
+        }
+        BackupScope::Drawer => {
+            let Some(drawer) = target.segments.get(2) else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drawer restore requires a drawer path",
+                ));
+            };
+            ensure_path_is_under_root(root_directory, &target.storage_path)?;
+            for file_name in [
+                format!("{drawer}.drw"),
+                format!("{drawer}_index.drw"),
+                format!("{drawer}_meta.drw"),
+            ] {
+                let path = target.storage_path.join(file_name);
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restored_bay_names(wardrobe_path: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    if !wardrobe_path.exists() {
+        return Ok(names);
+    }
+    for entry in fs::read_dir(wardrobe_path)? {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn restored_drawer_names(bay_path: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    if !bay_path.exists() {
+        return Ok(names);
+    }
+    for entry in fs::read_dir(bay_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !is_drawer_data_file(&path) {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            names.push(stem.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn validate_archive_relative_path(path: &str) -> Result<()> {
+    let relative_path = Path::new(path);
+    if relative_path.is_absolute() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "backup archive file paths must be relative",
+        ));
+    }
+    for component in relative_path.components() {
+        if matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        ) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "backup archive file path escapes the restore target",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_path_is_under_root(root_directory: &Path, target: &Path) -> Result<()> {
+    let root = absolute_lexical_path(root_directory);
+    let target = absolute_lexical_path(target);
+    if !target.starts_with(&root) {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "Refusing to restore outside the storage root: {}",
+                target.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn absolute_lexical_path(path: &Path) -> PathBuf {
+    let mut absolute = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                absolute.pop();
+            }
+            other => absolute.push(other.as_os_str()),
+        }
+    }
+    absolute
+}
+
+fn relative_path_string(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str().map(ToOwned::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn decode_hex(raw: &str) -> Result<Vec<u8>> {
+    let raw_bytes = raw.as_bytes();
+    if raw_bytes.len() % 2 != 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid backup archive hex payload length",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(raw_bytes.len() / 2);
+    for pair in raw_bytes.chunks_exact(2) {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_value(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid backup archive hex payload",
+        )),
+    }
+}
+
+fn read_access_control_registry(root_directory: &Path) -> Result<Value> {
+    let path = root_directory.join(ACCESS_CONTROL_FILE_NAME);
+    if !path.exists() {
+        return Ok(json!({ "users": {}, "operations": [] }));
+    }
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Invalid access-control registry JSON: {error}"),
+        )
+    })
+}
+
+fn write_access_control_registry(root_directory: &Path, registry: &Value) -> Result<()> {
+    fs::create_dir_all(root_directory)?;
+    let bytes = serde_json::to_vec_pretty(registry).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Failed to serialize access-control registry: {error}"),
+        )
+    })?;
+    fs::write(root_directory.join(ACCESS_CONTROL_FILE_NAME), bytes)
+}
+
+fn access_control_users_mut(registry: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
+    if !registry.is_object() {
+        *registry = json!({});
+    }
+    let object = registry.as_object_mut().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "access-control registry must be a JSON object",
+        )
+    })?;
+    let users = object.entry("users").or_insert_with(|| json!({}));
+    if !users.is_object() {
+        *users = json!({});
+    }
+    users.as_object_mut().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "access-control users registry must be a JSON object",
+        )
+    })
+}
+
+fn access_control_operations_mut(registry: &mut Value) -> Result<&mut Vec<Value>> {
+    if !registry.is_object() {
+        *registry = json!({});
+    }
+    let object = registry.as_object_mut().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "access-control registry must be a JSON object",
+        )
+    })?;
+    let operations = object.entry("operations").or_insert_with(|| json!([]));
+    if !operations.is_array() {
+        *operations = json!([]);
+    }
+    operations.as_array_mut().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "access-control operations registry must be a JSON array",
+        )
+    })
+}
+
+fn access_control_permissions_mut(user: &mut Value) -> Result<&mut Vec<Value>> {
+    if !user.is_object() {
+        *user = json!({});
+    }
+    let object = user.as_object_mut().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "access-control user entry must be a JSON object",
+        )
+    })?;
+    let permissions = object.entry("permissions").or_insert_with(|| json!([]));
+    if !permissions.is_array() {
+        *permissions = json!([]);
+    }
+    permissions.as_array_mut().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "access-control permissions must be a JSON array",
+        )
+    })
+}
+
+fn user_payload_username(payload: &Value) -> Result<String> {
+    let username = payload
+        .get("username")
+        .or_else(|| payload.get("user"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if username.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "user admin payload requires a non-empty username",
+        ));
+    }
+    Ok(username.to_string())
+}
+
+fn permission_payload_username(payload: &Value) -> Result<String> {
+    user_payload_username(payload)
+}
+
+fn permission_payload_scope(payload: &Value) -> Result<String> {
+    if let Some(scope) = payload.get("permission_scope").and_then(Value::as_str) {
+        return parse_permission_scope(scope);
+    }
+    if let Some(scope) = payload.get("scope").and_then(Value::as_object) {
+        let path = scope
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let rights = scope
+            .get("rights")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return parse_permission_scope(&format!("{path}:{rights}"));
+    }
+    Err(Error::new(
+        ErrorKind::InvalidInput,
+        "permission payload requires a permission_scope",
+    ))
+}
+
+fn parse_permission_scope(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    let mut parts = raw.split(':');
+    let path_part = parts.next().unwrap_or_default().trim();
+    let rights_part = parts.next().unwrap_or_default().trim();
+    if parts.next().is_some() || path_part.is_empty() || rights_part.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope must use <path>:<rights>",
+        ));
+    }
+    let segments = split_structural_path(path_part, "permission scope path")?;
+    if segments.len() > 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope path must identify a wardrobe, bay, or drawer",
+        ));
+    }
+    let mut rights = String::new();
+    for right in rights_part.chars().map(|right| right.to_ascii_lowercase()) {
+        if !matches!(right, 'r' | 'u' | 'd' | 'i') {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "permission rights must contain only r, u, d, or i",
+            ));
+        }
+        if rights.contains(right) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("permission right '{right}' cannot be repeated"),
+            ));
+        }
+        rights.push(right);
+    }
+    if rights.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "permission scope requires at least one right",
+        ));
+    }
+    Ok(format!("{}:{rights}", segments.join("/")))
+}
+
 impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
     fn append_boundary_wal(&self, command: &Command) -> Result<()> {
         engine_wal::append_command(&self.root_directory, None, command)
@@ -1153,6 +2153,38 @@ impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
         location: &str,
     ) -> Result<StorageInventory> {
         WardrobeEngine::register_tenant_route(self, tenant_id, database_name, location)
+    }
+
+    fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics> {
+        WardrobeEngine::inspect_drawer(self, drawer_name)
+    }
+
+    fn check_path(&self, path: &str) -> Result<CheckReport> {
+        WardrobeEngine::check_path(self, path)
+    }
+
+    fn diagnose_storage(&self) -> Result<StorageDiagnosis> {
+        WardrobeEngine::diagnose_storage(self)
+    }
+
+    fn list_drawer_names(&self) -> Result<Vec<String>> {
+        WardrobeEngine::list_drawer_names(self)
+    }
+
+    fn backup_archive(&self, source_path: &str) -> Result<BackupArchive> {
+        WardrobeEngine::backup_archive(self, source_path)
+    }
+
+    fn restore_archive(
+        &self,
+        destination_path: &str,
+        archive: BackupArchive,
+    ) -> Result<RestoreReport> {
+        WardrobeEngine::restore_archive(self, destination_path, archive)
+    }
+
+    fn manage_user(&self, action: &str, payload: Value) -> Result<Value> {
+        WardrobeEngine::manage_user(self, action, payload)
     }
 
     fn execute_for_tenant(

@@ -8,8 +8,9 @@ pub mod engine;
 
 pub use client::WardrobeClient;
 pub use engine::{
-    Command, CommandResult, OrderDirection, QueryModifiers, StorageCoordinate, StorageInventory,
-    StorageLocator, StorageScope, WardrobeEngine,
+    BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command, CommandResult,
+    DrawerInspectionMetrics, OrderDirection, QueryModifiers, RestoreReport, StorageCoordinate,
+    StorageDiagnosis, StorageInventory, StorageLocator, StorageScope, WardrobeEngine,
 };
 pub use wrdb_lib::connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use wrdb_lib::database::Database;

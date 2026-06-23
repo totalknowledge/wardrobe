@@ -6,6 +6,63 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawerInspectionMetrics {
+    pub path: String,
+    pub data_bytes: u64,
+    pub index_bytes: u64,
+    pub meta_bytes: u64,
+    pub total_bytes: u64,
+    pub record_count: usize,
+    pub register_file_count: usize,
+    pub tombstone_fragmentation_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckReport {
+    pub path: String,
+    pub kind: String,
+    pub entries: Vec<CheckEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckEntry {
+    pub label: String,
+    pub path: String,
+    pub exists: bool,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StorageDiagnosis {
+    pub storage_directory: String,
+    pub drawer_count: usize,
+    pub status: String,
+    pub drawers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupArchive {
+    pub format: String,
+    pub source_path: String,
+    pub scope: String,
+    pub files: Vec<BackupArchiveFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupArchiveFile {
+    pub path: String,
+    pub bytes_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoreReport {
+    pub destination_path: String,
+    pub scope: String,
+    pub file_count: usize,
+    pub byte_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     ShowTenants,
     ShowDatabases,
@@ -47,6 +104,21 @@ pub enum Command {
     },
     Migrate {
         drawer_name: String,
+    },
+    Inspect {
+        drawer_name: String,
+    },
+    Check {
+        path: String,
+    },
+    Diagnose,
+    ListDrawers,
+    Backup {
+        source_path: String,
+    },
+    Restore {
+        destination_path: String,
+        archive: BackupArchive,
     },
     DefineDatabase {
         database_name: String,
@@ -107,5 +179,11 @@ pub enum CommandResult {
     Deleted(bool),
     Vacuumed(VacuumReport),
     Migrated(VacuumReport),
+    Inspection(DrawerInspectionMetrics),
+    Check(CheckReport),
+    Diagnosis(StorageDiagnosis),
+    DrawerNames(Vec<String>),
+    Backup(BackupArchive),
+    Restored(RestoreReport),
     Admin(Value),
 }

@@ -1,4 +1,7 @@
-use crate::wrdb_lib::command::{Command, CommandResult};
+use crate::wrdb_lib::command::{
+    BackupArchive, CheckReport, Command, CommandResult, DrawerInspectionMetrics, RestoreReport,
+    StorageDiagnosis,
+};
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::pointer;
@@ -33,6 +36,17 @@ pub(crate) trait BoundaryCommandExecutor {
         database_name: &str,
         location: &str,
     ) -> Result<StorageInventory>;
+    fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics>;
+    fn check_path(&self, path: &str) -> Result<CheckReport>;
+    fn diagnose_storage(&self) -> Result<StorageDiagnosis>;
+    fn list_drawer_names(&self) -> Result<Vec<String>>;
+    fn backup_archive(&self, source_path: &str) -> Result<BackupArchive>;
+    fn restore_archive(
+        &self,
+        destination_path: &str,
+        archive: BackupArchive,
+    ) -> Result<RestoreReport>;
+    fn manage_user(&self, action: &str, payload: Value) -> Result<Value>;
     fn execute_for_tenant(
         &self,
         tenant_id: &str,
@@ -121,6 +135,12 @@ where
             | Command::DefineDrawer { .. }
             | Command::DefineTenantRoute { .. }
             | Command::ManageUser { .. }
+            | Command::Inspect { .. }
+            | Command::Check { .. }
+            | Command::Diagnose
+            | Command::ListDrawers
+            | Command::Backup { .. }
+            | Command::Restore { .. }
     ) {
         engine.append_boundary_wal(&command)?;
     }
@@ -163,10 +183,24 @@ where
         } => engine
             .register_tenant_route(&tenant_id, &database_name, &location)
             .map(CommandResult::StorageInventory),
-        Command::ManageUser { .. } => Err(Error::new(
-            ErrorKind::Unsupported,
-            "user management must be handled by an authenticated Wardrobe server",
-        )),
+        Command::Inspect { drawer_name } => engine
+            .inspect_drawer(&drawer_name)
+            .map(CommandResult::Inspection),
+        Command::Check { path } => engine.check_path(&path).map(CommandResult::Check),
+        Command::Diagnose => engine.diagnose_storage().map(CommandResult::Diagnosis),
+        Command::ListDrawers => engine.list_drawer_names().map(CommandResult::DrawerNames),
+        Command::Backup { source_path } => engine
+            .backup_archive(&source_path)
+            .map(CommandResult::Backup),
+        Command::Restore {
+            destination_path,
+            archive,
+        } => engine
+            .restore_archive(&destination_path, archive)
+            .map(CommandResult::Restored),
+        Command::ManageUser { action, payload } => engine
+            .manage_user(&action, payload)
+            .map(CommandResult::Admin),
         Command::ExecuteForTenant {
             tenant_id,
             database_name,
@@ -264,6 +298,15 @@ where
             E::migrate_drawer_in_database(database, &drawer_name, context)
                 .map(CommandResult::Migrated)
         }
+        Command::Inspect { .. }
+        | Command::Check { .. }
+        | Command::Diagnose
+        | Command::ListDrawers
+        | Command::Backup { .. }
+        | Command::Restore { .. } => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Storage diagnostics and recovery commands are only available at the WardrobeEngine boundary",
+        )),
         Command::DefineDatabase { .. }
         | Command::DefineSchema { .. }
         | Command::DefineDrawer { .. }
@@ -330,6 +373,12 @@ pub(crate) fn command_drawer_name(command: &Command) -> Option<String> {
         | Command::ShowDatabases
         | Command::VerifyWal { .. }
         | Command::ShowSchemas { .. }
-        | Command::ShowDrawers { .. } => None,
+        | Command::ShowDrawers { .. }
+        | Command::Inspect { .. }
+        | Command::Check { .. }
+        | Command::Diagnose
+        | Command::ListDrawers
+        | Command::Backup { .. }
+        | Command::Restore { .. } => None,
     }
 }

@@ -1,7 +1,8 @@
 use crate::wrdb_lib::connection::{ConnectionTarget, DriverKind};
 use crate::wrdb_lib::protocol::{ProtocolFrame, ProtocolOpcode};
 use crate::{
-    Command, CommandResult, QueryModifiers, StorageInventory, StorageLocator, VacuumReport,
+    BackupArchive, CheckReport, Command, CommandResult, DrawerInspectionMetrics, QueryModifiers,
+    RestoreReport, StorageDiagnosis, StorageInventory, StorageLocator, VacuumReport,
     WardrobeEngine,
 };
 use serde_json::Value;
@@ -199,6 +200,78 @@ impl WardrobeClient {
             })?),
             Driver::UnixSocket(driver) => expect_migrated(driver.execute(Command::Migrate {
                 drawer_name: drawer_name.to_string(),
+            })?),
+        }
+    }
+
+    pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.inspect_drawer(drawer_name),
+            Driver::Network(driver) => expect_inspection(driver.execute(Command::Inspect {
+                drawer_name: drawer_name.to_string(),
+            })?),
+            Driver::UnixSocket(driver) => expect_inspection(driver.execute(Command::Inspect {
+                drawer_name: drawer_name.to_string(),
+            })?),
+        }
+    }
+
+    pub fn check_path(&self, path: &str) -> Result<CheckReport> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.check_path(path),
+            Driver::Network(driver) => expect_check(driver.execute(Command::Check {
+                path: path.to_string(),
+            })?),
+            Driver::UnixSocket(driver) => expect_check(driver.execute(Command::Check {
+                path: path.to_string(),
+            })?),
+        }
+    }
+
+    pub fn diagnose_storage(&self) -> Result<StorageDiagnosis> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.diagnose_storage(),
+            Driver::Network(driver) => expect_diagnosis(driver.execute(Command::Diagnose)?),
+            Driver::UnixSocket(driver) => expect_diagnosis(driver.execute(Command::Diagnose)?),
+        }
+    }
+
+    pub fn list_drawer_names(&self) -> Result<Vec<String>> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.list_drawer_names(),
+            Driver::Network(driver) => expect_drawer_names(driver.execute(Command::ListDrawers)?),
+            Driver::UnixSocket(driver) => {
+                expect_drawer_names(driver.execute(Command::ListDrawers)?)
+            }
+        }
+    }
+
+    pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.backup_archive(source_path),
+            Driver::Network(driver) => expect_backup(driver.execute(Command::Backup {
+                source_path: source_path.to_string(),
+            })?),
+            Driver::UnixSocket(driver) => expect_backup(driver.execute(Command::Backup {
+                source_path: source_path.to_string(),
+            })?),
+        }
+    }
+
+    pub fn restore_archive(
+        &self,
+        destination_path: &str,
+        archive: BackupArchive,
+    ) -> Result<RestoreReport> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.restore_archive(destination_path, archive),
+            Driver::Network(driver) => expect_restored(driver.execute(Command::Restore {
+                destination_path: destination_path.to_string(),
+                archive,
+            })?),
+            Driver::UnixSocket(driver) => expect_restored(driver.execute(Command::Restore {
+                destination_path: destination_path.to_string(),
+                archive,
             })?),
         }
     }
@@ -595,6 +668,48 @@ fn expect_migrated(result: CommandResult) -> Result<VacuumReport> {
     match result {
         CommandResult::Migrated(report) => Ok(report),
         other => unexpected_result("migration report", other),
+    }
+}
+
+fn expect_inspection(result: CommandResult) -> Result<DrawerInspectionMetrics> {
+    match result {
+        CommandResult::Inspection(metrics) => Ok(metrics),
+        other => unexpected_result("inspection metrics", other),
+    }
+}
+
+fn expect_check(result: CommandResult) -> Result<CheckReport> {
+    match result {
+        CommandResult::Check(report) => Ok(report),
+        other => unexpected_result("check report", other),
+    }
+}
+
+fn expect_diagnosis(result: CommandResult) -> Result<StorageDiagnosis> {
+    match result {
+        CommandResult::Diagnosis(report) => Ok(report),
+        other => unexpected_result("storage diagnosis", other),
+    }
+}
+
+fn expect_drawer_names(result: CommandResult) -> Result<Vec<String>> {
+    match result {
+        CommandResult::DrawerNames(drawers) => Ok(drawers),
+        other => unexpected_result("drawer names", other),
+    }
+}
+
+fn expect_backup(result: CommandResult) -> Result<BackupArchive> {
+    match result {
+        CommandResult::Backup(archive) => Ok(archive),
+        other => unexpected_result("backup archive", other),
+    }
+}
+
+fn expect_restored(result: CommandResult) -> Result<RestoreReport> {
+    match result {
+        CommandResult::Restored(report) => Ok(report),
+        other => unexpected_result("restore report", other),
     }
 }
 

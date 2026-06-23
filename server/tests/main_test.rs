@@ -210,6 +210,137 @@ fn tcp_daemon_routes_scoped_commands_and_maintenance_frames() {
 }
 
 #[test]
+fn tcp_daemon_routes_full_cli_command_matrix() {
+    let storage_directory = temp_storage_directory("tcp_routes_full_cli_command_matrix");
+    let engine =
+        Arc::new(WardrobeEngine::open(storage_directory.to_string_lossy().as_ref()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener.local_addr().expect("listener address should read");
+    let server = {
+        let engine = Arc::clone(&engine);
+        thread::spawn(move || serve_tcp_listener(listener, engine, Some(1)))
+    };
+
+    let client =
+        WardrobeClient::open(format!("wardrobe://{address}")).expect("client should connect");
+    client
+        .create_database("armory")
+        .expect("database should be created remotely");
+    client
+        .create_schema("armory", "public")
+        .expect("schema should be created remotely");
+    client
+        .create_drawer("armory", "public", "gem")
+        .expect("drawer should be created remotely");
+
+    client
+        .upsert(
+            "armory/public/gem",
+            json!({
+                "_id": "server_matrix",
+                "element": "Light"
+            }),
+        )
+        .expect("upsert should route remotely");
+    assert_eq!(
+        client
+            .count("armory/public/gem", Some(json!({"element": "Light"})), None)
+            .expect("count should route remotely"),
+        1
+    );
+    assert_eq!(
+        client
+            .find_all("armory/public/gem")
+            .expect("records should route remotely")
+            .len(),
+        1
+    );
+
+    let inspection = client
+        .inspect_drawer("armory/public/gem")
+        .expect("inspect should route remotely");
+    assert_eq!(inspection.path, "armory/public/gem");
+    assert_eq!(inspection.record_count, 1);
+
+    let check = client
+        .check_path("armory/public/gem")
+        .expect("check should route remotely");
+    assert_eq!(check.kind, "drawer");
+    assert!(
+        check
+            .entries
+            .iter()
+            .any(|entry| entry.label == "data" && entry.exists)
+    );
+
+    let vacuum = client
+        .vacuum_drawer("armory/public/gem")
+        .expect("clean/vacuum should route remotely");
+    assert!(vacuum.data_bytes_after <= vacuum.data_bytes_before);
+
+    let archive = client
+        .backup_archive("armory/public/gem")
+        .expect("backup should route remotely");
+    assert_eq!(archive.scope, "drawer");
+    assert!(!archive.files.is_empty());
+
+    let restore = client
+        .restore_archive("armory/public/gem_copy", archive)
+        .expect("restore should route remotely");
+    assert_eq!(restore.destination_path, "armory/public/gem_copy");
+    assert_eq!(
+        client
+            .count("armory/public/gem_copy", None, None)
+            .expect("restored drawer should be queryable remotely"),
+        1
+    );
+
+    let diagnosis = client
+        .diagnose_storage()
+        .expect("diagnose should route remotely");
+    assert!(diagnosis.drawer_count >= 2);
+    let drawer_names = client
+        .list_drawer_names()
+        .expect("drawers should route remotely");
+    assert!(drawer_names.iter().any(|name| name == "armory/public/gem"));
+
+    let add_user = client
+        .manage_user(
+            "add_user",
+            json!({"username": "dev_admin", "role": "operator"}),
+        )
+        .expect("add user should route remotely");
+    assert_eq!(add_user["ok"], true);
+    let grant = client
+        .manage_user(
+            "grant_permission",
+            json!({"username": "dev_admin", "permission_scope": "armory/public:rud"}),
+        )
+        .expect("grant permission should route remotely");
+    assert_eq!(grant["permission_scope"], "armory/public:rud");
+    let revoke = client
+        .manage_user(
+            "revoke_permission",
+            json!({"username": "dev_admin", "permission_scope": "armory/public:d"}),
+        )
+        .expect("revoke permission should route remotely");
+    assert_eq!(revoke["ok"], true);
+
+    drop(client);
+    server
+        .join()
+        .expect("server thread should finish")
+        .expect("server should finish cleanly");
+
+    assert!(
+        storage_directory
+            .join("_wardrobe_access_control.json")
+            .is_file()
+    );
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn malformed_frame_drops_only_that_client_channel() {
     let storage_directory = temp_storage_directory("malformed_frame_isolated");
     let engine =

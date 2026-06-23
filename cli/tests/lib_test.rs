@@ -1112,13 +1112,223 @@ fn test_documented_user_admin_validation_errors() {
 }
 
 #[test]
-fn test_unsupported_network_commands_emit_warnings() {
-    let target = spawn_protocol_server(|_| {});
-    let client = WardrobeClient::open(&target).unwrap();
+fn test_network_diagnostic_and_recovery_commands_routing() {
+    let target_drawers = spawn_protocol_server(|mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(command, Command::ListDrawers);
+        let payload = serde_json::to_vec(&CommandResult::DrawerNames(vec![
+            "armory/public/gem".to_string(),
+        ]))
+        .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+    let client_drawers = WardrobeClient::open(&target_drawers).unwrap();
+    assert!(run_command(&client_drawers, &["drawers".to_string()], false).is_ok());
 
-    assert!(run_command(&client, &["drawers".to_string()], false).is_ok());
-    assert!(run_command(&client, &["diagnose".to_string()], false).is_ok());
-    assert!(run_command(&client, &["inspect".to_string(), "gem".to_string()], false).is_ok());
+    let target_diagnose = spawn_protocol_server(|mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(command, Command::Diagnose);
+        let payload =
+            serde_json::to_vec(&CommandResult::Diagnosis(wardrobe_core::StorageDiagnosis {
+                storage_directory: "/srv/wardrobe".to_string(),
+                drawer_count: 1,
+                status: "ok".to_string(),
+                drawers: vec!["armory/public/gem".to_string()],
+            }))
+            .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+    let client_diagnose = WardrobeClient::open(&target_diagnose).unwrap();
+    assert!(run_command(&client_diagnose, &["diagnose".to_string()], false).is_ok());
+
+    let target_inspect = spawn_protocol_server(|mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(
+            command,
+            Command::Inspect {
+                drawer_name: "armory/public/gem".to_string()
+            }
+        );
+        let payload = serde_json::to_vec(&CommandResult::Inspection(
+            wardrobe_core::DrawerInspectionMetrics {
+                path: "armory/public/gem".to_string(),
+                data_bytes: 10,
+                index_bytes: 5,
+                meta_bytes: 3,
+                total_bytes: 18,
+                record_count: 1,
+                register_file_count: 3,
+                tombstone_fragmentation_percent: None,
+            },
+        ))
+        .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+    let client_inspect = WardrobeClient::open(&target_inspect).unwrap();
+    assert!(
+        run_command(
+            &client_inspect,
+            &["inspect".to_string(), "armory/public/gem".to_string()],
+            false,
+        )
+        .is_ok()
+    );
+
+    let target_check = spawn_protocol_server(|mut stream| {
+        let request =
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                .expect("read");
+        let command: Command = serde_json::from_slice(&request.payload).expect("command");
+        assert_eq!(
+            command,
+            Command::Check {
+                path: "armory/public/gem".to_string()
+            }
+        );
+        let payload = serde_json::to_vec(&CommandResult::Check(wardrobe_core::CheckReport {
+            path: "armory/public/gem".to_string(),
+            kind: "drawer".to_string(),
+            entries: vec![wardrobe_core::CheckEntry {
+                label: "data".to_string(),
+                path: "/srv/wardrobe/armory/public/gem.drw".to_string(),
+                exists: true,
+                bytes: Some(10),
+            }],
+        }))
+        .expect("ser");
+        wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+            wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+            payload,
+        )
+        .write_to_stream(&mut stream)
+        .expect("write");
+    });
+    let client_check = WardrobeClient::open(&target_check).unwrap();
+    assert!(
+        run_command(
+            &client_check,
+            &["check".to_string(), "armory/public/gem".to_string()],
+            false,
+        )
+        .is_ok()
+    );
+
+    let archive = wardrobe_core::BackupArchive {
+        format: "wardrobe-cli-backup-v1".to_string(),
+        source_path: "armory/public/gem".to_string(),
+        scope: "drawer".to_string(),
+        files: vec![wardrobe_core::BackupArchiveFile {
+            path: "gem.drw".to_string(),
+            bytes_hex: "00".to_string(),
+        }],
+    };
+    let backup_path = temp_storage_directory("network_backup").with_extension("wrb");
+    let target_backup = {
+        let archive = archive.clone();
+        spawn_protocol_server(move |mut stream| {
+            let request =
+                wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                    .expect("read");
+            let command: Command = serde_json::from_slice(&request.payload).expect("command");
+            assert_eq!(
+                command,
+                Command::Backup {
+                    source_path: "armory/public/gem".to_string()
+                }
+            );
+            let payload = serde_json::to_vec(&CommandResult::Backup(archive.clone())).expect("ser");
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+                wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+                payload,
+            )
+            .write_to_stream(&mut stream)
+            .expect("write");
+        })
+    };
+    let client_backup = WardrobeClient::open(&target_backup).unwrap();
+    assert!(
+        run_command(
+            &client_backup,
+            &[
+                "backup".to_string(),
+                "armory/public/gem".to_string(),
+                backup_path.to_string_lossy().to_string(),
+            ],
+            false,
+        )
+        .is_ok()
+    );
+    assert!(backup_path.is_file());
+
+    let target_restore = {
+        let archive = archive.clone();
+        spawn_protocol_server(move |mut stream| {
+            let request =
+                wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
+                    .expect("read");
+            let command: Command = serde_json::from_slice(&request.payload).expect("command");
+            assert_eq!(
+                command,
+                Command::Restore {
+                    destination_path: "armory/public/gem_copy".to_string(),
+                    archive: archive.clone(),
+                }
+            );
+            let payload =
+                serde_json::to_vec(&CommandResult::Restored(wardrobe_core::RestoreReport {
+                    destination_path: "armory/public/gem_copy".to_string(),
+                    scope: "drawer".to_string(),
+                    file_count: 1,
+                    byte_count: 1,
+                }))
+                .expect("ser");
+            wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
+                wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
+                payload,
+            )
+            .write_to_stream(&mut stream)
+            .expect("write");
+        })
+    };
+    let client_restore = WardrobeClient::open(&target_restore).unwrap();
+    assert!(
+        run_command(
+            &client_restore,
+            &[
+                "restore".to_string(),
+                "armory/public/gem_copy".to_string(),
+                backup_path.to_string_lossy().to_string(),
+            ],
+            false,
+        )
+        .is_ok()
+    );
+
+    let _ = fs::remove_file(backup_path);
 }
 
 #[test]
