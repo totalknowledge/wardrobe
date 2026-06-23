@@ -322,6 +322,70 @@ fn test_embedded_administrative_setup_commands_execution_paths() {
 }
 
 #[test]
+fn test_structural_lifecycle_commands_execution_paths() {
+    let storage_directory = temp_storage_directory("structural_lifecycle");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let create_wardrobe = vec![
+        "create".to_string(),
+        "wardrobe".to_string(),
+        "armory".to_string(),
+    ];
+    assert!(run_command(&client, &create_wardrobe, false).is_ok());
+
+    let create_bay = vec![
+        "create".to_string(),
+        "bay".to_string(),
+        "armory/public".to_string(),
+    ];
+    assert!(run_command(&client, &create_bay, false).is_ok());
+
+    let create_drawer = vec![
+        "create".to_string(),
+        "drawer".to_string(),
+        "armory/public/gem".to_string(),
+    ];
+    assert!(run_command(&client, &create_drawer, false).is_ok());
+
+    let show_wardrobes = vec!["show".to_string(), "wardrobes".to_string()];
+    assert!(run_command(&client, &show_wardrobes, false).is_ok());
+
+    let show_bays = vec!["show".to_string(), "bays".to_string(), "armory".to_string()];
+    assert!(run_command(&client, &show_bays, false).is_ok());
+
+    let show_drawers = vec![
+        "show".to_string(),
+        "drawers".to_string(),
+        "armory/public".to_string(),
+    ];
+    assert!(run_command(&client, &show_drawers, false).is_ok());
+
+    let check_wardrobe = vec!["check".to_string(), "armory".to_string()];
+    assert!(run_command(&client, &check_wardrobe, false).is_ok());
+
+    let check_drawer = vec!["check".to_string(), "armory/public/gem".to_string()];
+    assert!(run_command(&client, &check_drawer, false).is_ok());
+
+    let upsert = vec![
+        "upsert".to_string(),
+        "armory/public/gem".to_string(),
+        "{\"_id\":\"ruby\",\"power\":42}".to_string(),
+    ];
+    assert!(run_command(&client, &upsert, false).is_ok());
+
+    let clean_drawer = vec!["clean".to_string(), "armory/public/gem".to_string()];
+    assert!(run_command(&client, &clean_drawer, false).is_ok());
+
+    let clean_bay = vec!["clean".to_string(), "armory/public".to_string()];
+    assert!(run_command(&client, &clean_bay, false).is_ok());
+
+    let clean_wardrobe = vec!["clean".to_string(), "armory".to_string()];
+    assert!(run_command(&client, &clean_wardrobe, false).is_ok());
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn test_schema_creation_rejects_missing_parent_database() {
     let storage_directory = temp_storage_directory("missing_parent");
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
@@ -354,6 +418,13 @@ fn test_data_command_aliases_execution_paths() {
         "{\"power\":88}".to_string(),
     ];
     assert!(run_command(&client, &find_args, false).is_ok());
+
+    let create_alias_args = vec![
+        "create".to_string(),
+        "gem".to_string(),
+        "{\"_id\":\"@gem:lnk_sapphire\",\"power\":99}".to_string(),
+    ];
+    assert!(run_command(&client, &create_alias_args, false).is_ok());
 
     let remove_args = vec![
         "remove".to_string(),

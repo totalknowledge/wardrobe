@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use wardrobe_core::{ConnectionTarget, Database, WardrobeClient};
+use wardrobe_core::{ConnectionTarget, Database, VacuumReport, WardrobeClient};
 
 #[derive(Debug)]
 pub struct CliConfig {
@@ -363,17 +363,17 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             pub_normalize_record_ids(&mut records);
             print_json(&records, pretty)
         }
-        "upsert" | "insert" | "create" => {
-            if parts.len() < 3 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("{} requires a drawer name and JSON payload", parts[0]),
-                ));
+        "upsert" | "insert" => run_upsert_command(client, parts),
+        "create" => {
+            if parts
+                .get(1)
+                .map(|target| is_structural_create_target(target))
+                .unwrap_or(false)
+            {
+                run_create_command(client, parts, pretty)
+            } else {
+                run_upsert_command(client, parts)
             }
-            let payload = parse_json_arg(&parts[2], "payload")?;
-            let pointer = client.upsert(&parts[1], payload).map_err(client_error)?;
-            println!("{pointer}");
-            Ok(())
         }
         "delete-by-id" => {
             if parts.len() < 2 {
@@ -443,6 +443,8 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         "manage" => run_manage_user_command(client, parts, pretty),
         "auth" | "rbac" => run_manage_user_alias(client, parts, pretty),
         "show" | "ls" | "list" => run_show_command(client, parts, pretty),
+        "check" => run_check_command(client, parts),
+        "clean" => run_clean_command(client, parts, pretty),
         "show-databases" => {
             let dbs = client.show_databases().map_err(client_error)?;
             print_json(&dbs, pretty)
@@ -474,6 +476,19 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             format!("Unknown command: {}", parts[0]),
         )),
     }
+}
+
+fn run_upsert_command(client: &WardrobeClient, parts: &[String]) -> io::Result<()> {
+    if parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} requires a drawer name and JSON payload", parts[0]),
+        ));
+    }
+    let payload = parse_json_arg(&parts[2], "payload")?;
+    let pointer = client.upsert(&parts[1], payload).map_err(client_error)?;
+    println!("{pointer}");
+    Ok(())
 }
 
 fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
@@ -538,6 +553,41 @@ fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
     }
 }
 
+fn run_create_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "create requires <type> <path>",
+        ));
+    }
+
+    match parts[1].as_str() {
+        "wardrobe" | "wardrobes" | "database" | "databases" => {
+            let (wardrobe, _, _) = parse_structural_path(&parts[2], 1, "wardrobe path")?;
+            let inventory = client.create_database(&wardrobe).map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "bay" | "bays" | "schema" | "schemas" => {
+            let (wardrobe, bay, _) = parse_structural_path(&parts[2], 2, "bay path")?;
+            let inventory = client
+                .create_schema(&wardrobe, &bay)
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        "drawer" | "drawers" => {
+            let (wardrobe, bay, drawer) = parse_structural_path(&parts[2], 3, "drawer path")?;
+            let inventory = client
+                .create_drawer(&wardrobe, &bay, &drawer)
+                .map_err(client_error)?;
+            print_json(&inventory, pretty)
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown create target: {other}"),
+        )),
+    }
+}
+
 fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.len() < 2 {
         return Err(Error::new(
@@ -554,35 +604,135 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
             let tenants = client.show_tenants().map_err(client_error)?;
             print_json(&tenants, pretty)
         }
-        "database" | "databases" => {
+        "wardrobe" | "wardrobes" | "database" | "databases" => {
             let dbs = client.show_databases().map_err(client_error)?;
             print_json(&dbs, pretty)
         }
-        "schema" | "schemas" => {
+        "bay" | "bays" | "schema" | "schemas" => {
             if parts.len() < 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    format!("{} schemas requires a database name", parts[0]),
+                    format!("{} bays requires a wardrobe path", parts[0]),
                 ));
             }
-            let schemas = client.show_schemas(&parts[2]).map_err(client_error)?;
+            let (wardrobe, _, _) = parse_structural_path(&parts[2], 1, "wardrobe path")?;
+            let schemas = client.show_schemas(&wardrobe).map_err(client_error)?;
             print_json(&schemas, pretty)
         }
         "drawer" | "drawers" => {
-            if parts.len() < 4 {
+            if parts.len() < 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    format!("{} drawers requires <database> <schema>", parts[0]),
+                    format!("{} drawers requires a bay path", parts[0]),
                 ));
             }
-            let drawers = client
-                .show_drawers(&parts[2], &parts[3])
-                .map_err(client_error)?;
+            let (wardrobe, bay) = if parts.len() >= 4 && !has_path_separator(&parts[2]) {
+                (parts[2].clone(), parts[3].clone())
+            } else {
+                let (wardrobe, bay, _) = parse_structural_path(&parts[2], 2, "bay path")?;
+                (wardrobe, bay)
+            };
+            let drawers = client.show_drawers(&wardrobe, &bay).map_err(client_error)?;
             print_json(&drawers, pretty)
         }
         other => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("Unknown show target: {other}"),
+        )),
+    }
+}
+
+fn run_check_command(client: &WardrobeClient, parts: &[String]) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(ErrorKind::InvalidInput, "check requires <path>"));
+    }
+    if !client.requires_embedded_engine() {
+        eprintln!("check is only available for embedded connections");
+        return Ok(());
+    }
+
+    let data_dir = embedded_data_dir(client);
+    let segments = split_structural_path(&parts[1], "check path")?;
+    let logical_path = segments.join("/");
+
+    println!("Path: {logical_path}");
+    match segments.len() {
+        1 => {
+            println!("Type: wardrobe");
+            print_path_status("directory", &data_dir.join(&segments[0]))?;
+        }
+        2 => {
+            println!("Type: bay");
+            print_path_status("directory", &data_dir.join(&segments[0]).join(&segments[1]))?;
+        }
+        3 => {
+            println!("Type: drawer");
+            let files = drawer_files(&data_dir, &logical_path);
+            print_file_status("data", &files.data)?;
+            print_file_status("index", &files.index)?;
+            print_file_status("meta", &files.meta)?;
+        }
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "check path must identify a wardrobe, bay, or drawer",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct CleanResult {
+    path: String,
+    report: VacuumReport,
+}
+
+fn run_clean_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(ErrorKind::InvalidInput, "clean requires <path>"));
+    }
+
+    let targets = clean_targets(client, &parts[1])?;
+    let mut results = Vec::new();
+    for path in targets {
+        let report = client.vacuum_drawer(&path).map_err(client_error)?;
+        results.push(CleanResult { path, report });
+    }
+    print_json(&results, pretty)
+}
+
+fn clean_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<String>> {
+    let segments = split_structural_path(raw_path, "clean path")?;
+    match segments.len() {
+        1 => {
+            let wardrobe = &segments[0];
+            let mut targets = Vec::new();
+            for bay in client.show_schemas(wardrobe).map_err(client_error)? {
+                for drawer in client.show_drawers(wardrobe, &bay).map_err(client_error)? {
+                    targets.push(format!("{wardrobe}/{bay}/{}", drawer.name));
+                }
+            }
+            Ok(targets)
+        }
+        2 => {
+            let wardrobe = &segments[0];
+            let bay = &segments[1];
+            client
+                .show_drawers(wardrobe, bay)
+                .map_err(client_error)
+                .map(|drawers| {
+                    drawers
+                        .into_iter()
+                        .map(|drawer| format!("{wardrobe}/{bay}/{}", drawer.name))
+                        .collect()
+                })
+        }
+        3 => Ok(vec![segments.join("/")]),
+        _ => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "clean path must identify a wardrobe, bay, or drawer",
         )),
     }
 }
@@ -667,6 +817,75 @@ fn pointer_from_delete_payload(drawer_name: &str, payload: &Value) -> io::Result
 
 fn client_error(error: std::io::Error) -> std::io::Error {
     Error::new(error.kind(), format!("client error: {error}"))
+}
+
+fn embedded_data_dir(client: &WardrobeClient) -> PathBuf {
+    match client.connection_target() {
+        ConnectionTarget::EmbeddedPath(p) => p.clone(),
+        _ => PathBuf::from("./wardrobe"),
+    }
+}
+
+fn is_structural_create_target(value: &str) -> bool {
+    matches!(
+        value,
+        "wardrobe"
+            | "wardrobes"
+            | "database"
+            | "databases"
+            | "bay"
+            | "bays"
+            | "schema"
+            | "schemas"
+            | "drawer"
+            | "drawers"
+    )
+}
+
+fn has_path_separator(value: &str) -> bool {
+    value.contains('/') || value.contains('\\')
+}
+
+fn parse_structural_path(
+    raw_path: &str,
+    expected_segments: usize,
+    label: &str,
+) -> io::Result<(String, String, String)> {
+    let segments = split_structural_path(raw_path, label)?;
+    if segments.len() != expected_segments {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} requires {expected_segments} path segment(s)"),
+        ));
+    }
+
+    Ok((
+        segments.first().cloned().unwrap_or_default(),
+        segments.get(1).cloned().unwrap_or_default(),
+        segments.get(2).cloned().unwrap_or_default(),
+    ))
+}
+
+fn split_structural_path(raw_path: &str, label: &str) -> io::Result<Vec<String>> {
+    let mut segments = Vec::new();
+    for segment in raw_path.split(|c| c == '/' || c == '\\') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Invalid {label} segment: {segment}"),
+            ));
+        }
+        segments.push(segment.to_string());
+    }
+
+    if segments.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} cannot be empty"),
+        ));
+    }
+
+    Ok(segments)
 }
 
 pub fn print_json<T: serde::Serialize>(v: &T, pretty: bool) -> io::Result<()> {
@@ -813,6 +1032,15 @@ fn print_file_status(label: &str, path: &Path) -> io::Result<()> {
     if path.is_file() {
         let size = fs::metadata(path)?.len();
         println!("{label}: present ({size} bytes)");
+    } else {
+        println!("{label}: missing");
+    }
+    Ok(())
+}
+
+fn print_path_status(label: &str, path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        println!("{label}: present");
     } else {
         println!("{label}: missing");
     }
