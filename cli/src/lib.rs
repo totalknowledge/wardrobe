@@ -186,7 +186,8 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     ConnectionTarget::EmbeddedPath(p) => p.clone(),
                     _ => PathBuf::from("./wardrobe"),
                 };
-                inspect_drawer(&data_dir, &parts[1])
+                let target = resolve_inspect_target(&data_dir, &parts[1..])?;
+                inspect_drawer_target(&target)
             } else {
                 eprintln!("inspect is only available for embedded connections");
                 Ok(())
@@ -577,8 +578,56 @@ pub fn pub_normalize_record_ids(records: &mut Vec<Value>) {
 }
 
 pub fn inspect_drawer(data_dir: &Path, drawer_name: &str) -> io::Result<()> {
-    let files = drawer_files(data_dir, drawer_name);
-    println!("Drawer: {drawer_name}");
+    let tokens = [drawer_name.to_string()];
+    let target = resolve_inspect_target(data_dir, &tokens)?;
+    inspect_drawer_target(&target)
+}
+
+struct InspectTarget {
+    data_dir: PathBuf,
+    drawer_name: String,
+    label: String,
+}
+
+fn resolve_inspect_target(data_dir: &Path, drawer_tokens: &[String]) -> io::Result<InspectTarget> {
+    let mut segments = Vec::new();
+    for token in drawer_tokens {
+        for segment in token.split(|c| c == '/' || c == '\\') {
+            if segment.is_empty() || segment == "." || segment == ".." {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("Invalid inspect path segment: {segment}"),
+                ));
+            }
+            segments.push(segment.to_string());
+        }
+    }
+
+    let drawer_name = segments
+        .pop()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "inspect requires a drawer name"))?;
+
+    let mut resolved_data_dir = data_dir.to_path_buf();
+    for segment in &segments {
+        resolved_data_dir.push(segment);
+    }
+
+    let label = if segments.is_empty() {
+        drawer_name.clone()
+    } else {
+        format!("{}/{}", segments.join("/"), drawer_name)
+    };
+
+    Ok(InspectTarget {
+        data_dir: resolved_data_dir,
+        drawer_name,
+        label,
+    })
+}
+
+fn inspect_drawer_target(target: &InspectTarget) -> io::Result<()> {
+    let files = drawer_files(&target.data_dir, &target.drawer_name);
+    println!("Drawer: {}", target.label);
     print_file_status("data", &files.data)?;
     print_file_status("index", &files.index)?;
     print_file_status("meta", &files.meta)?;
@@ -643,4 +692,37 @@ struct DrawerFiles {
     data: PathBuf,
     index: PathBuf,
     meta: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_target_splits_structured_reference() {
+        let root = Path::new("/wardrobe");
+        let tokens = [String::from("basic-usage/public/user")];
+
+        let target = resolve_inspect_target(root, &tokens).expect("inspect target");
+
+        assert_eq!(target.data_dir, root.join("basic-usage").join("public"));
+        assert_eq!(target.drawer_name, "user");
+        assert_eq!(target.label, "basic-usage/public/user");
+    }
+
+    #[test]
+    fn inspect_target_accepts_split_tokens() {
+        let root = Path::new("/wardrobe");
+        let tokens = [
+            String::from("basic-usage"),
+            String::from("public"),
+            String::from("user"),
+        ];
+
+        let target = resolve_inspect_target(root, &tokens).expect("inspect target");
+
+        assert_eq!(target.data_dir, root.join("basic-usage").join("public"));
+        assert_eq!(target.drawer_name, "user");
+        assert_eq!(target.label, "basic-usage/public/user");
+    }
 }
