@@ -11,6 +11,7 @@ wardrobe/
   core/                 Embedded engine library crate
   cli/                  Command-line administration and operations
   server/               Standalone network daemon
+  samples/cli-script/    Shell script CLI workflow sample
   samples/basic-usage/  Sample application using embedded engine
 ```
 
@@ -268,6 +269,20 @@ Run the basic sample crate to execute an end-to-end integration flow that:
 
 ```text
 cargo run -p basic-usage
+```
+
+## CLI Sample
+
+Run the shell script sample to drive the CLI through the library workflow:
+
+```text
+bash ./samples/cli-script/wardrobe-cli-demo.sh
+```
+
+Pass a server connection string to exercise the same workflow remotely:
+
+```text
+bash ./samples/cli-script/wardrobe-cli-demo.sh wardrobe://localhost:24842
 ```
 
 ## Testing
