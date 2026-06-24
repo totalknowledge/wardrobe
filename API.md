@@ -1,185 +1,138 @@
 # Wardrobe API
 
-This document lists the public API intended for application programmers using Wardrobe through the client or engine entry points.
+This document describes the current public API of `wardrobe-core`.
 
-There are two main API surfaces:
+There are two main application-facing surfaces:
 
-- Client API: use `WardrobeClient` when application code should work across embedded, TCP, and Unix socket targets.
-- Engine API: use `WardrobeEngine` when application code is running directly against the local storage engine. The engine API is a superset of the client API.
+- Client API: use `WardrobeClient` when code should work across embedded, TCP, and Unix socket targets
+- Engine API: use `WardrobeEngine` when code runs directly against the local storage engine
+
+The engine is the local superset. The client mirrors the same command surface wherever transport allows it.
 
 Most operations return `std::io::Result<T>`.
+
+Note on naming: the CLI help and `NOTES.txt` use `wardrobe` and `bay` as user-facing terms. The Rust API names those same layers `database` and `schema`.
 
 ---
 
 ## Client API
 
-The client API is the preferred application boundary for code that may later move between local embedded storage and remote server-backed storage.
+The client API is the preferred boundary for application code that may move between embedded and remote execution.
 
 ### `WardrobeClient`
 
-Primary connection-driven client façade.
+Primary connection-driven facade.
 
 #### Constructors and connection metadata
 
 ```rust
 pub fn open(connection_string: impl AsRef<str>) -> Result<Self>
-```
-
-Opens a Wardrobe connection. The connection string selects the driver.
-
-Usage:
-
-```rust
-let client = WardrobeClient::open("./data")?;
-let remote = WardrobeClient::open("wardrobe://localhost:24842")?;
-```
-
-```rust
 pub fn connection_target(&self) -> &ConnectionTarget
-```
-
-Returns the parsed connection target.
-
-```rust
 pub fn driver_kind(&self) -> DriverKind
-```
-
-Returns the selected driver kind: embedded, network, or Unix socket.
-
-```rust
 pub fn requires_embedded_engine(&self) -> bool
-```
-
-Returns `true` when the target uses the local embedded engine.
-
-```rust
 pub fn uses_socket_transport(&self) -> bool
 ```
 
-Returns `true` when the target communicates over TCP or Unix sockets.
+Accepted connection shapes:
+
+- Embedded path: `./data`
+- Embedded URI: `wardrobe://local/path/to/data`
+- File URI: `wardrobe+file://path/to/data`
+- TCP URI: `wardrobe://host[:port]`
+- Unix socket URI: `wardrobe+unix:///tmp/wardrobe.sock`
 
 #### Record operations
 
 ```rust
 pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String>
-```
-
-Creates or updates a record in a drawer and returns its Wardrobe pointer.
-
-Usage:
-
-```rust
-let pointer = client.upsert("user", serde_json::json!({
-    "_id": "john",
-    "name": "John"
-}))?;
-```
-
-```rust
 pub fn find_all(&self, drawer_name: &str) -> Result<Vec<Value>>
-```
-
-Returns all live records in a drawer.
-
-```rust
 pub fn find_by_filter(
     &self,
     drawer_name: &str,
     filter: Value,
     modifiers: Option<QueryModifiers>,
 ) -> Result<Vec<Value>>
-```
-
-Returns records matching a JSON filter, optionally applying sorting, offset, and limit.
-
-```rust
 pub fn count(
     &self,
     drawer_name: &str,
     filter: Option<Value>,
     modifiers: Option<QueryModifiers>,
 ) -> Result<usize>
-```
-
-Counts matching records. Pagination modifiers are accepted for API consistency, but count semantics are based on matching records.
-
-```rust
 pub fn find_by_id(&self, pointer: &str) -> Result<Option<Value>>
-```
-
-Finds one record by Wardrobe pointer, such as `@user:john`.
-
-```rust
 pub fn delete_by_id(&self, pointer: &str) -> Result<bool>
-```
-
-Deletes one record by Wardrobe pointer. Returns `true` when a record was deleted.
-
-```rust
 pub fn delete<L>(&self, locator: L) -> Result<bool>
 where
     L: Into<StorageLocator>
 ```
 
-Deletes by pointer string or explicit drawer/id locator.
+`delete` accepts either an inline pointer such as `@user:john` or an explicit locator such as `("user", "john")`.
 
-Usage:
-
-```rust
-client.delete("@user:john")?;
-client.delete(("user", "john"))?;
-```
-
-#### Maintenance operations
+#### Maintenance, inspection, lifecycle, and recovery
 
 ```rust
 pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
-```
-
-Compacts a drawer and rebuilds its live storage representation.
-
-```rust
 pub fn migrate_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
+pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics>
+pub fn check_path(&self, path: &str) -> Result<CheckReport>
+pub fn diagnose_storage(&self) -> Result<StorageDiagnosis>
+pub fn list_drawer_names(&self) -> Result<Vec<String>>
+pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive>
+pub fn restore_archive(
+    &self,
+    destination_path: &str,
+    archive: BackupArchive,
+) -> Result<RestoreReport>
+pub fn create_database(&self, database_name: &str) -> Result<StorageInventory>
+pub fn create_schema(
+    &self,
+    database_name: &str,
+    schema_name: &str,
+) -> Result<StorageInventory>
+pub fn create_drawer(
+    &self,
+    database_name: &str,
+    schema_name: &str,
+    drawer_name: &str,
+) -> Result<StorageInventory>
+pub fn register_tenant_route(
+    &self,
+    tenant_id: &str,
+    database_name: &str,
+    location: &str,
+) -> Result<StorageInventory>
+pub fn manage_schema(
+    &self,
+    drawer_name: &str,
+    action: &str,
+    kind: &str,
+    field_name: &str,
+    payload: Value,
+) -> Result<Value>
+pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value>
 ```
 
-Migrates drawer records to the current storage layout.
+Notes:
 
-```rust
-pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification>
-```
+- `manage_schema` is the programmatic surface behind CLI `add` and `remove`
+- `manage_user` is the programmatic surface behind CLI `add user`, `grant permission`, and `revoke permission`
+- `manage_user` is intentionally remote-only on `WardrobeClient`; embedded targets return `ErrorKind::Unsupported`
+- Path-style drawer names such as `inventory/public/tool` are accepted by the structural admin and inspection surfaces
 
-Verifies the write-ahead log for the root database or a named database.
-
-#### Discovery operations
+#### Discovery and verification
 
 ```rust
 pub fn show_tenants(&self) -> Result<Vec<String>>
 pub fn list_tenants(&self) -> Result<Vec<String>>
-```
-
-Lists known tenant identifiers. `list_tenants` is an alias.
-
-```rust
 pub fn show_databases(&self) -> Result<Vec<StorageInventory>>
 pub fn list_databases(&self) -> Result<Vec<StorageInventory>>
-```
-
-Lists known databases with inventory metadata. `list_databases` is an alias.
-
-```rust
+pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification>
 pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>>
 pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>>
-```
-
-Lists schemas for a database. `list_schemas` is an alias.
-
-```rust
 pub fn show_drawers(
     &self,
     database_name: &str,
     schema_name: &str,
 ) -> Result<Vec<StorageInventory>>
-
 pub fn list_drawers(
     &self,
     database_name: &str,
@@ -187,68 +140,42 @@ pub fn list_drawers(
 ) -> Result<Vec<StorageInventory>>
 ```
 
-Lists drawers for a database and schema. `list_drawers` is an alias.
+`list_*` methods are aliases for the corresponding `show_*` methods.
 
 ---
 
 ## Engine API
 
-The engine API is the local storage-engine API. It includes the same record, maintenance, and discovery operations as the client, plus local engine construction, cache inspection, scoped execution, lifecycle operations, tenant routing, and direct command dispatch.
+The engine API is the local storage engine surface. It includes the same record, maintenance, inspection, lifecycle, and discovery operations as the client, plus local engine construction, cache inspection, direct command execution, and tenant-scoped execution helpers.
 
 ### `WardrobeEngine`
 
-Local engine façade for filesystem-backed storage.
+Local filesystem-backed engine facade.
 
 #### Constructors
 
 ```rust
 pub fn open(directory: &str) -> Result<Self>
-```
-
-Opens or initializes a local Wardrobe storage root.
-
-```rust
-let engine = WardrobeEngine::open("./data")?;
-```
-
-```rust
 pub fn open_with_drawer_cache_limit(
     directory: &str,
     max_cached_drawers: usize,
 ) -> Result<Self>
-```
-
-Opens a local engine with a maximum active drawer cache size.
-
-```rust
 pub fn open_with_wal_checkpoint_thresholds(
     directory: &str,
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
 ) -> Result<Self>
-```
-
-Opens a local engine with custom automatic WAL checkpoint thresholds. A checkpoint is triggered when either threshold is reached.
-
-```rust
 pub fn open_with_drawer_cache_limit_and_wal_checkpoint_thresholds(
     directory: &str,
     max_cached_drawers: usize,
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
 ) -> Result<Self>
-```
-
-Opens a local engine with both drawer cache and WAL checkpoint thresholds configured.
-
-```rust
 #[deprecated(note = "Use WardrobeEngine::open for filesystem-backed initialization")]
 pub fn new(directory: &str) -> Result<Self>
 ```
 
-Deprecated alias for `open`.
-
-#### Client-equivalent record operations
+#### Record operations
 
 ```rust
 pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String>
@@ -274,18 +201,61 @@ where
     L: Into<StorageLocator>
 ```
 
-These methods mirror the client record API but execute directly against the local engine.
-
-#### Client-equivalent maintenance and discovery
+#### Maintenance, inspection, lifecycle, and recovery
 
 ```rust
 pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
 pub fn migrate_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
-pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification>
+pub fn manage_schema(
+    &self,
+    drawer_name: &str,
+    action: &str,
+    kind: &str,
+    field_name: &str,
+    payload: Value,
+) -> Result<Value>
+pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics>
+pub fn check_path(&self, raw_path: &str) -> Result<CheckReport>
+pub fn diagnose_storage(&self) -> Result<StorageDiagnosis>
+pub fn list_drawer_names(&self) -> Result<Vec<String>>
+pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive>
+pub fn restore_archive(
+    &self,
+    destination_path: &str,
+    archive: BackupArchive,
+) -> Result<RestoreReport>
+pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value>
+pub fn cached_drawer_count(&self) -> Result<usize>
+pub fn create_database(&self, database_name: &str) -> Result<StorageInventory>
+pub fn create_schema(
+    &self,
+    database_name: &str,
+    schema_name: &str,
+) -> Result<StorageInventory>
+pub fn create_drawer(
+    &self,
+    database_name: &str,
+    schema_name: &str,
+    drawer_name: &str,
+) -> Result<StorageInventory>
+pub fn register_tenant_route(
+    &self,
+    tenant_id: &str,
+    database_name: &str,
+    location: &str,
+) -> Result<StorageInventory>
+```
+
+Unlike `WardrobeClient`, the engine can execute `manage_user` locally because the server uses the same engine-backed administrative primitive.
+
+#### Discovery, verification, and command execution
+
+```rust
 pub fn show_tenants(&self) -> Result<Vec<String>>
 pub fn list_tenants(&self) -> Result<Vec<String>>
 pub fn show_databases(&self) -> Result<Vec<StorageInventory>>
 pub fn list_databases(&self) -> Result<Vec<StorageInventory>>
+pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification>
 pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>>
 pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>>
 pub fn show_drawers(
@@ -298,42 +268,12 @@ pub fn list_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> Result<Vec<StorageInventory>>
-```
-
-These methods mirror the client maintenance and discovery API.
-
-```rust
-pub fn cached_drawer_count(&self) -> Result<usize>
-```
-
-Returns the number of drawers currently held in the engine drawer cache.
-
-#### Scoped and routed execution
-
-```rust
 pub fn execute(
     &self,
     coordinate: StorageCoordinate,
     command: Command,
 ) -> Result<CommandResult>
-```
-
-Executes a command inside a tenant/database/schema coordinate.
-
-```rust
-let coordinate = StorageCoordinate::new("tenant_a", "production", "public");
-let result = engine.execute(coordinate, Command::FindAll {
-    drawer_name: "user".to_string(),
-})?;
-```
-
-```rust
 pub fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult>
-```
-
-Executes a command in a database, schema, drawer namespace, or tenant scope.
-
-```rust
 pub fn execute_for_tenant(
     &self,
     tenant_id: &str,
@@ -341,55 +281,10 @@ pub fn execute_for_tenant(
     schema_name: &str,
     command: Command,
 ) -> Result<CommandResult>
-```
-
-Executes a command using a tenant route registered in the catalog.
-
-```rust
 pub fn execute_command(&self, command: Command) -> Result<CommandResult>
 ```
 
-Executes a top-level command directly against the engine boundary.
-
-#### Lifecycle operations
-
-```rust
-pub fn create_database(&self, database_name: &str) -> Result<StorageInventory>
-```
-
-Creates a database and records it in the catalog.
-
-```rust
-pub fn create_schema(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<StorageInventory>
-```
-
-Creates a schema inside a database and records it in the catalog.
-
-```rust
-pub fn create_drawer(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-    drawer_name: &str,
-) -> Result<StorageInventory>
-```
-
-Creates a drawer inside a database/schema and records it in the catalog.
-
-```rust
-pub fn register_tenant_route(
-    &self,
-    tenant_id: &str,
-    database_name: &str,
-    location: &str,
-) -> Result<StorageInventory>
-```
-
-Registers a tenant route to a database storage location.
+`execute`, `execute_in_scope`, `execute_for_tenant`, and `execute_command` all use the shared `Command` / `CommandResult` protocol types that also drive remote server execution.
 
 ---
 
@@ -403,21 +298,10 @@ Optional query modifiers for filtered reads.
 
 Fields:
 
-- `order_by: Option<String>`: field name to sort by
-- `order_direction: Option<OrderDirection>`: ascending or descending
-- `limit: Option<usize>`: maximum records returned
-- `offset: Option<usize>`: records to skip
-
-Usage:
-
-```rust
-let modifiers = QueryModifiers {
-    order_by: Some("name".to_string()),
-    order_direction: Some(OrderDirection::Ascending),
-    limit: Some(10),
-    offset: Some(0),
-};
-```
+- `order_by: Option<String>`
+- `order_direction: Option<OrderDirection>`
+- `limit: Option<usize>`
+- `offset: Option<usize>`
 
 ### `OrderDirection`
 
@@ -430,7 +314,7 @@ Variants:
 
 ### `StorageInventory`
 
-Inventory summary returned by database and drawer discovery methods.
+Inventory summary returned by discovery and lifecycle methods.
 
 Fields:
 
@@ -448,7 +332,7 @@ Variants:
 - `Explicit { drawer: String, id: String }`
 - `Inline(String)`
 
-Functions:
+Helpers:
 
 ```rust
 pub fn explicit(drawer: &str, id: &str) -> Self
@@ -457,10 +341,10 @@ pub fn inline(locator: &str) -> Self
 
 Conversions:
 
-- `&str` becomes `StorageLocator::Inline`
-- `String` becomes `StorageLocator::Inline`
-- `&String` becomes `StorageLocator::Inline`
-- `(&str, &str)` becomes `StorageLocator::Explicit`
+- `&str` -> `StorageLocator::Inline`
+- `String` -> `StorageLocator::Inline`
+- `&String` -> `StorageLocator::Inline`
+- `(&str, &str)` -> `StorageLocator::Explicit`
 
 ### `VacuumReport`
 
@@ -468,7 +352,6 @@ Maintenance result returned by `vacuum_drawer` and `migrate_drawer`.
 
 Fields:
 
-- `drawer_name: String`
 - `records_rewritten: usize`
 - `data_bytes_before: u64`
 - `data_bytes_after: u64`
@@ -482,9 +365,87 @@ WAL verification result returned by `verify_wal`.
 
 Fields:
 
+- `path: String`
 - `entry_count: usize`
 - `last_sequence: Option<u64>`
+
+### `DrawerInspectionMetrics`
+
+Inspection summary returned by `inspect_drawer`.
+
+Fields:
+
 - `path: String`
+- `data_bytes: u64`
+- `index_bytes: u64`
+- `meta_bytes: u64`
+- `total_bytes: u64`
+- `record_count: usize`
+- `register_file_count: usize`
+- `tombstone_fragmentation_percent: Option<f64>`
+
+### `CheckReport`
+
+Structural presence and sanity report returned by `check_path`.
+
+Fields:
+
+- `path: String`
+- `kind: String`
+- `entries: Vec<CheckEntry>`
+
+### `CheckEntry`
+
+One physical check result inside a `CheckReport`.
+
+Fields:
+
+- `label: String`
+- `path: String`
+- `exists: bool`
+- `bytes: Option<u64>`
+
+### `StorageDiagnosis`
+
+High-level storage diagnosis returned by `diagnose_storage`.
+
+Fields:
+
+- `storage_directory: String`
+- `drawer_count: usize`
+- `status: String`
+- `drawers: Vec<String>`
+
+### `BackupArchive`
+
+Archive payload returned by `backup_archive` and consumed by `restore_archive`.
+
+Fields:
+
+- `format: String`
+- `source_path: String`
+- `scope: String`
+- `files: Vec<BackupArchiveFile>`
+
+### `BackupArchiveFile`
+
+One archived file inside a `BackupArchive`.
+
+Fields:
+
+- `path: String`
+- `bytes_hex: String`
+
+### `RestoreReport`
+
+Restore summary returned by `restore_archive`.
+
+Fields:
+
+- `destination_path: String`
+- `scope: String`
+- `file_count: usize`
+- `byte_count: usize`
 
 ### `ConnectionTarget`
 
@@ -496,7 +457,7 @@ Variants:
 - `Network { host: String, port: u16 }`
 - `UnixSocket { path: PathBuf }`
 
-Functions:
+Helpers:
 
 ```rust
 pub fn parse(connection_string: &str) -> Result<Self>
@@ -515,7 +476,7 @@ Variants:
 - `Network`
 - `UnixSocket`
 
-Functions:
+Helpers:
 
 ```rust
 pub fn requires_embedded_engine(self) -> bool
@@ -524,7 +485,7 @@ pub fn uses_socket_transport(self) -> bool
 
 ### `Command`
 
-Engine command enum used by `execute`, `execute_in_scope`, `execute_for_tenant`, and `execute_command`.
+Shared command enum used by local execution and remote protocol execution.
 
 Variants:
 
@@ -541,17 +502,25 @@ Variants:
 - `Delete { pointer }`
 - `Vacuum { drawer_name }`
 - `Migrate { drawer_name }`
+- `Inspect { drawer_name }`
+- `Check { path }`
+- `Diagnose`
+- `ListDrawers`
+- `Backup { source_path }`
+- `Restore { destination_path, archive }`
 - `DefineDatabase { database_name }`
 - `DefineSchema { database_name, schema_name }`
 - `DefineDrawer { database_name, schema_name, drawer_name }`
 - `DefineTenantRoute { tenant_id, database_name, location }`
+- `ManageSchema { action, kind, drawer_name, field_name, payload }`
+- `ManageUser { action, payload }`
 - `ExecuteForTenant { tenant_id, database_name, schema_name, command }`
 - `Execute { coordinate, command }`
 - `ExecuteInScope { scope, command }`
 
 ### `CommandResult`
 
-Result enum returned by command execution.
+Result enum returned by local and remote command execution.
 
 Variants:
 
@@ -568,18 +537,25 @@ Variants:
 - `Deleted(bool)`
 - `Vacuumed(VacuumReport)`
 - `Migrated(VacuumReport)`
+- `Inspection(DrawerInspectionMetrics)`
+- `Check(CheckReport)`
+- `Diagnosis(StorageDiagnosis)`
+- `DrawerNames(Vec<String>)`
+- `Backup(BackupArchive)`
+- `Restored(RestoreReport)`
+- `Admin(Value)`
 
 ---
 
-## Engine-Only Supporting Types
+## Engine-Oriented Supporting Types
 
-These types are primarily useful with scoped engine execution.
+These types are primarily useful when working with routed engine execution.
 
 ### `StorageCoordinate`
 
 Tenant/database/schema coordinate used by `WardrobeEngine::execute`.
 
-Functions:
+Helpers:
 
 ```rust
 pub fn new(tenant: &str, database: &str, schema: &str) -> Self
@@ -599,7 +575,7 @@ Variants:
 - `Schema { database, schema }`
 - `Drawer { namespace }`
 
-Functions:
+Helpers:
 
 ```rust
 pub fn tenant(

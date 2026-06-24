@@ -1,117 +1,67 @@
 # Wardrobe
 
-Wardrobe is an embedded Rust document database for local-first applications, developer tooling, test environments, desktop software, and service backends that need structured storage without a separate database server in the hot path.
+Wardrobe is a Rust document database that can run embedded or behind a server without forcing application code to change the API it calls. `WardrobeEngine` is the direct embedded engine. `WardrobeClient` is the deployment-neutral facade that selects embedded, TCP, or Unix socket transport from a connection string.
 
-Wardrobe stores JSON-like records in flat files with file-backed indexes, relationship hydration, schema validation, scoped multi-tenant routing, write-ahead recovery, vacuum compaction, and bounded drawer caching. The long-term direction remains a binary storage engine, but the current API is already useful for a wide range of application workflows.
+Wardrobe stores JSON-like records in flat files with file-backed indexes, relationship hydration, schema and rule metadata, scoped tenant routing, write-ahead recovery, vacuum compaction, inspection tooling, and archive-based backup and restore workflows.
 
 ## Workspace
 
 ```text
 wardrobe/
   core/                 Embedded engine library crate
-  cli/                  Command-line inspection and diagnostics
+  cli/                  Command-line administration and operations
   server/               Standalone network daemon
   samples/basic-usage/  Sample application using embedded engine
 ```
 
+## Terminology
+
+The CLI help and `NOTES.txt` use user-facing structural names:
+
+- `wardrobe`
+- `bay`
+- `drawer`
+
+The Rust API keeps the older engine-oriented names:
+
+- `database`
+- `schema`
+- `drawer`
+
+They map directly:
+
+- CLI `wardrobe` = API `database`
+- CLI `bay` = API `schema`
+- CLI `drawer` = API `drawer`
+
+`tenant` remains a separate routing dimension in both surfaces.
+
 ## Current Public API
 
-Wardrobe currently exposes these top-level Rust API items from `wardrobe-core`:
+`wardrobe-core` currently re-exports these public items:
 
-- `WardrobeEngine`
-- `Command`
-- `CommandResult`
-- `WardrobeClient`
-- `ConnectionTarget`
-- `DriverKind`
-- `DEFAULT_NETWORK_PORT`
-- `ProtocolFrame`
-- `ProtocolOpcode`
-- `PROTOCOL_MAGIC`
-- `StorageCoordinate`
-- `StorageInventory`
-- `StorageLocator`
-- `StorageScope`
-- `QueryModifiers`
-- `OrderDirection`
-- `Database`
-- `Drawer`
-- `VacuumReport`
-- `DatabaseReader`
-- `DatabaseWriter`
-- `Recycler`
-- `StorageFormat`
-- `BsonBinaryFormat`
+- Core entry points: `WardrobeEngine`, `WardrobeClient`
+- Command and routing types: `Command`, `CommandResult`, `StorageCoordinate`, `StorageScope`, `StorageLocator`, `StorageInventory`
+- Query types: `QueryModifiers`, `OrderDirection`
+- Connection and protocol types: `ConnectionTarget`, `DriverKind`, `DEFAULT_NETWORK_PORT`, `ProtocolFrame`, `ProtocolOpcode`, `PROTOCOL_MAGIC`
+- Inspection, verification, and recovery types: `DrawerInspectionMetrics`, `CheckReport`, `CheckEntry`, `StorageDiagnosis`, `VacuumReport`, `WalVerification`, `BackupArchive`, `BackupArchiveFile`, `RestoreReport`
+- Lower-level storage types: `Database`, `Drawer`, `DatabaseReader`, `DatabaseWriter`, `Recycler`, `StorageFormat`, `BsonBinaryFormat`
+- Catalog and WAL types: `CATALOG_FILE_NAME`, `CatalogEntry`, `CatalogRegistry`, `CatalogTenantRoute`, `WAL_FILE_NAME`, `WalEntry`, `WalJournal`, `WalOperation`
 
-The main embedded entry points on `WardrobeEngine` are:
+The two main application entry points are:
 
-- `open`
-- `open_with_drawer_cache_limit`
-- `new` as a deprecated compatibility alias for `open`
-- `upsert`
-- `find_all`
-- `find_by_filter`
-- `count`
-- `find_by_id`
-- `delete`
-- `delete_by_id`
-- `vacuum_drawer`
-- `migrate_drawer`
-- `cached_drawer_count`
-- `show_tenants`
-- `list_tenants`
-- `show_databases`
-- `list_databases`
-- `verify_wal`
-- `show_schemas`
-- `list_schemas`
-- `show_drawers`
-- `list_drawers`
-- `execute`
-- `execute_in_scope`
+- `WardrobeEngine` for direct embedded access
+- `WardrobeClient` for path, TCP, and Unix socket targets with the same command surface
 
-### WardrobeEngine Method Guide
+`WardrobeClient` currently exposes:
 
-| Method | What it does | Notes |
-| --- | --- | --- |
-| `open(path)` | Opens or initializes an embedded wardrobe store at `path`. | Primary constructor for local embedded usage. |
-| `open_with_drawer_cache_limit(path, limit)` | Opens with an explicit LRU drawer cache limit. | Use when you need bounded open-drawer memory/file-handle usage. |
-| `new(path)` | Compatibility alias for `open`. | Deprecated alias retained for older code. |
-| `upsert(drawer, payload)` | Inserts or updates a record and returns the record pointer. | Requires an object payload. Handles ID normalization and relationship pointer normalization. |
-| `find_all(drawer)` | Returns all live records in a drawer. | Hydrates linked records where relationship metadata applies. |
-| `find_by_filter(drawer, filter, modifiers)` | Returns records matching an object filter. | Supports wildcard string matching (`%`) plus ordering/pagination via `QueryModifiers`. |
-| `count(drawer, filter, modifiers)` | Returns the number of records matching a filter. | When no filter is supplied, can use metadata/index fast paths. |
-| `find_by_id(pointer)` | Fetches one record by pointer (for example `@gem:lnk_fire`). | Returns `Option<Value>` (`None` when not found). |
-| `delete(locator)` | Deletes by `StorageLocator` (`Inline` or `Explicit`). | Useful when caller works with structured locator values. |
-| `delete_by_id(pointer_or_tuple)` | Deletes by pointer-compatible identifier. | Accepts inline pointer forms and tuple-convertible locators. |
-| `vacuum_drawer(drawer)` | Compacts drawer storage and rebuilds internals for live data. | Returns `VacuumReport`. |
-| `migrate_drawer(drawer)` | Migrates legacy drawer layout/state to current format. | Returns `VacuumReport` describing migration/compaction work. |
-| `cached_drawer_count()` | Returns current in-memory cached drawer count. | Useful for cache diagnostics and tuning. |
-| `show_tenants()` / `list_tenants()` | Lists active tenant namespaces discovered in storage. | `list_*` variants are aliases of `show_*`. |
-| `show_databases()` / `list_databases()` | Lists discovered databases with inventory stats. | Returns `Vec<StorageInventory>`. |
-| `show_schemas(database)` / `list_schemas(database)` | Lists schemas under a database footprint. | Supports nested and flat schema namespace discovery. |
-| `show_drawers(database, schema)` / `list_drawers(database, schema)` | Lists drawers in a scoped database/schema with counts/sizes. | Returns `Vec<StorageInventory>` including record counts and file metrics. |
-| `execute(coordinate, command)` | Executes a `Command` routed by `StorageCoordinate`. | For tenant/database/schema routed execution in one call. |
-| `execute_in_scope(scope, command)` | Executes a command within a database/schema/drawer `StorageScope`. | Useful for scoped routing without full coordinate construction. |
+- Record operations: `upsert`, `find_all`, `find_by_filter`, `count`, `find_by_id`, `delete`, `delete_by_id`
+- Maintenance and inspection: `vacuum_drawer`, `migrate_drawer`, `inspect_drawer`, `check_path`, `diagnose_storage`, `list_drawer_names`, `verify_wal`
+- Lifecycle and recovery: `create_database`, `create_schema`, `create_drawer`, `register_tenant_route`, `backup_archive`, `restore_archive`
+- Administrative management: `manage_schema`, `manage_user`
+- Discovery: `show_tenants`, `show_databases`, `show_schemas`, `show_drawers`, plus `list_*` aliases
 
-Supporting execution and routing types include:
-
-- `QueryModifiers` and `OrderDirection` for sorting and pagination
-- `StorageCoordinate` for tenant/database/schema routing
-- `StorageScope` for database, schema, or drawer isolation modes
-- `show_tenants` / `list_tenants` for active tenant namespace discovery
-- `show_databases` / `list_databases` for database inventory discovery
-- `show_schemas` / `list_schemas` for schema namespace discovery
-- `show_drawers` / `list_drawers` for scoped drawer inventory discovery
-- `Command` and `CommandResult` for a command-driven execution surface
-
-The lower-level exports remain available for advanced use cases such as custom storage experiments, diagnostics, or alternative tooling layers.
-
-`WardrobeClient::open(...)` is the deployment-neutral client entrypoint inside `wardrobe-core`. It accepts a direct file-system path, an embedded URI, a TCP URI, or a Unix socket URI. Embedded paths delegate to the local engine immediately. TCP and Unix socket drivers open their transport connection and exchange framed `Command` / `CommandResult` payloads using Wardrobe's binary protocol framing.
-
-Future language bindings follow the same rule: one public package per ecosystem with internal driver selection from the connection string. Network and Unix socket targets report that they do not require the embedded storage engine artifact, allowing bindings to avoid loading native embedded code unless a local path or file URI is requested.
-
-Embedded language mode is the companion path: direct file-system paths and file-oriented URIs select the embedded driver and may load native binaries built from `wardrobe-core` behind the same public API. The intended package shape remains one public package per ecosystem, even if that package contains separate internal artifacts for embedded and socket-backed execution.
+`WardrobeEngine` exposes the same data, inspection, lifecycle, and discovery methods locally, and adds direct command execution with `execute`, `execute_in_scope`, `execute_for_tenant`, `execute_command`, and `cached_drawer_count`.
 
 ## Usage
 
@@ -124,17 +74,18 @@ use wardrobe_core::WardrobeEngine;
 fn main() -> std::io::Result<()> {
     let engine = WardrobeEngine::open("./data")?;
 
-    let weapon_id = engine.upsert(
+    let pointer = engine.upsert(
         "weapon",
         json!({
+            "_id": "field-service-kit",
             "name": "Field Service Toolkit",
             "category": "maintenance",
             "tags": ["portable", "repair"]
         }),
     )?;
 
-    let weapon = engine.find_by_id(&weapon_id)?;
-    println!("{weapon:?}");
+    let record = engine.find_by_id(&pointer)?;
+    println!("{record:?}");
 
     Ok(())
 }
@@ -149,6 +100,8 @@ fn connect() -> std::io::Result<()> {
     let embedded = WardrobeClient::open("./data")?;
     let embedded_uri = WardrobeClient::open("wardrobe://local/./data")?;
     let network = WardrobeClient::open("wardrobe://localhost:24842")?;
+
+    #[cfg(unix)]
     let socket = WardrobeClient::open("wardrobe+unix:///tmp/wardrobe.sock")?;
 
     Ok(())
@@ -164,7 +117,7 @@ Supported connection shapes:
 - TCP default port: `wardrobe://localhost` uses `24842`
 - Unix socket URI: `wardrobe+unix:///tmp/wardrobe.sock`
 
-Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_embedded_engine()` when a binding or host application needs to decide whether embedded native storage must be loaded.
+Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_embedded_engine()` when a binding or host application needs to know whether embedded native storage is required.
 
 ### Filtering, Counting, and Pagination
 
@@ -198,7 +151,7 @@ use serde_json::json;
 use wardrobe_core::{Command, StorageCoordinate, WardrobeEngine};
 
 fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
-    let scope = StorageCoordinate::new("tenant_a", "production", "core");
+    let scope = StorageCoordinate::new("tenant_a", "production", "public");
 
     engine.execute(
         scope,
@@ -215,23 +168,7 @@ fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
 }
 ```
 
-### Sample Application
-
-Run the basic sample crate to execute an end-to-end integration flow that:
-
-- Opens a local embedded engine against `./wardrobe`
-- Uses `show_drawers("main", "public")` for drawer metadata enumeration
-- Upserts a `public.user` parent with multiple `public.gem` children and a `public.weapon` child
-- Exercises three relation links: gem→user, weapon→user, and weapon→gem
-- Filters by array tags and owner via `find_by_filter`
-- Cleans up by querying related gems and deleting each via `delete_by_id`
-- Prints a seven-phase walkthrough of the full lifecycle
-
-```text
-cargo run -p basic-usage
-```
-
-### Server Daemon
+## Server Daemon
 
 Run Wardrobe as a TCP-backed daemon:
 
@@ -241,67 +178,99 @@ cargo run -p wardrobe-server -- --data-dir ./data --tcp-bind 127.0.0.1:24842
 
 Useful server flags:
 
-- `--data-dir <path>` chooses the root storage directory.
-- `--tcp-bind <addr:port>` binds the TCP listener. The default is `127.0.0.1:24842`.
-- `--no-tcp` disables the TCP listener.
-- `--unix-socket <path>` binds a Unix domain socket listener on Unix platforms.
-- `--check` initializes the engine and exits without blocking.
+- `--data-dir <path>` chooses the root storage directory
+- `--tcp-bind <addr:port>` binds the TCP listener; default is `127.0.0.1:24842`
+- `--no-tcp` disables the TCP listener
+- `--unix-socket <path>` binds a Unix domain socket listener on Unix platforms
+- `--check` initializes the engine and exits without blocking
 
-## Current Capabilities
+## CLI Usage
 
-- Flat-file drawer storage with separate data, index, and metadata sidecar files
-- Big-endian BSON-framed binary serialization for drawer data and index payloads
-- Primary-key indexing and secondary unique-field indexing
-- Upsert semantics with tombstoning and size-class slot recycling
-- Recursive record hydration across drawers without unsafe code
-- Array handling for scalar values, pointer arrays, and nested object arrays
-- Schema-less writes or optional per-drawer schema validation through metadata
-- Relationship constraints for `1:1`, `M:1`, `1:M`, and `M:M` patterns
-- Declarative delete behavior including cascade, restrict, and set-null rules
-- Scoped storage routing across database, schema, and drawer isolation models
-- Write-ahead log recovery for incomplete upsert and delete operations
-- Explicit vacuum compaction for reclaiming fragmented drawer storage
-- Lazy and batch schema evolution for legacy drawer layout versions
-- Optional LRU drawer caching to bound open file handles and cached drawer state
+`NOTES.txt` and `wardrobe-cli --help` are the authority for the CLI capability set. The current binary accepts the connection context through `--target`, `--connection`, or `--data-dir`, then runs the canonical command families from the help output.
 
-## Tooling
-
-- `wardrobe-core`: embedded library crate
-- `wardrobe-cli`: local inspection and diagnostics (see CLI Usage below)
-- `wardrobe-server`: standalone daemon with TCP protocol handling
-- `basic-usage`: practical sample application
-
-CLI Usage
-
-Run the CLI binary (defaults to embedded ./wardrobe):
+Run a single command:
 
 ```text
 cargo run -p wardrobe-cli -- --target <connection> [--pretty] <command> [args]
 ```
 
+If no command is supplied, the CLI enters an interactive REPL. If standard input is piped in, the CLI executes the piped command instead.
+
 Examples:
 
-- Run a single command against an embedded store:
-  cargo run -p wardrobe-cli -- --target ./data records weapon
-- Pipe a command via stdin (scripting):
-  echo "records weapon" | cargo run -p wardrobe-cli -- --target ./data
-- Start an interactive REPL against a network daemon:
-  cargo run -p wardrobe-cli -- --target "wardrobe://localhost:24842"
+- Embedded structural discovery:
+  `cargo run -p wardrobe-cli -- --target ./data show wardrobes`
+- Remote drawer listing:
+  `cargo run -p wardrobe-cli -- --target "wardrobe://127.0.0.1:24842" show drawers inventory/public`
+- Backup a bay:
+  `cargo run -p wardrobe-cli -- --target ./data backup inventory/public ./backups/public.wrb`
 
-Flags and commands
+Canonical command families:
 
-- --target <connection>   Wardrobe connection string (default: ./wardrobe)
-- --pretty                Pretty-print JSON output
+- Structural and lifecycle management
+  - `show <type> <?parent_path>`
+  - `create <type> <path>`
+  - `check <path>`
+  - `clean <path>`
+- Document mutations and queries (RUDI)
+  - `upsert <path> <json_payload>`
+  - `count <path> <?json_filter>`
+  - `inspect <path>`
+  - `records <path> <?json_filter>`
+  - `delete <path> <json_filter_or_id>`
+- Schema engine and relationship management
+  - `add <type> <path> <target_field> <?extra_args>`
+  - `remove <type> <path> <target_field> <?extra_args>`
+- Backup and disaster recovery
+  - `backup <source_path> <destination_archive_path>`
+  - `restore <destination_path> <source_archive_path>`
+- Server access control and user administration
+  - `add user <json_user_payload>`
+  - `grant permission <username> <path:rights>`
+  - `revoke permission <username> <path:rights>`
 
-Common commands:
-- records <drawer>
-- upsert <drawer> '<json>'
-- delete-by-id <pointer>
-- show-databases
-- show-schemas <database>
-- show-drawers <database> <schema>
-- drawers, diagnose, inspect <drawer>  (embedded-only)
+Behavior notes:
 
+- `show wardrobes` and `create wardrobe` map to the Rust `database` lifecycle APIs
+- `show bays` and `create bay` map to the Rust `schema` lifecycle APIs
+- `add user`, `grant permission`, and `revoke permission` require a remote server-backed target; `WardrobeClient` rejects them for embedded connections
+- `clean` can target a wardrobe, a bay, or a single drawer and fans out to the relevant `vacuum_drawer` calls
+- `backup` and `restore` operate at wardrobe, bay, or drawer scope
+
+Compatibility aliases remain available for older workflows, including `list`, `ls`, `find`, `get`, `query`, `insert`, `drawers`, `diagnose`, `show-databases`, `show-schemas`, `show-drawers`, `delete-by-id`, `define`, `manage`, `auth`, and `rbac`.
+
+## Current Capabilities
+
+- Flat-file drawer storage with separate data, index, metadata, and WAL files
+- Big-endian BSON-framed binary serialization for drawer data and index payloads
+- Record CRUD, JSON filtering, pointer lookup, and count operations
+- Primary-key indexing and secondary unique-field indexing
+- Nested document graph hydration and relationship-aware record storage
+- Relationship constraints, delete rules, cascade-delete rules, and drawer schema metadata
+- Scoped routing across tenant, database, schema, and drawer boundaries
+- Write-ahead log verification and recovery for incomplete operations
+- Explicit drawer vacuuming and migration workflows
+- Structural inspection and sanity checking through `inspect`, `check`, and `diagnose` surfaces
+- Archive-based backup and restore at wardrobe, bay, or drawer scope
+- Remote access-control administration persisted in `_wardrobe_access_control.json`
+- Bounded drawer caching for embedded engine usage
+
+## Sample Application
+
+Run the basic sample crate to execute an end-to-end integration flow that:
+
+- Opens a local embedded engine against `./wardrobe`
+- Uses `show_drawers("main", "public")` for drawer metadata enumeration
+- Upserts a `public.user` parent with multiple `public.gem` children and a `public.weapon` child
+- Exercises relation links across drawers
+- Filters by array tags and owner via `find_by_filter`
+- Cleans up by querying related gems and deleting each via `delete_by_id`
+
+```text
+cargo run -p basic-usage
+```
+
+## Testing
 
 Run the test suite with:
 
