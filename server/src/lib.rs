@@ -1,9 +1,9 @@
 use std::io::{self, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wardrobe_core::{Command, DEFAULT_NETWORK_PORT, ProtocolFrame, ProtocolOpcode, WardrobeEngine};
 
 #[cfg(unix)]
@@ -16,6 +16,12 @@ pub struct ServerConfig {
     pub tcp_bind: Option<String>,
     pub unix_socket: Option<PathBuf>,
     pub connection_pool_limit: Option<usize>,
+    pub profile_commands: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServerRuntimeConfig {
+    pub profile_commands: bool,
 }
 
 impl ServerConfig {
@@ -28,6 +34,7 @@ impl ServerConfig {
         let mut tcp_bind = Some(format!("127.0.0.1:{DEFAULT_NETWORK_PORT}"));
         let mut unix_socket = None;
         let mut connection_pool_limit = None;
+        let mut profile_commands = false;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -60,6 +67,7 @@ impl ServerConfig {
                 "--connection-pool-limit" => {
                     connection_pool_limit = Some(parse_connection_pool_limit(&mut args, &arg)?);
                 }
+                "--profile-commands" => profile_commands = true,
                 "--check" => check_only = true,
                 "--help" | "-h" => {
                     print_help();
@@ -80,6 +88,7 @@ impl ServerConfig {
             tcp_bind,
             unix_socket,
             connection_pool_limit,
+            profile_commands,
         })
     }
 }
@@ -91,6 +100,7 @@ pub fn print_help() {
     println!("  --no-tcp                   Disable TCP listener");
     println!("  --unix-socket <path>       Bind Unix domain socket listener on Unix");
     println!("  --connection-pool-limit <count>  Maximum active worker connections");
+    println!("  --profile-commands         Print per-command protocol and engine timings");
     println!("  --check                    Initialize the daemon and exit without blocking");
 }
 
@@ -122,8 +132,11 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
         println!("Wardrobe daemon listening on TCP: {local_addr}");
         let engine = Arc::clone(&engine);
         let connection_pool_limit = config.connection_pool_limit;
+        let runtime = ServerRuntimeConfig {
+            profile_commands: config.profile_commands,
+        };
         listener_threads.push(thread::spawn(move || {
-            serve_tcp_listener(listener, engine, connection_pool_limit)
+            serve_tcp_listener_with_config(listener, engine, connection_pool_limit, runtime)
         }));
     }
 
@@ -140,8 +153,11 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
             );
             let engine = Arc::clone(&engine);
             let connection_pool_limit = config.connection_pool_limit;
+            let runtime = ServerRuntimeConfig {
+                profile_commands: config.profile_commands,
+            };
             listener_threads.push(thread::spawn(move || {
-                serve_unix_listener(listener, engine, connection_pool_limit)
+                serve_unix_listener_with_config(listener, engine, connection_pool_limit, runtime)
             }));
         }
 
@@ -169,6 +185,20 @@ pub fn serve_tcp_listener(
     engine: Arc<WardrobeEngine>,
     connection_pool_limit: Option<usize>,
 ) -> io::Result<()> {
+    serve_tcp_listener_with_config(
+        listener,
+        engine,
+        connection_pool_limit,
+        ServerRuntimeConfig::default(),
+    )
+}
+
+pub fn serve_tcp_listener_with_config(
+    listener: TcpListener,
+    engine: Arc<WardrobeEngine>,
+    connection_pool_limit: Option<usize>,
+    runtime: ServerRuntimeConfig,
+) -> io::Result<()> {
     let connection_pool = connection_pool_limit.map(ConnectionPool::new);
     let mut idle_polls = 0usize;
 
@@ -176,9 +206,9 @@ pub fn serve_tcp_listener(
         let permit = connection_pool.as_ref().map(ConnectionPool::acquire);
         match listener.accept() {
             Ok((stream, _)) => {
-                stream.set_nonblocking(false)?;
+                configure_tcp_stream(&stream)?;
                 idle_polls = 0;
-                spawn_connection_handler(Arc::clone(&engine), stream, permit);
+                spawn_connection_handler(Arc::clone(&engine), stream, permit, runtime);
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 drop(permit);
@@ -198,11 +228,31 @@ pub fn serve_tcp_listener(
     }
 }
 
+fn configure_tcp_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+    stream.set_nonblocking(false)
+}
+
 #[cfg(unix)]
 pub fn serve_unix_listener(
     listener: UnixListener,
     engine: Arc<WardrobeEngine>,
     connection_pool_limit: Option<usize>,
+) -> io::Result<()> {
+    serve_unix_listener_with_config(
+        listener,
+        engine,
+        connection_pool_limit,
+        ServerRuntimeConfig::default(),
+    )
+}
+
+#[cfg(unix)]
+pub fn serve_unix_listener_with_config(
+    listener: UnixListener,
+    engine: Arc<WardrobeEngine>,
+    connection_pool_limit: Option<usize>,
+    runtime: ServerRuntimeConfig,
 ) -> io::Result<()> {
     let connection_pool = connection_pool_limit.map(ConnectionPool::new);
     let mut idle_polls = 0usize;
@@ -213,7 +263,7 @@ pub fn serve_unix_listener(
             Ok((stream, _)) => {
                 stream.set_nonblocking(false)?;
                 idle_polls = 0;
-                spawn_connection_handler(Arc::clone(&engine), stream, permit);
+                spawn_connection_handler(Arc::clone(&engine), stream, permit, runtime);
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 drop(permit);
@@ -237,8 +287,20 @@ pub fn handle_protocol_stream<S>(engine: Arc<WardrobeEngine>, mut stream: S) -> 
 where
     S: Read + Write,
 {
+    handle_protocol_stream_with_config(engine, &mut stream, ServerRuntimeConfig::default())
+}
+
+pub fn handle_protocol_stream_with_config<S>(
+    engine: Arc<WardrobeEngine>,
+    stream: &mut S,
+    runtime: ServerRuntimeConfig,
+) -> io::Result<()>
+where
+    S: Read + Write,
+{
     loop {
-        let frame = match ProtocolFrame::read_from_stream(&mut stream) {
+        let receive_started = Instant::now();
+        let frame = match ProtocolFrame::read_from_stream(&mut *stream) {
             Ok(frame) => frame,
             Err(error)
                 if matches!(
@@ -253,40 +315,148 @@ where
             }
             Err(error) => return Err(error),
         };
+        let protocol_receive = receive_started.elapsed();
 
         if frame.opcode != ProtocolOpcode::Command {
             write_error_frame(
-                &mut stream,
+                &mut *stream,
                 "Wardrobe server expected a command frame from the client",
             )?;
             continue;
         }
 
+        let deserialization_started = Instant::now();
         let command = match serde_json::from_slice::<Command>(&frame.payload) {
             Ok(command) => command,
             Err(error) => {
                 write_error_frame(
-                    &mut stream,
+                    &mut *stream,
                     &format!("Failed to deserialize Wardrobe command: {error}"),
                 )?;
                 continue;
             }
         };
+        let command_deserialization = deserialization_started.elapsed();
+        let command_name = command_label(&command);
+        let request_bytes = frame.payload.len();
 
+        let execution_started = Instant::now();
         match engine.execute_command(command) {
             Ok(result) => {
+                let engine_execution = execution_started.elapsed();
+                let serialization_started = Instant::now();
                 let payload = serde_json::to_vec(&result).map_err(|error| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Failed to serialize Wardrobe command result: {error}"),
                     )
                 })?;
-                ProtocolFrame::new(ProtocolOpcode::Result, payload).write_to_stream(&mut stream)?;
+                let response_serialization = serialization_started.elapsed();
+                let response_bytes = payload.len();
+                let transmission_started = Instant::now();
+                ProtocolFrame::new(ProtocolOpcode::Result, payload)
+                    .write_to_stream(&mut *stream)?;
+                let protocol_transmission = transmission_started.elapsed();
+                if runtime.profile_commands {
+                    emit_command_profile(ServerCommandProfile {
+                        command_name,
+                        request_bytes,
+                        response_bytes,
+                        protocol_receive,
+                        command_deserialization,
+                        engine_execution,
+                        response_serialization,
+                        protocol_transmission,
+                        status: "ok",
+                    });
+                }
             }
             Err(error) => {
-                write_error_frame(&mut stream, &error.to_string())?;
+                let engine_execution = execution_started.elapsed();
+                let response = error.to_string();
+                let serialization_started = Instant::now();
+                let response_bytes = response.len();
+                let response_serialization = serialization_started.elapsed();
+                let transmission_started = Instant::now();
+                write_error_frame(&mut *stream, &response)?;
+                let protocol_transmission = transmission_started.elapsed();
+                if runtime.profile_commands {
+                    emit_command_profile(ServerCommandProfile {
+                        command_name,
+                        request_bytes,
+                        response_bytes,
+                        protocol_receive,
+                        command_deserialization,
+                        engine_execution,
+                        response_serialization,
+                        protocol_transmission,
+                        status: "error",
+                    });
+                }
             }
         }
+    }
+}
+
+struct ServerCommandProfile {
+    command_name: &'static str,
+    request_bytes: usize,
+    response_bytes: usize,
+    protocol_receive: Duration,
+    command_deserialization: Duration,
+    engine_execution: Duration,
+    response_serialization: Duration,
+    protocol_transmission: Duration,
+    status: &'static str,
+}
+
+fn emit_command_profile(profile: ServerCommandProfile) {
+    eprintln!(
+        "[wardrobe-server profile] command={} status={} request_bytes={} response_bytes={} protocol_receive_us={} command_deserialize_us={} engine_execute_us={} response_serialize_us={} protocol_transmit_us={}",
+        profile.command_name,
+        profile.status,
+        profile.request_bytes,
+        profile.response_bytes,
+        profile.protocol_receive.as_micros(),
+        profile.command_deserialization.as_micros(),
+        profile.engine_execution.as_micros(),
+        profile.response_serialization.as_micros(),
+        profile.protocol_transmission.as_micros()
+    );
+}
+
+fn command_label(command: &Command) -> &'static str {
+    match command {
+        Command::ShowTenants => "ShowTenants",
+        Command::ShowDatabases => "ShowDatabases",
+        Command::VerifyWal { .. } => "VerifyWal",
+        Command::ShowSchemas { .. } => "ShowSchemas",
+        Command::ShowDrawers { .. } => "ShowDrawers",
+        Command::Upsert { .. } => "Upsert",
+        Command::BulkUpsert { .. } => "BulkUpsert",
+        Command::FindAll { .. } => "FindAll",
+        Command::FindById { .. } => "FindById",
+        Command::FindByFilter { .. } => "FindByFilter",
+        Command::Count { .. } => "Count",
+        Command::Delete { .. } => "Delete",
+        Command::DeleteByFilter { .. } => "DeleteByFilter",
+        Command::Vacuum { .. } => "Vacuum",
+        Command::Migrate { .. } => "Migrate",
+        Command::Inspect { .. } => "Inspect",
+        Command::Check { .. } => "Check",
+        Command::Diagnose => "Diagnose",
+        Command::ListDrawers => "ListDrawers",
+        Command::Backup { .. } => "Backup",
+        Command::Restore { .. } => "Restore",
+        Command::DefineDatabase { .. } => "DefineDatabase",
+        Command::DefineSchema { .. } => "DefineSchema",
+        Command::DefineDrawer { .. } => "DefineDrawer",
+        Command::DefineTenantRoute { .. } => "DefineTenantRoute",
+        Command::ManageSchema { .. } => "ManageSchema",
+        Command::ManageUser { .. } => "ManageUser",
+        Command::ExecuteForTenant { .. } => "ExecuteForTenant",
+        Command::Execute { .. } => "Execute",
+        Command::ExecuteInScope { .. } => "ExecuteInScope",
     }
 }
 
@@ -332,12 +502,14 @@ fn spawn_connection_handler<S>(
     engine: Arc<WardrobeEngine>,
     stream: S,
     permit: Option<ConnectionPoolPermit>,
+    runtime: ServerRuntimeConfig,
 ) where
     S: Read + Write + Send + 'static,
 {
     thread::spawn(move || {
         let _permit = permit;
-        if let Err(error) = handle_protocol_stream(engine, stream) {
+        let mut stream = stream;
+        if let Err(error) = handle_protocol_stream_with_config(engine, &mut stream, runtime) {
             eprintln!("Wardrobe connection handler failed: {error}");
         }
     });
@@ -441,6 +613,32 @@ mod tests {
         assert_eq!(cfg.data_dir, "./wardrobe");
         assert_eq!(cfg.tcp_bind.unwrap().starts_with("127.0.0.1"), true);
         assert!(!cfg.check_only);
+        assert!(!cfg.profile_commands);
+    }
+
+    #[test]
+    fn server_config_parses_command_profiling_flag() {
+        let cfg = ServerConfig::from_args(vec!["--profile-commands".to_string()])
+            .expect("profile flag should parse");
+        assert!(cfg.profile_commands);
+    }
+
+    #[test]
+    fn configure_tcp_stream_disables_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let client = std::net::TcpStream::connect(address).expect("client should connect");
+        let (stream, _) = listener.accept().expect("listener should accept client");
+
+        configure_tcp_stream(&stream).expect("stream should configure");
+
+        assert!(
+            stream
+                .nodelay()
+                .expect("stream should report nodelay status")
+        );
+
+        drop(client);
     }
 
     #[test]

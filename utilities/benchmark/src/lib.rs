@@ -16,12 +16,12 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
-    Command, CommandResult, ConnectionTarget, ProtocolFrame, ProtocolOpcode, StorageScope,
-    WardrobeEngine,
+    Command, CommandResult, ConnectionTarget, ProtocolFrame, ProtocolOpcode, StorageDiagnosis,
+    StorageInventory, StorageScope, WardrobeEngine,
 };
 
-const DATABASE_NAME: &str = "wardrobe";
-const SCHEMA_NAME: &str = "library";
+const DEFAULT_WARDROBE_DATABASE_PREFIX: &str = "wardrobe_benchmark";
+const DEFAULT_WARDROBE_SCHEMA_NAME: &str = "library";
 const ENTITY_DRAWER: &str = "entity";
 const BOOK_DRAWER: &str = "book";
 const DEFAULT_WORK_DIR: &str = "target/wardrobe-benchmark";
@@ -73,6 +73,8 @@ pub struct BenchmarkConfig {
     pub progress_enabled: bool,
     pub wardrobe_embedded_path: Option<PathBuf>,
     pub wardrobe_remote_uri: Option<String>,
+    pub wardrobe_database: Option<String>,
+    pub wardrobe_schema: Option<String>,
     pub sqlite_db: Option<PathBuf>,
     pub mongo_uri: String,
     pub mongo_database: String,
@@ -93,6 +95,8 @@ impl Default for BenchmarkConfig {
             progress_enabled: true,
             wardrobe_embedded_path: None,
             wardrobe_remote_uri: None,
+            wardrobe_database: None,
+            wardrobe_schema: None,
             sqlite_db: None,
             mongo_uri: "mongodb://127.0.0.1:27017".to_string(),
             mongo_database: "wardrobe_benchmark".to_string(),
@@ -149,6 +153,12 @@ impl BenchmarkConfig {
                 "--wardrobe-remote-uri" => {
                     config.wardrobe_remote_uri = Some(required_value(&mut args, &arg)?);
                 }
+                "--wardrobe-database" => {
+                    config.wardrobe_database = Some(required_value(&mut args, &arg)?);
+                }
+                "--wardrobe-schema" => {
+                    config.wardrobe_schema = Some(required_value(&mut args, &arg)?);
+                }
                 "--sqlite-db" => {
                     config.sqlite_db = Some(PathBuf::from(required_value(&mut args, &arg)?));
                 }
@@ -182,6 +192,12 @@ impl BenchmarkConfig {
         }
 
         config.profile.validate()?;
+        if let Some(database) = &config.wardrobe_database {
+            validate_wardrobe_namespace_component("--wardrobe-database", database)?;
+        }
+        if let Some(schema) = &config.wardrobe_schema {
+            validate_wardrobe_namespace_component("--wardrobe-schema", schema)?;
+        }
         if config.targets.is_empty() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -221,6 +237,40 @@ impl TargetSpec {
             Self::MongoDb => "MongoDB (Document Store Base Comparison)",
             Self::MySql => "MySQL / MariaDB (Relational Pointer Base Comparison)",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WardrobeNamespace {
+    database: String,
+    schema: String,
+    generated: bool,
+}
+
+impl WardrobeNamespace {
+    fn from_config(config: &BenchmarkConfig, run_id: &str) -> io::Result<Self> {
+        let database = config.wardrobe_database.clone().unwrap_or_else(|| {
+            format!(
+                "{}_{}",
+                DEFAULT_WARDROBE_DATABASE_PREFIX,
+                identifier_fragment(run_id)
+            )
+        });
+        let schema = config
+            .wardrobe_schema
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WARDROBE_SCHEMA_NAME.to_string());
+        validate_wardrobe_namespace_component("--wardrobe-database", &database)?;
+        validate_wardrobe_namespace_component("--wardrobe-schema", &schema)?;
+        Ok(Self {
+            generated: config.wardrobe_database.is_none() && config.wardrobe_schema.is_none(),
+            database,
+            schema,
+        })
+    }
+
+    fn label(&self) -> String {
+        format!("{}/{}", self.database, self.schema)
     }
 }
 
@@ -358,6 +408,21 @@ impl BenchmarkReport {
                 ));
             }
         }
+        let diagnostic_targets = self
+            .targets
+            .iter()
+            .filter(|target| !target.storage_diagnostics.is_empty())
+            .collect::<Vec<_>>();
+        if !diagnostic_targets.is_empty() {
+            out.push_str("\n## Storage Diagnostics\n\n");
+            for target in diagnostic_targets {
+                out.push_str(&format!("### {}\n\n", target.name));
+                for line in &target.storage_diagnostics {
+                    out.push_str(&format!("- {line}\n"));
+                }
+                out.push('\n');
+            }
+        }
         out
     }
 }
@@ -367,6 +432,7 @@ pub struct TargetReport {
     pub name: String,
     pub phases: Vec<PhaseMetrics>,
     pub storage_bytes: u64,
+    pub storage_diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -506,9 +572,9 @@ impl ProgressReporter {
 
 pub fn run_benchmark(config: BenchmarkConfig) -> io::Result<BenchmarkReport> {
     let progress = ProgressReporter::new(config.progress_enabled);
-    let run_dir = config
-        .work_dir
-        .join(format!("run-{}", unix_timestamp_micros()));
+    let run_id = format!("run-{}", unix_timestamp_micros());
+    let run_dir = config.work_dir.join(&run_id);
+    let wardrobe_namespace = WardrobeNamespace::from_config(&config, &run_id)?;
     progress.log(format!(
         "creating benchmark run directory at {}",
         run_dir.display()
@@ -521,6 +587,22 @@ pub fn run_benchmark(config: BenchmarkConfig) -> io::Result<BenchmarkReport> {
         config.profile.chunk_size,
         config.profile.traversal_queries
     ));
+    if config.targets.iter().any(|target| {
+        matches!(
+            target,
+            TargetSpec::WardrobeEmbedded | TargetSpec::WardrobeRemote
+        )
+    }) {
+        let namespace_source = if wardrobe_namespace.generated {
+            "run-isolated default"
+        } else {
+            "explicit override"
+        };
+        progress.log(format!(
+            "wardrobe namespace: {} ({namespace_source})",
+            wardrobe_namespace.label()
+        ));
+    }
 
     let mut report = BenchmarkReport {
         profile: config.profile.clone(),
@@ -535,7 +617,7 @@ pub fn run_benchmark(config: BenchmarkConfig) -> io::Result<BenchmarkReport> {
             config.targets.len(),
             spec.label()
         ));
-        let mut target = build_target(*spec, &config, &run_dir, &progress)?;
+        let mut target = build_target(*spec, &config, &run_dir, &wardrobe_namespace, &progress)?;
         let target_report = run_target(target.as_mut(), &config.profile, &progress)?;
         progress.log(format!(
             "completed target: {} (storage footprint {} bytes)",
@@ -569,6 +651,12 @@ pub fn print_help() {
     println!("  --wardrobe-embedded-path <path> Override embedded Wardrobe storage path");
     println!(
         "  --wardrobe-remote-uri <uri>     Use an existing Wardrobe TCP server instead of auto-spawning one"
+    );
+    println!(
+        "  --wardrobe-database <name>      Optional Wardrobe database override; default is run-isolated"
+    );
+    println!(
+        "  --wardrobe-schema <name>        Optional Wardrobe schema override, default {DEFAULT_WARDROBE_SCHEMA_NAME}"
     );
     println!("  --sqlite-db <path>              SQLite WAL database path");
     println!(
@@ -626,6 +714,9 @@ trait BenchmarkTarget {
     ) -> io::Result<u64>;
     fn flush(&mut self) -> io::Result<()>;
     fn storage_footprint_bytes(&mut self) -> io::Result<u64>;
+    fn storage_diagnostics(&mut self) -> io::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 fn run_target(
@@ -686,10 +777,12 @@ fn run_target(
 
     progress.log(format!("{}: measuring storage footprint", target.name()));
     let storage_bytes = target.storage_footprint_bytes()?;
+    let storage_diagnostics = target.storage_diagnostics()?;
     Ok(TargetReport {
         name: target.name().to_string(),
         phases: phase_metrics,
         storage_bytes,
+        storage_diagnostics,
     })
 }
 
@@ -697,6 +790,7 @@ fn build_target(
     spec: TargetSpec,
     config: &BenchmarkConfig,
     run_dir: &Path,
+    wardrobe_namespace: &WardrobeNamespace,
     progress: &ProgressReporter,
 ) -> io::Result<Box<dyn BenchmarkTarget>> {
     match spec {
@@ -710,12 +804,18 @@ fn build_target(
                 spec.label(),
                 path.display()
             ));
-            Ok(Box::new(WardrobeTarget::embedded(path)?))
+            Ok(Box::new(WardrobeTarget::embedded(
+                path,
+                wardrobe_namespace.clone(),
+            )?))
         }
         TargetSpec::WardrobeRemote => {
             if let Some(uri) = &config.wardrobe_remote_uri {
                 progress.log(format!("{}: connecting to {uri}", spec.label()));
-                Ok(Box::new(WardrobeTarget::remote_uri(uri)?))
+                Ok(Box::new(WardrobeTarget::remote_uri(
+                    uri,
+                    wardrobe_namespace.clone(),
+                )?))
             } else {
                 progress.log(format!(
                     "{}: starting in-process TCP server under {}",
@@ -724,6 +824,7 @@ fn build_target(
                 ));
                 Ok(Box::new(WardrobeTarget::remote_auto(
                     run_dir.join("wardrobe-remote"),
+                    wardrobe_namespace.clone(),
                 )?))
             }
         }
@@ -775,10 +876,172 @@ struct WardrobeTarget {
     runner: Option<Box<dyn WardrobeCommandRunner>>,
     storage_root: Option<PathBuf>,
     server_handle: Option<JoinHandle<io::Result<()>>>,
+    namespace: WardrobeNamespace,
+    profile: Option<LibraryProfile>,
+    last_storage_snapshot: Option<WardrobeStorageSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WardrobeStorageSnapshot {
+    drawers: Vec<StorageInventory>,
+    diagnosis: Option<StorageDiagnosis>,
+    root_wal_entries: Option<usize>,
+    database_wal_entries: Option<usize>,
+    local_root_bytes: Option<u64>,
+}
+
+impl WardrobeStorageSnapshot {
+    fn benchmark_drawer_bytes(&self) -> u64 {
+        self.benchmark_drawers()
+            .iter()
+            .map(|drawer| drawer.disk_size_bytes)
+            .sum()
+    }
+
+    fn benchmark_drawers(&self) -> Vec<&StorageInventory> {
+        self.drawers
+            .iter()
+            .filter(|drawer| drawer.name == ENTITY_DRAWER || drawer.name == BOOK_DRAWER)
+            .collect()
+    }
+
+    fn diagnostic_lines(
+        &self,
+        namespace: &WardrobeNamespace,
+        profile: Option<&LibraryProfile>,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        let benchmark_drawers = self.benchmark_drawers();
+        let drawer_summary = benchmark_drawers
+            .iter()
+            .map(|drawer| {
+                format!(
+                    "{}: {} records, {} bytes, {} files",
+                    drawer.name,
+                    drawer.record_count,
+                    drawer.disk_size_bytes,
+                    drawer.register_file_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!(
+            "Benchmark scope {} reports {} drawer bytes ({drawer_summary})",
+            namespace.label(),
+            self.benchmark_drawer_bytes()
+        ));
+
+        if let Some(profile) = profile {
+            let expected_book_records = profile
+                .book_records
+                .saturating_sub(profile.expected_purge_count());
+            let entity_records = self
+                .drawers
+                .iter()
+                .find(|drawer| drawer.name == ENTITY_DRAWER)
+                .map(|drawer| drawer.record_count)
+                .unwrap_or_default();
+            let book_records = self
+                .drawers
+                .iter()
+                .find(|drawer| drawer.name == BOOK_DRAWER)
+                .map(|drawer| drawer.record_count)
+                .unwrap_or_default();
+            lines.push(format!(
+                "Record parity expectation after purge: entity {}/{}; book {}/{}",
+                entity_records, profile.entity_records, book_records, expected_book_records
+            ));
+        }
+
+        let extra_drawers = self
+            .drawers
+            .iter()
+            .filter(|drawer| drawer.name != ENTITY_DRAWER && drawer.name != BOOK_DRAWER)
+            .map(|drawer| drawer.name.as_str())
+            .collect::<Vec<_>>();
+        if !extra_drawers.is_empty() {
+            lines.push(format!(
+                "Additional drawers inside benchmark schema: {}",
+                extra_drawers.join(", ")
+            ));
+        }
+
+        if let Some(diagnosis) = &self.diagnosis {
+            let non_benchmark_bytes = diagnosis
+                .storage_bytes
+                .saturating_sub(self.benchmark_drawer_bytes());
+            lines.push(format!(
+                "Server root reports {} bytes; non-benchmark/root overhead is {} bytes",
+                diagnosis.storage_bytes, non_benchmark_bytes
+            ));
+            lines.push(format!(
+                "Root breakdown: data {} bytes, index {} bytes, metadata {} bytes, logical WAL {} bytes, transaction WAL {} bytes, other {} bytes",
+                diagnosis.data_bytes,
+                diagnosis.index_bytes,
+                diagnosis.metadata_bytes,
+                diagnosis.logical_wal_bytes,
+                diagnosis.transaction_wal_bytes,
+                diagnosis.other_bytes
+            ));
+            let scoped_root_drawer_count = diagnosis
+                .drawers
+                .iter()
+                .filter(|drawer| diagnosis_drawer_is_in_scope(drawer, namespace))
+                .count();
+            if diagnosis.drawer_count != scoped_root_drawer_count {
+                lines.push(format!(
+                    "Root-wide drawer discovery sees {} drawers across the storage root; {} belong to benchmark scope {} and {} are outside it",
+                    diagnosis.drawer_count,
+                    scoped_root_drawer_count,
+                    namespace.label(),
+                    diagnosis.drawer_count.saturating_sub(scoped_root_drawer_count)
+                ));
+                let non_benchmark_drawer_examples = diagnosis
+                    .drawers
+                    .iter()
+                    .filter(|drawer| !diagnosis_drawer_is_in_scope(drawer, namespace))
+                    .take(5)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                if !non_benchmark_drawer_examples.is_empty() {
+                    lines.push(format!(
+                        "Root-wide non-benchmark drawer examples: {}",
+                        non_benchmark_drawer_examples.join(", ")
+                    ));
+                }
+            }
+            if scoped_root_drawer_count != self.drawers.len() {
+                lines.push(format!(
+                    "Benchmark scoped ShowDrawers returned {} drawers; root scan found {} matching paths",
+                    self.drawers.len(),
+                    scoped_root_drawer_count
+                ));
+            }
+        } else if let Some(local_root_bytes) = self.local_root_bytes {
+            lines.push(format!(
+                "Local storage root reports {} bytes; scoped benchmark drawers report {} bytes",
+                local_root_bytes,
+                self.benchmark_drawer_bytes()
+            ));
+        }
+
+        lines.push(format!(
+            "Logical WAL entries: root {}, database {}",
+            optional_count(self.root_wal_entries),
+            optional_count(self.database_wal_entries)
+        ));
+
+        lines
+    }
+}
+
+fn diagnosis_drawer_is_in_scope(drawer: &str, namespace: &WardrobeNamespace) -> bool {
+    let prefix = format!("{}/{}/", namespace.database, namespace.schema);
+    drawer.starts_with(&prefix)
 }
 
 impl WardrobeTarget {
-    fn embedded(path: PathBuf) -> io::Result<Self> {
+    fn embedded(path: PathBuf, namespace: WardrobeNamespace) -> io::Result<Self> {
         fs::create_dir_all(&path)?;
         let engine = WardrobeEngine::open(path.to_string_lossy().as_ref())?;
         Ok(Self {
@@ -789,10 +1052,13 @@ impl WardrobeTarget {
             })),
             storage_root: Some(path),
             server_handle: None,
+            namespace,
+            profile: None,
+            last_storage_snapshot: None,
         })
     }
 
-    fn remote_auto(path: PathBuf) -> io::Result<Self> {
+    fn remote_auto(path: PathBuf, namespace: WardrobeNamespace) -> io::Result<Self> {
         fs::create_dir_all(&path)?;
         let engine = Arc::new(WardrobeEngine::open(path.to_string_lossy().as_ref())?);
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -807,16 +1073,22 @@ impl WardrobeTarget {
             runner: Some(Box::new(runner)),
             storage_root: Some(path),
             server_handle: Some(handle),
+            namespace,
+            profile: None,
+            last_storage_snapshot: None,
         })
     }
 
-    fn remote_uri(uri: &str) -> io::Result<Self> {
+    fn remote_uri(uri: &str, namespace: WardrobeNamespace) -> io::Result<Self> {
         let runner = TcpWardrobeRunner::connect(uri, None)?;
         Ok(Self {
             name: "Wardrobe (Remote TCP Server Mode)".to_string(),
             runner: Some(Box::new(runner)),
             storage_root: None,
             server_handle: None,
+            namespace,
+            profile: None,
+            last_storage_snapshot: None,
         })
     }
 
@@ -832,7 +1104,7 @@ impl WardrobeTarget {
 
     fn execute_scoped(&mut self, command: Command) -> io::Result<CommandResult> {
         self.execute(Command::ExecuteInScope {
-            scope: StorageScope::schema(DATABASE_NAME, SCHEMA_NAME),
+            scope: StorageScope::schema(&self.namespace.database, &self.namespace.schema),
             command: Box::new(command),
         })
     }
@@ -859,6 +1131,51 @@ impl WardrobeTarget {
         let entity_pointer = format!("@{ENTITY_DRAWER}:{entity_id}");
         Ok(self.count_book_relationship_matches(&entity_pointer)? > 0)
     }
+
+    fn capture_storage_snapshot(&mut self) -> io::Result<WardrobeStorageSnapshot> {
+        let drawers = self.show_benchmark_drawers()?;
+        let diagnosis = match self.execute(Command::Diagnose) {
+            Ok(CommandResult::Diagnosis(diagnosis)) => Some(diagnosis),
+            Ok(_) | Err(_) => None,
+        };
+        let root_wal_entries = self.wal_entry_count(None).ok().flatten();
+        let database_name = self.namespace.database.clone();
+        let database_wal_entries = self.wal_entry_count(Some(&database_name)).ok().flatten();
+        let local_root_bytes = self
+            .storage_root
+            .as_deref()
+            .and_then(|root| directory_size(root).ok());
+
+        Ok(WardrobeStorageSnapshot {
+            drawers,
+            diagnosis,
+            root_wal_entries,
+            database_wal_entries,
+            local_root_bytes,
+        })
+    }
+
+    fn show_benchmark_drawers(&mut self) -> io::Result<Vec<StorageInventory>> {
+        match self.execute(Command::ShowDrawers {
+            database_name: self.namespace.database.clone(),
+            schema_name: self.namespace.schema.clone(),
+        })? {
+            CommandResult::Drawers(drawers) => Ok(drawers),
+            other => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Expected Wardrobe drawer inventory, got {other:?}"),
+            )),
+        }
+    }
+
+    fn wal_entry_count(&mut self, database_name: Option<&str>) -> io::Result<Option<usize>> {
+        match self.execute(Command::VerifyWal {
+            database_name: database_name.map(str::to_string),
+        })? {
+            CommandResult::WalVerification(report) => Ok(Some(report.entry_count)),
+            _ => Ok(None),
+        }
+    }
 }
 
 impl BenchmarkTarget for WardrobeTarget {
@@ -868,31 +1185,33 @@ impl BenchmarkTarget for WardrobeTarget {
 
     fn provision_schema(
         &mut self,
-        _profile: &LibraryProfile,
+        profile: &LibraryProfile,
         progress: &ProgressReporter,
     ) -> io::Result<()> {
+        self.profile = Some(profile.clone());
+        self.last_storage_snapshot = None;
         progress.log(format!(
             "{}: creating database '{}'",
             self.name(),
-            DATABASE_NAME
+            self.namespace.database
         ));
         expect_inventory(self.execute(Command::DefineDatabase {
-            database_name: DATABASE_NAME.to_string(),
+            database_name: self.namespace.database.clone(),
         })?)?;
         progress.log(format!(
             "{}: creating schema '{}'",
             self.name(),
-            SCHEMA_NAME
+            self.namespace.schema
         ));
         expect_inventory(self.execute(Command::DefineSchema {
-            database_name: DATABASE_NAME.to_string(),
-            schema_name: SCHEMA_NAME.to_string(),
+            database_name: self.namespace.database.clone(),
+            schema_name: self.namespace.schema.clone(),
         })?)?;
         for drawer in [ENTITY_DRAWER, BOOK_DRAWER] {
             progress.log(format!("{}: creating drawer '{}'", self.name(), drawer));
             expect_inventory(self.execute(Command::DefineDrawer {
-                database_name: DATABASE_NAME.to_string(),
-                schema_name: SCHEMA_NAME.to_string(),
+                database_name: self.namespace.database.clone(),
+                schema_name: self.namespace.schema.clone(),
                 drawer_name: drawer.to_string(),
             })?)?;
         }
@@ -1069,19 +1388,22 @@ impl BenchmarkTarget for WardrobeTarget {
     }
 
     fn storage_footprint_bytes(&mut self) -> io::Result<u64> {
-        if let Some(root) = &self.storage_root {
-            return directory_size(root);
+        let snapshot = self.capture_storage_snapshot()?;
+        let storage_bytes = snapshot.benchmark_drawer_bytes();
+        self.last_storage_snapshot = Some(snapshot);
+        Ok(storage_bytes)
+    }
+
+    fn storage_diagnostics(&mut self) -> io::Result<Vec<String>> {
+        if self.last_storage_snapshot.is_none() {
+            let snapshot = self.capture_storage_snapshot()?;
+            self.last_storage_snapshot = Some(snapshot);
         }
-        if let CommandResult::Diagnosis(diagnosis) = self.execute(Command::Diagnose)? {
-            if diagnosis.storage_bytes > 0 {
-                return Ok(diagnosis.storage_bytes);
-            }
-            let path = PathBuf::from(diagnosis.storage_directory);
-            if path.exists() {
-                return directory_size(path);
-            }
-        }
-        Ok(0)
+        Ok(self
+            .last_storage_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.diagnostic_lines(&self.namespace, self.profile.as_ref()))
+            .unwrap_or_default())
     }
 }
 
@@ -1123,9 +1445,9 @@ impl TcpWardrobeRunner {
                 "--wardrobe-remote-uri must be a wardrobe://host:port TCP URI",
             ));
         };
-        Ok(Self {
-            stream: TcpStream::connect((host.as_str(), port))?,
-        })
+        let stream = TcpStream::connect((host.as_str(), port))?;
+        stream.set_nodelay(true)?;
+        Ok(Self { stream })
     }
 }
 
@@ -1912,6 +2234,42 @@ fn parse_positive_usize(flag: &str, raw: &str) -> io::Result<usize> {
     Ok(parsed)
 }
 
+fn validate_wardrobe_namespace_component(flag: &str, value: &str) -> io::Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed == "."
+        || trimmed == ".."
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{flag} must be a non-empty single path segment"),
+        ));
+    }
+    Ok(())
+}
+
+fn identifier_fragment(value: &str) -> String {
+    let fragment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if fragment.is_empty() {
+        "run".to_string()
+    } else {
+        fragment
+    }
+}
+
 fn report_record_progress(
     progress: &ProgressReporter,
     label: &str,
@@ -2422,6 +2780,12 @@ fn directory_size(path: impl AsRef<Path>) -> io::Result<u64> {
     Ok(total)
 }
 
+fn optional_count(value: Option<usize>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
 fn unix_timestamp_micros() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2477,6 +2841,14 @@ mod tests {
         }
     }
 
+    fn test_namespace() -> WardrobeNamespace {
+        WardrobeNamespace {
+            database: "wardrobe_benchmark_test".to_string(),
+            schema: "library".to_string(),
+            generated: false,
+        }
+    }
+
     #[test]
     fn parses_all_targets() {
         let ParseOutcome::Run(config) =
@@ -2512,6 +2884,10 @@ mod tests {
             "target/custom-bench/embedded".to_string(),
             "--wardrobe-remote-uri".to_string(),
             "wardrobe://127.0.0.1:24842".to_string(),
+            "--wardrobe-database".to_string(),
+            "bench_db".to_string(),
+            "--wardrobe-schema".to_string(),
+            "bench_schema".to_string(),
             "--sqlite-db".to_string(),
             "target/custom-bench/sqlite.db".to_string(),
             "--mongo-uri".to_string(),
@@ -2553,6 +2929,8 @@ mod tests {
             config.wardrobe_remote_uri,
             Some("wardrobe://127.0.0.1:24842".to_string())
         );
+        assert_eq!(config.wardrobe_database, Some("bench_db".to_string()));
+        assert_eq!(config.wardrobe_schema, Some("bench_schema".to_string()));
         assert_eq!(
             config.sqlite_db,
             Some(PathBuf::from("target/custom-bench/sqlite.db"))
@@ -2633,6 +3011,47 @@ mod tests {
                 .expect_err("invalid mysql port should fail");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert!(error.to_string().contains("Invalid --mysql-port value"));
+    }
+
+    #[test]
+    fn benchmark_config_rejects_invalid_wardrobe_namespace_overrides() {
+        let error =
+            BenchmarkConfig::from_args(["--wardrobe-database".to_string(), "bad/name".to_string()])
+                .expect_err("invalid wardrobe database should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("--wardrobe-database"));
+    }
+
+    #[test]
+    fn wardrobe_namespace_defaults_to_run_isolated_database() {
+        let config = BenchmarkConfig::default();
+        let namespace =
+            WardrobeNamespace::from_config(&config, "run-123").expect("namespace should build");
+        assert_eq!(namespace.database, "wardrobe_benchmark_run_123");
+        assert_eq!(namespace.schema, DEFAULT_WARDROBE_SCHEMA_NAME);
+        assert!(namespace.generated);
+    }
+
+    #[test]
+    fn tcp_wardrobe_runner_connect_disables_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let accept_thread = std::thread::spawn(move || {
+            let _ = listener.accept().expect("listener should accept client");
+        });
+
+        let runner = TcpWardrobeRunner::connect(&format!("wardrobe://{address}"), None)
+            .expect("runner should connect");
+
+        assert!(
+            runner
+                .stream
+                .nodelay()
+                .expect("runner stream should report nodelay")
+        );
+
+        drop(runner);
+        accept_thread.join().expect("accept thread should exit");
     }
 
     #[test]
@@ -2911,6 +3330,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             targets: vec![TargetReport {
                 name: "Wardrobe (Embedded Flat-File Mode)".to_string(),
                 storage_bytes: 42,
+                storage_diagnostics: Vec::new(),
                 phases: vec![PhaseMetrics {
                     phase: PhaseName::Compaction,
                     operations: 1,
@@ -3017,21 +3437,101 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
     }
 
     #[test]
-    fn wardrobe_remote_storage_uses_server_reported_bytes() {
+    fn tiny_wardrobe_embedded_and_remote_report_equivalent_scoped_storage() {
+        let work_dir = env::temp_dir().join(format!(
+            "wardrobe_benchmark_parity_test_{}",
+            unix_timestamp_micros()
+        ));
+        let config = BenchmarkConfig {
+            targets: vec![TargetSpec::WardrobeEmbedded, TargetSpec::WardrobeRemote],
+            profile: LibraryProfile {
+                entity_records: 3,
+                book_records: 6,
+                chunk_size: 2,
+                traversal_queries: 2,
+                purge_buckets: 2,
+            },
+            work_dir: work_dir.clone(),
+            ..BenchmarkConfig::default()
+        };
+
+        let report = run_benchmark(config).expect("tiny parity benchmark should run");
+
+        assert_eq!(report.targets.len(), 2);
+        let embedded = &report.targets[0];
+        let remote = &report.targets[1];
+        assert_eq!(embedded.name, "Wardrobe (Embedded Flat-File Mode)");
+        assert_eq!(remote.name, "Wardrobe (Remote TCP Server Mode)");
+        assert!(
+            embedded.storage_bytes.abs_diff(remote.storage_bytes) <= 16,
+            "embedded scoped bytes {} should match remote scoped bytes {}",
+            embedded.storage_bytes,
+            remote.storage_bytes
+        );
+        assert!(
+            embedded
+                .storage_diagnostics
+                .iter()
+                .any(|line| line.contains("Record parity expectation"))
+        );
+        assert!(
+            remote
+                .storage_diagnostics
+                .iter()
+                .any(|line| line.contains("Record parity expectation"))
+        );
+
+        let _ = fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn wardrobe_remote_storage_uses_scoped_drawer_inventory_and_keeps_root_diagnostics() {
         let state = Rc::new(RefCell::new(MockRunnerState {
             commands: Vec::new(),
-            responses: VecDeque::from(vec![CommandResult::Diagnosis(
-                wardrobe_core::StorageDiagnosis {
+            responses: VecDeque::from(vec![
+                CommandResult::Drawers(vec![
+                    StorageInventory {
+                        name: ENTITY_DRAWER.to_string(),
+                        record_count: 3,
+                        disk_size_bytes: 300,
+                        register_file_count: 3,
+                    },
+                    StorageInventory {
+                        name: BOOK_DRAWER.to_string(),
+                        record_count: 5,
+                        disk_size_bytes: 700,
+                        register_file_count: 3,
+                    },
+                ]),
+                CommandResult::Diagnosis(StorageDiagnosis {
                     storage_directory: "/data/wardrobe".to_string(),
                     storage_bytes: 12_345,
-                    drawer_count: 2,
+                    data_bytes: 8_000,
+                    index_bytes: 2_000,
+                    metadata_bytes: 500,
+                    logical_wal_bytes: 1_000,
+                    transaction_wal_bytes: 700,
+                    other_bytes: 145,
+                    drawer_count: 4,
                     status: "ok".to_string(),
                     drawers: vec![
-                        "wardrobe/library/entity".to_string(),
-                        "wardrobe/library/book".to_string(),
+                        "old_run/library/entity".to_string(),
+                        "old_run/library/book".to_string(),
+                        "wardrobe_benchmark_test/library/entity".to_string(),
+                        "wardrobe_benchmark_test/library/book".to_string(),
                     ],
-                },
-            )]),
+                }),
+                CommandResult::WalVerification(wardrobe_core::WalVerification {
+                    path: "/data/wardrobe/.wal".to_string(),
+                    entry_count: 4,
+                    last_sequence: Some(4),
+                }),
+                CommandResult::WalVerification(wardrobe_core::WalVerification {
+                    path: "/data/wardrobe/wardrobe/.wal".to_string(),
+                    entry_count: 3,
+                    last_sequence: Some(3),
+                }),
+            ]),
         }));
 
         let mut target = WardrobeTarget {
@@ -3041,14 +3541,36 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             })),
             storage_root: None,
             server_handle: None,
+            namespace: test_namespace(),
+            profile: Some(tiny_profile()),
+            last_storage_snapshot: None,
         };
 
         let storage_bytes = target
             .storage_footprint_bytes()
             .expect("remote storage bytes should be reported");
+        let diagnostics = target
+            .storage_diagnostics()
+            .expect("remote diagnostics should render");
 
-        assert_eq!(storage_bytes, 12_345);
-        assert!(matches!(state.borrow().commands[0], Command::Diagnose));
+        assert_eq!(storage_bytes, 1_000);
+        assert!(diagnostics.iter().any(|line| line.contains("12345")));
+        assert!(diagnostics.iter().any(|line| line.contains("logical WAL")));
+        assert!(diagnostics.iter().any(|line| {
+            line.contains("Root-wide drawer discovery sees 4 drawers")
+                && line.contains("2 belong to benchmark scope wardrobe_benchmark_test/library")
+                && line.contains("2 are outside it")
+        }));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|line| line.contains("old_run/library/entity"))
+        );
+        assert!(matches!(
+            state.borrow().commands[0],
+            Command::ShowDrawers { .. }
+        ));
+        assert!(matches!(state.borrow().commands[1], Command::Diagnose));
     }
 
     #[test]
@@ -3077,6 +3599,9 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             })),
             storage_root: None,
             server_handle: None,
+            namespace: test_namespace(),
+            profile: None,
+            last_storage_snapshot: None,
         };
 
         let profile = LibraryProfile {
@@ -3123,6 +3648,9 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             })),
             storage_root: None,
             server_handle: None,
+            namespace: test_namespace(),
+            profile: None,
+            last_storage_snapshot: None,
         };
 
         let profile = LibraryProfile {

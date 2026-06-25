@@ -57,6 +57,26 @@ struct DrawerFiles {
     meta: PathBuf,
 }
 
+#[derive(Default)]
+struct StorageBreakdown {
+    total_bytes: u64,
+    data_bytes: u64,
+    index_bytes: u64,
+    metadata_bytes: u64,
+    logical_wal_bytes: u64,
+    transaction_wal_bytes: u64,
+    other_bytes: u64,
+}
+
+enum StorageFileKind {
+    Data,
+    Index,
+    Metadata,
+    LogicalWal,
+    TransactionWal,
+    Other,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackupScope {
     Wardrobe,
@@ -357,9 +377,16 @@ impl WardrobeEngine {
 
     pub fn diagnose_storage(&self) -> Result<StorageDiagnosis> {
         let drawers = self.list_drawer_names()?;
+        let breakdown = storage_breakdown(&self.root_directory)?;
         Ok(StorageDiagnosis {
             storage_directory: self.root_directory.display().to_string(),
-            storage_bytes: directory_size(&self.root_directory)?,
+            storage_bytes: breakdown.total_bytes,
+            data_bytes: breakdown.data_bytes,
+            index_bytes: breakdown.index_bytes,
+            metadata_bytes: breakdown.metadata_bytes,
+            logical_wal_bytes: breakdown.logical_wal_bytes,
+            transaction_wal_bytes: breakdown.transaction_wal_bytes,
+            other_bytes: breakdown.other_bytes,
             drawer_count: drawers.len(),
             status: if drawers.is_empty() {
                 "empty".to_string()
@@ -1635,23 +1662,78 @@ fn file_size_or_zero(path: &Path) -> Result<u64> {
     }
 }
 
-fn directory_size(path: &Path) -> Result<u64> {
+fn storage_breakdown(path: &Path) -> Result<StorageBreakdown> {
+    let mut breakdown = StorageBreakdown::default();
+    collect_storage_breakdown(path, &mut breakdown)?;
+    Ok(breakdown)
+}
+
+fn collect_storage_breakdown(path: &Path, breakdown: &mut StorageBreakdown) -> Result<()> {
     if !path.exists() {
-        return Ok(0);
+        return Ok(());
     }
 
-    let mut total = 0_u64;
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let child_path = entry.path();
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            total = total.saturating_add(directory_size(&child_path)?);
-        } else if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
+            collect_storage_breakdown(&child_path, breakdown)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let bytes = metadata.len();
+        breakdown.total_bytes = breakdown.total_bytes.saturating_add(bytes);
+        match storage_file_kind(&child_path) {
+            StorageFileKind::Data => {
+                breakdown.data_bytes = breakdown.data_bytes.saturating_add(bytes)
+            }
+            StorageFileKind::Index => {
+                breakdown.index_bytes = breakdown.index_bytes.saturating_add(bytes)
+            }
+            StorageFileKind::Metadata => {
+                breakdown.metadata_bytes = breakdown.metadata_bytes.saturating_add(bytes)
+            }
+            StorageFileKind::LogicalWal => {
+                breakdown.logical_wal_bytes = breakdown.logical_wal_bytes.saturating_add(bytes)
+            }
+            StorageFileKind::TransactionWal => {
+                breakdown.transaction_wal_bytes =
+                    breakdown.transaction_wal_bytes.saturating_add(bytes)
+            }
+            StorageFileKind::Other => {
+                breakdown.other_bytes = breakdown.other_bytes.saturating_add(bytes)
+            }
         }
     }
-    Ok(total)
+
+    Ok(())
+}
+
+fn storage_file_kind(path: &Path) -> StorageFileKind {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return StorageFileKind::Other;
+    };
+
+    if file_name == ".wal" {
+        return StorageFileKind::LogicalWal;
+    }
+    if file_name == "wardrobe.wal" {
+        return StorageFileKind::TransactionWal;
+    }
+    if file_name.ends_with("_index.drw") {
+        return StorageFileKind::Index;
+    }
+    if file_name.ends_with("_meta.drw") || file_name.ends_with(".wal.meta") {
+        return StorageFileKind::Metadata;
+    }
+    if path.extension().and_then(|extension| extension.to_str()) == Some("drw") {
+        return StorageFileKind::Data;
+    }
+    StorageFileKind::Other
 }
 
 fn check_entry(label: &str, path: &Path) -> Result<CheckEntry> {
@@ -1712,7 +1794,7 @@ fn is_drawer_data_file(path: &Path) -> bool {
     let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
         return false;
     };
-    !stem.ends_with("_index") && !stem.ends_with("_meta")
+    !stem.starts_with('.') && !stem.ends_with("_index") && !stem.ends_with("_meta")
 }
 
 fn structural_backup_target(

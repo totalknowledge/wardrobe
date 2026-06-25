@@ -537,6 +537,7 @@ impl WardrobeClient {
 impl NetworkDriver {
     fn connect(host: String, port: u16) -> Result<Self> {
         let stream = TcpStream::connect((host.as_str(), port))?;
+        stream.set_nodelay(true)?;
         Ok(Self {
             host,
             port,
@@ -819,7 +820,9 @@ fn unexpected_result<T>(expected: &str, actual: CommandResult) -> Result<T> {
 mod tests {
     use super::*;
     use std::io::{Cursor, Read, Write};
+    use std::net::TcpListener;
     use std::sync::Mutex;
+    use std::thread;
 
     #[test]
     fn clean_locator_id_variants() {
@@ -892,5 +895,29 @@ mod tests {
         let result = execute_on_stream(&mutex, cmd, "test-target".to_string())
             .expect("execute should succeed");
         assert_eq!(result, CommandResult::Count(3));
+    }
+
+    #[test]
+    fn network_driver_connect_disables_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let accept_thread = thread::spawn(move || {
+            let _ = listener.accept().expect("listener should accept client");
+        });
+
+        let driver = NetworkDriver::connect(address.ip().to_string(), address.port())
+            .expect("driver should connect");
+
+        assert!(
+            driver
+                .stream
+                .lock()
+                .expect("driver stream should lock")
+                .nodelay()
+                .expect("driver stream should report nodelay")
+        );
+
+        drop(driver);
+        accept_thread.join().expect("accept thread should exit");
     }
 }

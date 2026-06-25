@@ -37,6 +37,18 @@ pub struct StorageDiagnosis {
     pub storage_directory: String,
     #[serde(default)]
     pub storage_bytes: u64,
+    #[serde(default)]
+    pub data_bytes: u64,
+    #[serde(default)]
+    pub index_bytes: u64,
+    #[serde(default)]
+    pub metadata_bytes: u64,
+    #[serde(default)]
+    pub logical_wal_bytes: u64,
+    #[serde(default)]
+    pub transaction_wal_bytes: u64,
+    #[serde(default)]
+    pub other_bytes: u64,
     pub drawer_count: usize,
     pub status: String,
     pub drawers: Vec<String>,
@@ -218,6 +230,12 @@ mod tests {
 
         assert_eq!(diagnosis.storage_directory, "/srv/wardrobe");
         assert_eq!(diagnosis.storage_bytes, 0);
+        assert_eq!(diagnosis.data_bytes, 0);
+        assert_eq!(diagnosis.index_bytes, 0);
+        assert_eq!(diagnosis.metadata_bytes, 0);
+        assert_eq!(diagnosis.logical_wal_bytes, 0);
+        assert_eq!(diagnosis.transaction_wal_bytes, 0);
+        assert_eq!(diagnosis.other_bytes, 0);
         assert_eq!(diagnosis.drawer_count, 0);
         assert_eq!(diagnosis.status, "empty");
         assert!(diagnosis.drawers.is_empty());

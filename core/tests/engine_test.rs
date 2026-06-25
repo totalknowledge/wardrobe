@@ -200,8 +200,8 @@ fn diagnose_storage_reports_recursive_storage_bytes() {
 
     assert_eq!(diagnosis.storage_directory, database_directory);
     assert!(diagnosis.storage_bytes >= 4);
-    assert!(diagnosis.drawer_count >= 1);
-    assert!(diagnosis.drawers.iter().any(|drawer| drawer == "gem"));
+    assert_eq!(diagnosis.drawer_count, 1);
+    assert_eq!(diagnosis.drawers, vec!["gem".to_string()]);
 }
 
 #[test]

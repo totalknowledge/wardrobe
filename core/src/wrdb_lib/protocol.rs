@@ -59,8 +59,10 @@ impl ProtocolFrame {
         header[2] = self.opcode.as_u8();
         header[3..7].copy_from_slice(&payload_len.to_be_bytes());
 
-        stream.write_all(&header)?;
-        stream.write_all(&self.payload)?;
+        let mut frame = Vec::with_capacity(HEADER_LENGTH + self.payload.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&self.payload);
+        stream.write_all(&frame)?;
         stream.flush()
     }
 
