@@ -5,6 +5,7 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::sync::{Client as MongoClient, Collection};
 use mysql::prelude::Queryable;
 use mysql::{OptsBuilder, Pool, PooledConn, Row};
+use neo4rs::{Graph, query};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::env;
@@ -15,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::runtime::Runtime;
 use wardrobe_core::{
     Command, CommandResult, ConnectionTarget, ProtocolFrame, ProtocolOpcode, StorageDiagnosis,
     StorageInventory, StorageScope, WardrobeEngine,
@@ -34,6 +36,10 @@ const DEFAULT_MYSQL_USER: &str = "wardrobe_benchmark";
 const DEFAULT_MYSQL_USER_ENV: &str = "WARDROBE_BENCH_MYSQL_USER";
 const DEFAULT_MYSQL_PASSWORD_ENV: &str = "WARDROBE_BENCH_MYSQL_PASSWORD";
 const DEFAULT_MYSQL_CREDENTIALS_FILE: &str = "target/wardrobe-benchmark/mysql-credentials.env";
+const DEFAULT_NEO4J_USER: &str = "neo4j";
+const DEFAULT_NEO4J_USER_ENV: &str = "WARDROBE_BENCH_NEO4J_USER";
+const DEFAULT_NEO4J_PASSWORD_ENV: &str = "WARDROBE_BENCH_NEO4J_PASSWORD";
+const DEFAULT_NEO4J_CREDENTIALS_FILE: &str = "target/wardrobe-benchmark/neo4j-credentials.env";
 const SQLITE_MATERIALIZED_BOOK_QUERY: &str = r#"
 SELECT
     b.id,
@@ -83,6 +89,10 @@ pub struct BenchmarkConfig {
     pub mysql_database: String,
     pub mysql_user: Option<String>,
     pub mysql_password_env: Option<String>,
+    pub neo4j_uri: String,
+    pub neo4j_database: String,
+    pub neo4j_user: String,
+    pub neo4j_password_env: String,
 }
 
 impl Default for BenchmarkConfig {
@@ -105,6 +115,10 @@ impl Default for BenchmarkConfig {
             mysql_database: "wardrobe_benchmark".to_string(),
             mysql_user: None,
             mysql_password_env: Some(DEFAULT_MYSQL_PASSWORD_ENV.to_string()),
+            neo4j_uri: "127.0.0.1:7687".to_string(),
+            neo4j_database: "neo4j".to_string(),
+            neo4j_user: DEFAULT_NEO4J_USER.to_string(),
+            neo4j_password_env: DEFAULT_NEO4J_PASSWORD_ENV.to_string(),
         }
     }
 }
@@ -182,6 +196,12 @@ impl BenchmarkConfig {
                     config.mysql_password_env = Some(required_value(&mut args, &arg)?);
                 }
                 "--mysql-no-password" => config.mysql_password_env = None,
+                "--neo4j-uri" => config.neo4j_uri = required_value(&mut args, &arg)?,
+                "--neo4j-database" => config.neo4j_database = required_value(&mut args, &arg)?,
+                "--neo4j-user" => config.neo4j_user = required_value(&mut args, &arg)?,
+                "--neo4j-password-env" => {
+                    config.neo4j_password_env = required_value(&mut args, &arg)?;
+                }
                 unknown => {
                     return Err(Error::new(
                         ErrorKind::InvalidInput,
@@ -216,6 +236,7 @@ pub enum TargetSpec {
     Sqlite,
     MongoDb,
     MySql,
+    Neo4j,
 }
 
 impl TargetSpec {
@@ -226,6 +247,7 @@ impl TargetSpec {
             Self::Sqlite,
             Self::MongoDb,
             Self::MySql,
+            Self::Neo4j,
         ]
     }
 
@@ -236,6 +258,7 @@ impl TargetSpec {
             Self::Sqlite => "SQLite (Local WAL File Mode)",
             Self::MongoDb => "MongoDB (Document Store Base Comparison)",
             Self::MySql => "MySQL / MariaDB (Relational Pointer Base Comparison)",
+            Self::Neo4j => "Neo4j (Graph Database Base Comparison)",
         }
     }
 }
@@ -393,19 +416,27 @@ impl BenchmarkReport {
         out.push_str("| Target | Phase | Operations | Total us | OPS | Mean us | p95 us | p99 us | Storage bytes |\n");
         out.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
         for target in &self.targets {
-            for phase in &target.phases {
+            if let Some(reason) = &target.unavailable_reason {
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {} |\n",
-                    target.name,
-                    phase.phase.label(),
-                    phase.operations,
-                    phase.total_micros,
-                    phase.ops_per_second,
-                    phase.mean_micros,
-                    phase.p95_micros,
-                    phase.p99_micros,
-                    target.storage_bytes,
+                    "| {} | Unavailable | 0 | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0 |\n",
+                    target.name
                 ));
+                let _ = reason;
+            } else {
+                for phase in &target.phases {
+                    out.push_str(&format!(
+                        "| {} | {} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {} |\n",
+                        target.name,
+                        phase.phase.label(),
+                        phase.operations,
+                        phase.total_micros,
+                        phase.ops_per_second,
+                        phase.mean_micros,
+                        phase.p95_micros,
+                        phase.p99_micros,
+                        target.storage_bytes,
+                    ));
+                }
             }
         }
         let diagnostic_targets = self
@@ -433,6 +464,7 @@ pub struct TargetReport {
     pub phases: Vec<PhaseMetrics>,
     pub storage_bytes: u64,
     pub storage_diagnostics: Vec<String>,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -571,6 +603,19 @@ impl ProgressReporter {
 }
 
 pub fn run_benchmark(config: BenchmarkConfig) -> io::Result<BenchmarkReport> {
+    run_benchmark_with_builder(config, build_target)
+}
+
+fn run_benchmark_with_builder(
+    config: BenchmarkConfig,
+    mut builder: impl FnMut(
+        TargetSpec,
+        &BenchmarkConfig,
+        &Path,
+        &WardrobeNamespace,
+        &ProgressReporter,
+    ) -> io::Result<Box<dyn BenchmarkTarget>>,
+) -> io::Result<BenchmarkReport> {
     let progress = ProgressReporter::new(config.progress_enabled);
     let run_id = format!("run-{}", unix_timestamp_micros());
     let run_dir = config.work_dir.join(&run_id);
@@ -617,23 +662,59 @@ pub fn run_benchmark(config: BenchmarkConfig) -> io::Result<BenchmarkReport> {
             config.targets.len(),
             spec.label()
         ));
-        let mut target = build_target(*spec, &config, &run_dir, &wardrobe_namespace, &progress)?;
-        let target_report = run_target(target.as_mut(), &config.profile, &progress)?;
-        progress.log(format!(
-            "completed target: {} (storage footprint {} bytes)",
-            target_report.name, target_report.storage_bytes
-        ));
-        report.targets.push(target_report);
+        match builder(*spec, &config, &run_dir, &wardrobe_namespace, &progress) {
+            Ok(mut target) => {
+                let target_name = target.name().to_string();
+                match run_target(target.as_mut(), &config.profile, &progress) {
+                    Ok(target_report) => {
+                        progress.log(format!(
+                            "completed target: {} (storage footprint {} bytes)",
+                            target_report.name, target_report.storage_bytes
+                        ));
+                        report.targets.push(target_report);
+                    }
+                    Err(error) => {
+                        progress.log(format!(
+                            "target {} unavailable; continuing with remaining targets: {}",
+                            target_name, error
+                        ));
+                        report
+                            .targets
+                            .push(unavailable_target_report(&target_name, error.to_string()));
+                    }
+                }
+            }
+            Err(error) => {
+                progress.log(format!(
+                    "target {} unavailable during setup; continuing with remaining targets: {}",
+                    spec.label(),
+                    error
+                ));
+                report
+                    .targets
+                    .push(unavailable_target_report(spec.label(), error.to_string()));
+            }
+        }
     }
 
     progress.log("benchmark run complete; rendering Markdown report");
     Ok(report)
 }
 
+fn unavailable_target_report(name: &str, reason: String) -> TargetReport {
+    TargetReport {
+        name: name.to_string(),
+        phases: Vec::new(),
+        storage_bytes: 0,
+        storage_diagnostics: vec![format!("Unavailable: {reason}")],
+        unavailable_reason: Some(reason),
+    }
+}
+
 pub fn print_help() {
     println!("wardrobe-benchmark");
     println!(
-        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql"
+        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql,neo4j"
     );
     println!(
         "  --work-dir <path>               Benchmark run directory root, default {DEFAULT_WORK_DIR}"
@@ -673,6 +754,12 @@ pub fn print_help() {
         "  --mysql-password-env <var>      Env var containing the MySQL password, default WARDROBE_BENCH_MYSQL_PASSWORD"
     );
     println!("  --mysql-no-password             Connect to MySQL without a password");
+    println!("  --neo4j-uri <host:port>         Neo4j Bolt endpoint, default 127.0.0.1:7687");
+    println!("  --neo4j-database <name>         Neo4j database name, default neo4j");
+    println!("  --neo4j-user <user>             Neo4j username, default neo4j");
+    println!(
+        "  --neo4j-password-env <var>      Env var containing the Neo4j password, default WARDROBE_BENCH_NEO4J_PASSWORD"
+    );
 }
 
 trait BenchmarkTarget {
@@ -783,6 +870,7 @@ fn run_target(
         phases: phase_metrics,
         storage_bytes,
         storage_diagnostics,
+        unavailable_reason: None,
     })
 }
 
@@ -866,6 +954,24 @@ fn build_target(
                 config.mysql_database.clone(),
                 config.mysql_user.clone(),
                 config.mysql_password_env.clone(),
+            )?))
+        }
+        TargetSpec::Neo4j => {
+            progress.log(format!(
+                "{}: opening Neo4j Bolt connection for {} / database {}",
+                spec.label(),
+                config.neo4j_uri,
+                config.neo4j_database
+            ));
+            Ok(Box::new(Neo4jTarget::new(
+                config.neo4j_uri.clone(),
+                config.neo4j_database.clone(),
+                config.neo4j_user.clone(),
+                config.neo4j_password_env.clone(),
+                run_dir
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "run".to_string()),
             )?))
         }
     }
@@ -2200,6 +2306,374 @@ CREATE TABLE books (
     }
 }
 
+struct Neo4jTarget {
+    graph: Graph,
+    runtime: Runtime,
+    database: String,
+    marker: String,
+}
+
+impl Neo4jTarget {
+    fn new(
+        uri: String,
+        database: String,
+        user: String,
+        password_env: String,
+        marker: String,
+    ) -> io::Result<Self> {
+        let fallback_credentials = read_default_neo4j_credentials()?;
+        let resolved_user = if user == DEFAULT_NEO4J_USER {
+            env::var(DEFAULT_NEO4J_USER_ENV)
+                .ok()
+                .or_else(|| fallback_credentials.user.clone())
+                .unwrap_or(user)
+        } else {
+            user
+        };
+        let password = match env::var(&password_env) {
+            Ok(value) => value,
+            Err(env::VarError::NotPresent) if password_env == DEFAULT_NEO4J_PASSWORD_ENV => {
+                fallback_credentials.password.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "Neo4j password environment variable '{password_env}' is not set and {DEFAULT_NEO4J_CREDENTIALS_FILE} was not found; run utilities/benchmark/start-neo4j-docker.sh or set {password_env}"
+                        ),
+                    )
+                })?
+            }
+            Err(env::VarError::NotPresent) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("Neo4j password environment variable '{password_env}' is not set"),
+                ));
+            }
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Neo4j password environment variable '{password_env}' is not valid UTF-8"
+                    ),
+                ));
+            }
+        };
+        let runtime = Runtime::new().map_err(to_io_error)?;
+        let graph = runtime.block_on(async {
+            let config = neo4rs::ConfigBuilder::default()
+                .uri(uri)
+                .user(resolved_user)
+                .password(password)
+                .db(database.clone())
+                .build()
+                .map_err(to_io_error)?;
+            Graph::connect(config).await.map_err(to_io_error)
+        })?;
+        Ok(Self {
+            graph,
+            runtime,
+            database,
+            marker,
+        })
+    }
+
+    fn run_query(&self, q: neo4rs::Query) -> io::Result<()> {
+        self.runtime
+            .block_on(async { self.graph.run(q).await.map_err(to_io_error) })
+    }
+
+    fn count_query(&self, q: neo4rs::Query, field: &str) -> io::Result<u64> {
+        self.runtime.block_on(async {
+            let mut stream = self.graph.execute(q).await.map_err(to_io_error)?;
+            if let Some(row) = stream.next().await.map_err(to_io_error)? {
+                let count: i64 = row.get(field).map_err(to_io_error)?;
+                return Ok(u64::try_from(count).unwrap_or(0));
+            }
+            Ok(0)
+        })
+    }
+
+    fn query_barrier(&self) -> io::Result<()> {
+        self.runtime.block_on(async {
+            let mut stream = self
+                .graph
+                .execute(query("RETURN 1 AS ok"))
+                .await
+                .map_err(to_io_error)?;
+            while let Some(_row) = stream.next().await.map_err(to_io_error)? {}
+            Ok(())
+        })
+    }
+
+    fn checkpoint_or_barrier(&self, progress: Option<&ProgressReporter>) -> io::Result<()> {
+        match self.run_query(query("CALL db.checkpoint()")) {
+            Ok(()) => Ok(()),
+            Err(error) if neo4j_checkpoint_is_unavailable(&error) => {
+                if let Some(progress) = progress {
+                    progress.log(format!(
+                        "{}: Neo4j db.checkpoint() unavailable; using query barrier",
+                        self.name()
+                    ));
+                }
+                self.query_barrier()
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl BenchmarkTarget for Neo4jTarget {
+    fn name(&self) -> &str {
+        "Neo4j (Graph Database Base Comparison)"
+    }
+
+    fn provision_schema(
+        &mut self,
+        _profile: &LibraryProfile,
+        progress: &ProgressReporter,
+    ) -> io::Result<()> {
+        progress.log(format!(
+            "{}: clearing benchmark nodes in database '{}'",
+            self.name(),
+            self.database
+        ));
+        self.run_query(
+            query("MATCH (n:BenchNode {bench_marker: $marker}) DETACH DELETE n")
+                .param("marker", self.marker.clone()),
+        )?;
+
+        progress.log(format!(
+            "{}: creating Neo4j constraints/indexes",
+            self.name()
+        ));
+        self.run_query(query(
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) REQUIRE (e.bench_marker, e.id) IS UNIQUE",
+        ))?;
+        self.run_query(query(
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (b:Book) REQUIRE (b.bench_marker, b.id) IS UNIQUE",
+        ))?;
+        self.run_query(query("CREATE INDEX IF NOT EXISTS FOR (b:Book) ON (b.isbn)"))?;
+        self.run_query(query(
+            "CREATE INDEX IF NOT EXISTS FOR (b:Book) ON (b.purge_bucket)",
+        ))?;
+        self.flush()
+    }
+
+    fn massive_ingestion(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        for (start, end) in chunk_ranges(profile.entity_records, profile.chunk_size) {
+            recorder.measure((end - start) as u64, || {
+                for index in start..end {
+                    let payload = profile.entity_payload(index);
+                    let role = payload["role"].as_str().unwrap_or_default().to_string();
+                    let cohort = payload["cohort"].as_u64().unwrap_or_default() as i64;
+                    self.run_query(
+                        query(
+                            "MERGE (e:BenchNode:Entity {bench_marker: $marker, id: $id}) SET e.display_name = $display_name, e.role = $role, e.cohort = $cohort",
+                        )
+                        .param("marker", self.marker.clone())
+                        .param("id", payload["_id"].as_str().unwrap_or_default().to_string())
+                        .param(
+                            "display_name",
+                            payload["display_name"].as_str().unwrap_or_default().to_string(),
+                        )
+                        .param("role", role)
+                        .param("cohort", cohort),
+                    )?;
+                }
+                Ok(())
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: entities ingested", self.name()),
+                end,
+                profile.entity_records,
+            );
+        }
+
+        for (start, end) in chunk_ranges(profile.book_records, profile.chunk_size) {
+            recorder.measure((end - start) as u64, || {
+                for index in start..end {
+                    let payload = profile.book_payload(index);
+                    let quantity = payload["quantity"].as_u64().unwrap_or_default() as i64;
+                    let purge_bucket = payload["purge_bucket"].as_u64().unwrap_or_default() as i64;
+                    self.run_query(
+                        query(
+                            "MERGE (b:BenchNode:Book {bench_marker: $marker, id: $id}) SET b.isbn = $isbn, b.title = $title, b.author_id = $author_id, b.editor_id = $editor_id, b.branch = $branch, b.quantity = $quantity, b.purge_bucket = $purge_bucket WITH b, $marker AS marker, $author_id AS author_id, $editor_id AS editor_id MATCH (author:BenchNode:Entity {bench_marker: marker, id: author_id}) MATCH (editor:BenchNode:Entity {bench_marker: marker, id: editor_id}) MERGE (b)-[:AUTHORED_BY]->(author) MERGE (b)-[:EDITED_BY]->(editor)",
+                        )
+                        .param("marker", self.marker.clone())
+                        .param("id", payload["_id"].as_str().unwrap_or_default().to_string())
+                        .param("isbn", payload["isbn"].as_str().unwrap_or_default().to_string())
+                        .param("title", payload["title"].as_str().unwrap_or_default().to_string())
+                        .param(
+                            "author_id",
+                            payload["author_id"].as_str().unwrap_or_default().to_string(),
+                        )
+                        .param(
+                            "editor_id",
+                            payload["editor_id"].as_str().unwrap_or_default().to_string(),
+                        )
+                        .param(
+                            "branch",
+                            payload["branch"].as_str().unwrap_or_default().to_string(),
+                        )
+                        .param("quantity", quantity)
+                        .param("purge_bucket", purge_bucket),
+                    )?;
+                }
+                Ok(())
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: books ingested", self.name()),
+                end,
+                profile.book_records,
+            );
+        }
+        Ok((profile.entity_records + profile.book_records) as u64)
+    }
+
+    fn index_mutation(
+        &mut self,
+        _profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        for (index, (label, cypher)) in [
+            (
+                "create bench_isbn_idx",
+                "CREATE INDEX bench_isbn_idx IF NOT EXISTS FOR (b:Book) ON (b.isbn)",
+            ),
+            ("drop bench_isbn_idx", "DROP INDEX bench_isbn_idx IF EXISTS"),
+            (
+                "recreate bench_isbn_idx",
+                "CREATE INDEX bench_isbn_idx IF NOT EXISTS FOR (b:Book) ON (b.isbn)",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            progress.log(format!(
+                "{}: index mutation step {}/3: {}",
+                self.name(),
+                index + 1,
+                label
+            ));
+            recorder.measure(1, || self.run_query(query(cypher)))?;
+        }
+        Ok(3)
+    }
+
+    fn complex_traversal(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        for query_index in 0..profile.traversal_queries {
+            let entity_id = profile.traversal_entity_id(query_index);
+            recorder.measure(1, || {
+                self.runtime.block_on(async {
+                    let mut stream = self
+                        .graph
+                        .execute(
+                            query(
+                                "MATCH (author:BenchNode:Entity {bench_marker: $marker, id: $entity_id})<-[:AUTHORED_BY]-(b:BenchNode:Book)-[:EDITED_BY]->(editor:BenchNode:Entity {bench_marker: $marker, id: $entity_id}) RETURN b.id AS book_id, b.isbn AS isbn, b.title AS title, b.author_id AS author_id, b.editor_id AS editor_id, b.branch AS branch, b.quantity AS quantity, b.purge_bucket AS purge_bucket, author.id AS author_entity_id, author.display_name AS author_display_name, author.role AS author_role, author.cohort AS author_cohort, editor.id AS editor_entity_id, editor.display_name AS editor_display_name, editor.role AS editor_role, editor.cohort AS editor_cohort",
+                            )
+                            .param("marker", self.marker.clone())
+                            .param("entity_id", entity_id),
+                        )
+                        .await
+                        .map_err(to_io_error)?;
+                    while let Some(_row) = stream.next().await.map_err(to_io_error)? {}
+                    Ok(())
+                })
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: traversal queries completed", self.name()),
+                query_index + 1,
+                profile.traversal_queries,
+            );
+        }
+        Ok(profile.traversal_queries as u64)
+    }
+
+    fn targeted_purge(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let operations = profile.expected_purge_count() as u64;
+        progress.log(format!(
+            "{}: deleting about {} book records where purge_bucket = 0",
+            self.name(),
+            operations
+        ));
+        recorder.measure(operations.max(1), || {
+            self.run_query(
+                query(
+                    "MATCH (b:BenchNode:Book {bench_marker: $marker, purge_bucket: 0}) DETACH DELETE b",
+                )
+                .param("marker", self.marker.clone()),
+            )
+        })?;
+        Ok(operations.max(1))
+    }
+
+    fn compaction(
+        &mut self,
+        _profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        progress.log(format!(
+            "{}: issuing Neo4j checkpoint or query barrier",
+            self.name()
+        ));
+        recorder.measure(1, || self.checkpoint_or_barrier(Some(progress)))?;
+        Ok(1)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.checkpoint_or_barrier(None)
+    }
+
+    fn storage_footprint_bytes(&mut self) -> io::Result<u64> {
+        self.count_query(
+            query("MATCH (n:BenchNode {bench_marker: $marker}) RETURN count(n) AS node_count")
+                .param("marker", self.marker.clone()),
+            "node_count",
+        )
+    }
+
+    fn storage_diagnostics(&mut self) -> io::Result<Vec<String>> {
+        let node_count = self.count_query(
+            query("MATCH (n:BenchNode {bench_marker: $marker}) RETURN count(n) AS node_count")
+                .param("marker", self.marker.clone()),
+            "node_count",
+        )?;
+        let relationship_count = self.count_query(
+            query(
+                "MATCH (:BenchNode {bench_marker: $marker})-[r]->(:BenchNode {bench_marker: $marker}) RETURN count(r) AS relationship_count",
+            )
+            .param("marker", self.marker.clone()),
+            "relationship_count",
+        )?;
+        Ok(vec![
+            format!(
+                "Benchmark scope marker '{}' in database '{}' contains {} nodes and {} relationships",
+                self.marker, self.database, node_count, relationship_count
+            ),
+            "Neo4j storage metric reports logical benchmark node count (graph store byte accounting is instance-wide).".to_string(),
+        ])
+    }
+}
+
 fn parse_targets(raw: &str) -> io::Result<Vec<TargetSpec>> {
     if raw.trim().eq_ignore_ascii_case("all") {
         return Ok(TargetSpec::all());
@@ -2211,6 +2685,7 @@ fn parse_targets(raw: &str) -> io::Result<Vec<TargetSpec>> {
             "sqlite" => Ok(TargetSpec::Sqlite),
             "mongodb" | "mongo" => Ok(TargetSpec::MongoDb),
             "mysql" | "mariadb" => Ok(TargetSpec::MySql),
+            "neo4j" | "neo" => Ok(TargetSpec::Neo4j),
             "" => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "--targets contains an empty target name",
@@ -2304,19 +2779,50 @@ fn to_io_error(error: impl std::fmt::Display) -> io::Error {
     Error::other(error.to_string())
 }
 
-#[derive(Default)]
-struct MySqlCredentials {
+fn neo4j_checkpoint_is_unavailable(error: &io::Error) -> bool {
+    let message = error.to_string();
+    message.contains("ProcedureNotFound") && message.contains("db.checkpoint")
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct ServiceCredentials {
     user: Option<String>,
     password: Option<String>,
 }
 
-fn read_default_mysql_credentials() -> io::Result<MySqlCredentials> {
-    let contents = match fs::read_to_string(DEFAULT_MYSQL_CREDENTIALS_FILE) {
+fn read_default_mysql_credentials() -> io::Result<ServiceCredentials> {
+    read_credentials_file(
+        DEFAULT_MYSQL_CREDENTIALS_FILE,
+        DEFAULT_MYSQL_USER_ENV,
+        DEFAULT_MYSQL_PASSWORD_ENV,
+    )
+}
+
+fn read_default_neo4j_credentials() -> io::Result<ServiceCredentials> {
+    read_credentials_file(
+        DEFAULT_NEO4J_CREDENTIALS_FILE,
+        DEFAULT_NEO4J_USER_ENV,
+        DEFAULT_NEO4J_PASSWORD_ENV,
+    )
+}
+
+fn read_credentials_file(
+    path: &str,
+    user_env: &str,
+    password_env: &str,
+) -> io::Result<ServiceCredentials> {
+    let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(MySqlCredentials::default()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(ServiceCredentials::default());
+        }
         Err(error) => return Err(error),
     };
-    let mut credentials = MySqlCredentials::default();
+    Ok(parse_credentials(&contents, user_env, password_env))
+}
+
+fn parse_credentials(contents: &str, user_env: &str, password_env: &str) -> ServiceCredentials {
+    let mut credentials = ServiceCredentials::default();
     for line in contents
         .lines()
         .map(str::trim)
@@ -2324,13 +2830,13 @@ fn read_default_mysql_credentials() -> io::Result<MySqlCredentials> {
     {
         if let Some((key, value)) = line.split_once('=') {
             match key.trim() {
-                DEFAULT_MYSQL_USER_ENV => credentials.user = Some(value.trim().to_string()),
-                DEFAULT_MYSQL_PASSWORD_ENV => credentials.password = Some(value.trim().to_string()),
+                key if key == user_env => credentials.user = Some(value.trim().to_string()),
+                key if key == password_env => credentials.password = Some(value.trim().to_string()),
                 _ => {}
             }
         }
     }
-    Ok(credentials)
+    credentials
 }
 
 fn bson_number_to_u64(value: Option<&Bson>) -> Option<u64> {
@@ -2878,7 +3384,7 @@ mod tests {
     fn benchmark_config_parses_full_option_matrix() {
         let ParseOutcome::Run(config) = BenchmarkConfig::from_args([
             "--targets".to_string(),
-            "wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql".to_string(),
+            "wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql,neo4j".to_string(),
             "--work-dir".to_string(),
             "target/custom-bench".to_string(),
             "--output".to_string(),
@@ -2918,6 +3424,14 @@ mod tests {
             "benchmark_user".to_string(),
             "--mysql-password-env".to_string(),
             "BENCH_PASSWORD".to_string(),
+            "--neo4j-uri".to_string(),
+            "127.0.0.1:8687".to_string(),
+            "--neo4j-database".to_string(),
+            "neo_suite".to_string(),
+            "--neo4j-user".to_string(),
+            "neo_user".to_string(),
+            "--neo4j-password-env".to_string(),
+            "NEO_PASSWORD".to_string(),
         ])
         .expect("full benchmark options should parse") else {
             panic!("expected run config");
@@ -2959,6 +3473,10 @@ mod tests {
             config.mysql_password_env,
             Some("BENCH_PASSWORD".to_string())
         );
+        assert_eq!(config.neo4j_uri, "127.0.0.1:8687");
+        assert_eq!(config.neo4j_database, "neo_suite");
+        assert_eq!(config.neo4j_user, "neo_user");
+        assert_eq!(config.neo4j_password_env, "NEO_PASSWORD");
     }
 
     #[test]
@@ -2977,9 +3495,37 @@ mod tests {
     }
 
     #[test]
+    fn credentials_parser_reads_neo4j_fallback_file_keys() {
+        let credentials = parse_credentials(
+            r#"
+WARDROBE_BENCH_NEO4J_USER=neo4j
+WARDROBE_BENCH_NEO4J_PASSWORD=wardrobe_benchmark
+IGNORED=value
+"#,
+            DEFAULT_NEO4J_USER_ENV,
+            DEFAULT_NEO4J_PASSWORD_ENV,
+        );
+
+        assert_eq!(credentials.user, Some("neo4j".to_string()));
+        assert_eq!(credentials.password, Some("wardrobe_benchmark".to_string()));
+    }
+
+    #[test]
+    fn neo4j_checkpoint_unavailable_predicate_matches_procedure_gap() {
+        let missing_checkpoint = Error::other(
+            "Neo4j error `Neo.ClientError.Procedure.ProcedureNotFound`: There is no procedure with the name `db.checkpoint` registered",
+        );
+        let auth_error =
+            Error::other("Neo4j error `Neo.ClientError.Security.Unauthorized`: access denied");
+
+        assert!(neo4j_checkpoint_is_unavailable(&missing_checkpoint));
+        assert!(!neo4j_checkpoint_is_unavailable(&auth_error));
+    }
+
+    #[test]
     fn parse_targets_supports_aliases_and_case_insensitive_values() {
-        let targets =
-            parse_targets("embedded,REMOTE,mongo,mariadb").expect("target aliases should parse");
+        let targets = parse_targets("embedded,REMOTE,mongo,mariadb,neo")
+            .expect("target aliases should parse");
         assert_eq!(
             targets,
             vec![
@@ -2987,6 +3533,7 @@ mod tests {
                 TargetSpec::WardrobeRemote,
                 TargetSpec::MongoDb,
                 TargetSpec::MySql,
+                TargetSpec::Neo4j,
             ]
         );
     }
@@ -3345,6 +3892,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 name: "Wardrobe (Embedded Flat-File Mode)".to_string(),
                 storage_bytes: 42,
                 storage_diagnostics: Vec::new(),
+                unavailable_reason: None,
                 phases: vec![PhaseMetrics {
                     phase: PhaseName::Compaction,
                     operations: 1,
@@ -3362,6 +3910,53 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         assert!(markdown.contains("| Target | Phase | Operations | Total us | OPS | Mean us | p95 us | p99 us | Storage bytes |"));
         assert!(markdown.contains("Wardrobe (Embedded Flat-File Mode)"));
         assert!(markdown.contains("Compaction"));
+    }
+
+    #[test]
+    fn benchmark_continues_when_target_is_unavailable() {
+        let work_dir = env::temp_dir().join(format!(
+            "wardrobe_benchmark_unavailable_target_{}",
+            unix_timestamp_micros()
+        ));
+        let config = BenchmarkConfig {
+            targets: vec![TargetSpec::WardrobeEmbedded, TargetSpec::Neo4j],
+            profile: tiny_profile(),
+            work_dir: work_dir.clone(),
+            ..BenchmarkConfig::default()
+        };
+
+        let report =
+            run_benchmark_with_builder(config, |spec, config, run_dir, namespace, progress| {
+                match spec {
+                    TargetSpec::WardrobeEmbedded => {
+                        build_target(spec, config, run_dir, namespace, progress)
+                    }
+                    TargetSpec::Neo4j => Err(Error::new(
+                        ErrorKind::ConnectionRefused,
+                        "neo4j connection refused",
+                    )),
+                    other => Err(Error::other(format!(
+                        "unexpected target in test: {other:?}"
+                    ))),
+                }
+            })
+            .expect("benchmark should continue even when a target is unavailable");
+
+        assert_eq!(report.targets.len(), 2);
+        assert_eq!(report.targets[0].name, "Wardrobe (Embedded Flat-File Mode)");
+        assert_eq!(report.targets[0].unavailable_reason, None);
+        assert_eq!(
+            report.targets[1].name,
+            "Neo4j (Graph Database Base Comparison)"
+        );
+        assert!(report.targets[1].unavailable_reason.is_some());
+        assert!(report.targets[1].phases.is_empty());
+
+        let markdown = report.to_markdown();
+        assert!(markdown.contains("Neo4j (Graph Database Base Comparison)"));
+        assert!(markdown.contains("Unavailable"));
+
+        let _ = fs::remove_dir_all(work_dir);
     }
 
     #[test]
