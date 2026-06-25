@@ -101,7 +101,7 @@ fn open_rebuilds_secondary_indexes_from_disk() {
             .expect("record should validate");
     }
 
-    let reopened = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
+    let mut reopened = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
         .expect("drawer should reopen from disk");
 
     let matches = reopened
@@ -137,7 +137,7 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
     );
     fs::write(&index_file, index_records).expect("index file should write");
 
-    let drawer = Drawer::open(
+    let mut drawer = Drawer::open(
         &database_directory.path,
         "weapon",
         "_id",
@@ -153,7 +153,7 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
 }
 
 #[test]
-fn non_unique_schema_indexes_track_duplicate_string_and_integer_values() {
+fn non_unique_schema_indexes_materialize_lazily_for_duplicate_string_and_integer_values() {
     let database_directory = TempDatabase::new("drawer_non_unique_schema_indexes");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
@@ -178,6 +178,13 @@ fn non_unique_schema_indexes_track_duplicate_string_and_integer_values() {
                 .expect("record should validate");
         }
 
+        let pre_materialization_index_records = load_index_records(&database_directory, "book");
+        assert!(
+            pre_materialization_index_records
+                .iter()
+                .all(|record| record["f"] == "_id")
+        );
+
         assert_eq!(
             drawer
                 .find_by_secondary_key("author_id", "entity_a")
@@ -195,7 +202,7 @@ fn non_unique_schema_indexes_track_duplicate_string_and_integer_values() {
         drawer.checkpoint().expect("drawer should checkpoint");
     }
 
-    let reopened = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
+    let mut reopened = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
         .expect("drawer should reopen");
 
     assert_eq!(
@@ -221,6 +228,118 @@ fn non_unique_schema_indexes_track_duplicate_string_and_integer_values() {
         !reopened
             .unique_constraints
             .contains(&"purge_bucket".to_string())
+    );
+}
+
+#[test]
+fn us_111_lazy_secondary_index_is_invalidated_after_write_and_rebuilt_on_next_lookup() {
+    let database_directory = TempDatabase::new("us_111_lazy_index_invalidates_after_write");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let mut drawer = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
+        .expect("drawer should open");
+    drawer
+        .manage_schema_rule("add", "index", "author_id", json!({ "kind": "index" }))
+        .expect("author index should be registered");
+    drawer
+        .upsert_record(json!({"_id": "book_a", "author_id": "entity_a"}))
+        .expect("upsert should succeed")
+        .expect("record should validate");
+
+    assert_eq!(
+        drawer
+            .find_by_secondary_key("author_id", "entity_a")
+            .expect("first lookup should build lazy index")
+            .len(),
+        1
+    );
+
+    drawer
+        .upsert_record(json!({"_id": "book_a", "author_id": "entity_b"}))
+        .expect("update should succeed")
+        .expect("record should validate");
+
+    assert!(
+        drawer
+            .find_by_secondary_key("author_id", "entity_a")
+            .expect("stale lookup should rebuild and scan")
+            .is_empty()
+    );
+    assert_eq!(
+        drawer
+            .find_by_secondary_key("author_id", "entity_b")
+            .expect("rebuilt lookup should use current value")
+            .len(),
+        1
+    );
+
+    drawer.checkpoint().expect("drawer should checkpoint");
+    drop(drawer);
+
+    let mut reopened = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
+        .expect("drawer should reopen");
+
+    assert!(
+        reopened
+            .find_by_secondary_key("author_id", "entity_a")
+            .expect("stale lookup should stay absent after reopen")
+            .is_empty()
+    );
+    assert_eq!(
+        reopened
+            .find_by_secondary_key("author_id", "entity_b")
+            .expect("rebuilt lookup should survive reopen")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn us_111_admin_rebuild_materializes_secondary_index_without_rewriting_drawer_data() {
+    let database_directory = TempDatabase::new("us_111_admin_rebuild_secondary_index");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let mut drawer = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
+        .expect("drawer should open");
+    drawer
+        .manage_schema_rule("add", "index", "author_id", json!({ "kind": "index" }))
+        .expect("author index should be registered");
+    for payload in [
+        json!({"_id": "book_a", "author_id": "entity_a"}),
+        json!({"_id": "book_b", "author_id": "entity_a"}),
+        json!({"_id": "book_c", "author_id": "entity_b"}),
+    ] {
+        drawer
+            .upsert_record(payload)
+            .expect("upsert should succeed")
+            .expect("record should validate");
+    }
+
+    let data_path = database_directory.path.join("book.drw");
+    let data_before = fs::read(&data_path).expect("data should read before rebuild");
+    assert!(
+        load_index_records(&database_directory, "book")
+            .iter()
+            .all(|record| record["f"] == "_id")
+    );
+
+    drawer
+        .manage_schema_rule("rebuild", "index", "author_id", json!({}))
+        .expect("index rebuild should succeed");
+
+    let data_after = fs::read(&data_path).expect("data should read after rebuild");
+    assert_eq!(data_after, data_before);
+    assert!(
+        load_index_records(&database_directory, "book")
+            .iter()
+            .any(|record| record["f"] == "author_id")
+    );
+    assert_eq!(
+        drawer
+            .find_by_secondary_key("author_id", "entity_a")
+            .expect("rebuilt lookup should succeed")
+            .len(),
+        2
     );
 }
 
@@ -1006,7 +1125,7 @@ fn updating_secondary_field_removes_stale_index_entries() {
         assert_eq!(water_matches.len(), 1);
     }
 
-    let reopened = Drawer::open(
+    let mut reopened = Drawer::open(
         &database_directory.path,
         "gem",
         "_id",
@@ -1253,7 +1372,7 @@ fn us_042_vacuum_compacts_live_records_and_rebuilds_indexes() {
     assert_eq!(metadata["record_count"], 1);
 
     drop(drawer);
-    let reopened = Drawer::open(
+    let mut reopened = Drawer::open(
         &database_directory.path,
         "gem",
         "_id",

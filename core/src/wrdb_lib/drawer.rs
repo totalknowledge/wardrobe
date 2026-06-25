@@ -44,6 +44,10 @@ struct DrawerMetadata {
     cascade_delete_rules: BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     schema: Option<Value>,
+    #[serde(default)]
+    secondary_index_generation: u64,
+    #[serde(default)]
+    materialized_secondary_indexes: BTreeMap<String, u64>,
 }
 
 impl DrawerMetadata {
@@ -71,6 +75,8 @@ impl DrawerMetadata {
         delete_rules: BTreeMap<String, Value>,
         cascade_delete_rules: BTreeMap<String, bool>,
         schema: Option<Value>,
+        secondary_index_generation: u64,
+        materialized_secondary_indexes: BTreeMap<String, u64>,
     ) -> Self {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
@@ -81,6 +87,8 @@ impl DrawerMetadata {
             delete_rules,
             cascade_delete_rules,
             schema,
+            secondary_index_generation,
+            materialized_secondary_indexes,
         }
     }
 
@@ -163,6 +171,9 @@ pub struct Drawer {
 
     primary_memory_index: HashMap<String, u64>,
     secondary_memory_index: HashMap<String, HashMap<String, Vec<u64>>>,
+    validated_secondary_indexes: HashSet<String>,
+    materialized_secondary_indexes: BTreeMap<String, u64>,
+    secondary_index_generation: u64,
     index_file_offsets: HashMap<String, (u64, usize)>,
     data_block_index: HashMap<u64, DataBlockIndexEntry>,
     relationship_constraints: BTreeMap<String, Value>,
@@ -217,6 +228,14 @@ impl Drawer {
         let schema = existing_metadata
             .as_ref()
             .and_then(|metadata| metadata.schema.clone());
+        let secondary_index_generation = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.secondary_index_generation)
+            .unwrap_or_default();
+        let materialized_secondary_indexes = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.materialized_secondary_indexes.clone())
+            .unwrap_or_default();
         let metadata_format_version = existing_metadata
             .as_ref()
             .map(|metadata| metadata.format_version)
@@ -232,8 +251,16 @@ impl Drawer {
             unique_constraints
         };
 
-        for field in Self::indexed_fields_from(&inferred_unique_constraints, schema.as_ref()) {
+        for field in &inferred_unique_constraints {
             secondary_memory_index.insert(field.clone(), HashMap::new());
+        }
+        for field in Self::schema_extension_fields(schema.as_ref(), "indexes") {
+            if materialized_secondary_indexes
+                .get(&field)
+                .is_some_and(|generation| *generation == secondary_index_generation)
+            {
+                secondary_memory_index.insert(field.clone(), HashMap::new());
+            }
         }
 
         let mut index_entries = Vec::new();
@@ -344,6 +371,9 @@ impl Drawer {
             index_recycler,
             primary_memory_index,
             secondary_memory_index,
+            validated_secondary_indexes: HashSet::new(),
+            materialized_secondary_indexes,
+            secondary_index_generation,
             index_file_offsets,
             data_block_index,
             relationship_constraints,
@@ -457,8 +487,8 @@ impl Drawer {
             .insert(primary_key_value.clone(), data_offset);
         self.data_block_index.insert(data_offset, live_block);
 
-        let fields_to_index = self.indexed_fields();
-        for indexed_field in fields_to_index {
+        let unique_fields = self.unique_constraints.clone();
+        for indexed_field in unique_fields {
             let old_field_value = old_record
                 .as_ref()
                 .and_then(|value| value.get(&indexed_field))
@@ -528,6 +558,8 @@ impl Drawer {
             self.record_count += 1;
             self.mark_metadata_dirty();
         }
+
+        self.invalidate_materialized_query_indexes()?;
 
         Ok(Ok(is_new_record))
     }
@@ -610,32 +642,82 @@ impl Drawer {
         Ok(None)
     }
 
-    pub fn find_by_secondary_key(&self, field: &str, key: &str) -> std::io::Result<Vec<Value>> {
+    pub fn find_by_secondary_key(&mut self, field: &str, key: &str) -> std::io::Result<Vec<Value>> {
+        if !self.index_can_satisfy_filter(field) {
+            return Ok(Vec::new());
+        }
+
+        let mut filter_map = Map::new();
+        filter_map.insert(field.to_string(), Value::String(key.to_string()));
+        if let Some(offsets) = self.indexed_candidate_offsets(&filter_map)? {
+            return self.records_at_offsets_with_migration(offsets);
+        }
+
         let mut matching_records = Vec::new();
-        if let Some(field_map) = self.secondary_memory_index.get(field) {
-            if let Some(offsets) = field_map.get(key) {
-                for &offset in offsets {
-                    if let Some(record) = self.data_reader.read_record_at_offset(offset)? {
-                        matching_records.push(record);
-                    }
-                }
+        for record in self.find_all_records_with_migration()? {
+            if record.get(field).and_then(Self::secondary_index_key) == Some(key.to_string()) {
+                matching_records.push(record);
             }
         }
         Ok(matching_records)
     }
 
     pub(crate) fn indexed_candidate_offsets(
-        &self,
+        &mut self,
         filter_map: &Map<String, Value>,
-    ) -> Option<Vec<u64>> {
+    ) -> std::io::Result<Option<Vec<u64>>> {
         if filter_map.is_empty() {
-            return None;
+            return Ok(None);
+        }
+
+        let mut materialized_for_future_query = false;
+        for (field_name, expected_value) in filter_map {
+            if Self::equality_filter_index_key(expected_value).is_none() {
+                return Ok(None);
+            }
+            if !self.index_can_satisfy_filter(field_name) {
+                return Ok(None);
+            }
+            if self
+                .unique_constraints
+                .iter()
+                .any(|field| field == field_name)
+            {
+                if !self.secondary_memory_index.contains_key(field_name) {
+                    let field_index = self.build_secondary_index(field_name, true)?;
+                    self.secondary_memory_index
+                        .insert(field_name.to_string(), field_index);
+                }
+                continue;
+            }
+
+            if !self.query_index_is_materialized(field_name)
+                || !self.validated_secondary_indexes.contains(field_name)
+            {
+                if self.query_index_is_materialized(field_name)
+                    && self.secondary_index_matches_authoritative(field_name)?
+                {
+                    self.validated_secondary_indexes
+                        .insert(field_name.to_string());
+                } else {
+                    self.materialize_query_index(field_name)?;
+                    materialized_for_future_query = true;
+                }
+            }
+        }
+
+        if materialized_for_future_query {
+            return Ok(None);
         }
 
         let mut candidate_offsets: Option<Vec<u64>> = None;
         for (field_name, expected_value) in filter_map {
-            let field_map = self.secondary_memory_index.get(field_name)?;
-            let index_key = Self::equality_filter_index_key(expected_value)?;
+            let Some(field_map) = self.secondary_memory_index.get(field_name) else {
+                return Ok(None);
+            };
+            let Some(index_key) = Self::equality_filter_index_key(expected_value) else {
+                return Ok(None);
+            };
             let mut offsets = field_map.get(&index_key).cloned().unwrap_or_default();
             offsets.sort_unstable();
             offsets.dedup();
@@ -646,7 +728,7 @@ impl Drawer {
             });
         }
 
-        candidate_offsets
+        Ok(candidate_offsets)
     }
 
     pub(crate) fn records_at_offsets_with_migration<I>(
@@ -694,7 +776,7 @@ impl Drawer {
         self.record_count = self.record_count.saturating_sub(1);
         self.mark_metadata_dirty();
 
-        let fields_to_clear = self.indexed_fields();
+        let fields_to_clear = self.unique_constraints.clone();
         for indexed_field in fields_to_clear {
             if let Some(field_value) = deleted_record
                 .get(&indexed_field)
@@ -723,6 +805,7 @@ impl Drawer {
                 )?;
             }
         }
+        self.invalidate_materialized_query_indexes()?;
 
         Ok(Some(deleted_record))
     }
@@ -751,7 +834,7 @@ impl Drawer {
         let mut index_file_offsets = HashMap::new();
         let mut data_block_index = HashMap::new();
 
-        let indexed_fields = self.indexed_fields();
+        let indexed_fields = self.unique_constraints.clone();
         for field in &indexed_fields {
             secondary_memory_index.insert(field.clone(), HashMap::new());
         }
@@ -840,6 +923,11 @@ impl Drawer {
         self.data_recycler_cache_initialized = true;
         self.index_recycler = Recycler::new();
         self.record_count = self.primary_memory_index.len();
+        if !self.materialized_secondary_indexes.is_empty() {
+            self.secondary_index_generation = self.secondary_index_generation.saturating_add(1);
+            self.materialized_secondary_indexes.clear();
+            self.validated_secondary_indexes.clear();
+        }
         self.persist_metadata()?;
 
         let data_bytes_after = compact_data.len() as u64;
@@ -932,6 +1020,7 @@ impl Drawer {
         match normalized_action.as_str() {
             "add" => self.add_schema_rule(&normalized_kind, field_name, payload.clone())?,
             "remove" => self.remove_schema_rule(&normalized_kind, field_name, &payload)?,
+            "rebuild" => self.rebuild_schema_rule(&normalized_kind, field_name)?,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -1094,19 +1183,60 @@ impl Drawer {
         self.unique_constraints.push(field_name.to_string());
         self.secondary_memory_index
             .insert(field_name.to_string(), field_index);
+        self.validated_secondary_indexes
+            .insert(field_name.to_string());
         Ok(())
     }
 
     fn add_secondary_index(&mut self, field_name: &str) -> std::io::Result<()> {
-        if self.secondary_memory_index.contains_key(field_name) {
-            return Ok(());
+        if !self
+            .unique_constraints
+            .iter()
+            .any(|constraint| constraint == field_name)
+        {
+            self.secondary_memory_index.remove(field_name);
         }
-
-        let field_index = self.build_secondary_index(field_name, false)?;
-        self.write_secondary_index_snapshot(field_name, &field_index)?;
-        self.secondary_memory_index
-            .insert(field_name.to_string(), field_index);
+        self.materialized_secondary_indexes.remove(field_name);
+        self.validated_secondary_indexes.remove(field_name);
         Ok(())
+    }
+
+    fn rebuild_schema_rule(&mut self, kind: &str, field_name: &str) -> std::io::Result<()> {
+        match kind {
+            "index" => {
+                if !self.schema_has_index(field_name)
+                    && !self
+                        .unique_constraints
+                        .iter()
+                        .any(|constraint| constraint == field_name)
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Index '{field_name}' is not declared"),
+                    ));
+                }
+
+                if self
+                    .unique_constraints
+                    .iter()
+                    .any(|constraint| constraint == field_name)
+                {
+                    let field_index = self.build_secondary_index(field_name, true)?;
+                    self.write_secondary_index_snapshot(field_name, &field_index)?;
+                    self.secondary_memory_index
+                        .insert(field_name.to_string(), field_index);
+                    self.validated_secondary_indexes
+                        .insert(field_name.to_string());
+                } else {
+                    self.materialize_query_index(field_name)?;
+                }
+                Ok(())
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Cannot rebuild schema type: {kind}"),
+            )),
+        }
     }
 
     fn build_secondary_index(
@@ -1149,6 +1279,19 @@ impl Drawer {
         field_name: &str,
         field_index: &HashMap<String, Vec<u64>>,
     ) -> std::io::Result<()> {
+        let field_prefix = format!("{field_name}:");
+        let stale_field_values: Vec<String> = self
+            .index_file_offsets
+            .keys()
+            .filter_map(|map_key| map_key.strip_prefix(&field_prefix))
+            .filter(|field_value| !field_index.contains_key(*field_value))
+            .map(ToOwned::to_owned)
+            .collect();
+
+        for field_value in stale_field_values {
+            self.tombstone_index_slot(field_name, &field_value)?;
+        }
+
         for (field_value, offsets) in field_index {
             self.write_index_log(
                 field_name,
@@ -1161,11 +1304,99 @@ impl Drawer {
         Ok(())
     }
 
+    fn index_can_satisfy_filter(&self, field_name: &str) -> bool {
+        self.unique_constraints
+            .iter()
+            .any(|constraint| constraint == field_name)
+            || self.schema_has_index(field_name)
+    }
+
+    fn query_index_is_materialized(&self, field_name: &str) -> bool {
+        self.materialized_secondary_indexes
+            .get(field_name)
+            .is_some_and(|generation| *generation == self.secondary_index_generation)
+            && self.secondary_memory_index.contains_key(field_name)
+    }
+
+    fn materialize_query_index(&mut self, field_name: &str) -> std::io::Result<()> {
+        if !self.schema_has_index(field_name) {
+            return Ok(());
+        }
+
+        let field_index = self.build_secondary_index(field_name, false)?;
+        self.write_secondary_index_snapshot(field_name, &field_index)?;
+        self.secondary_memory_index
+            .insert(field_name.to_string(), field_index);
+        self.materialized_secondary_indexes
+            .insert(field_name.to_string(), self.secondary_index_generation);
+        self.validated_secondary_indexes
+            .insert(field_name.to_string());
+        self.persist_metadata()
+    }
+
+    fn secondary_index_matches_authoritative(&self, field_name: &str) -> std::io::Result<bool> {
+        let expected_index = self.build_secondary_index(field_name, false)?;
+        let Some(actual_index) = self.secondary_memory_index.get(field_name) else {
+            return Ok(false);
+        };
+
+        Ok(Self::normalized_secondary_index(actual_index)
+            == Self::normalized_secondary_index(&expected_index))
+    }
+
+    fn normalized_secondary_index(
+        field_index: &HashMap<String, Vec<u64>>,
+    ) -> BTreeMap<String, Vec<u64>> {
+        field_index
+            .iter()
+            .map(|(field_value, offsets)| {
+                let mut offsets = offsets.clone();
+                offsets.sort_unstable();
+                offsets.dedup();
+                (field_value.clone(), offsets)
+            })
+            .collect()
+    }
+
+    fn invalidate_materialized_query_indexes(&mut self) -> std::io::Result<()> {
+        if self.materialized_secondary_indexes.is_empty() {
+            return Ok(());
+        }
+
+        let query_fields = self.query_index_fields();
+        let mut invalidated = false;
+        for field in query_fields {
+            if self
+                .unique_constraints
+                .iter()
+                .any(|unique| unique == &field)
+            {
+                continue;
+            }
+            invalidated |= self.materialized_secondary_indexes.remove(&field).is_some();
+            invalidated |= self.secondary_memory_index.remove(&field).is_some();
+            self.validated_secondary_indexes.remove(&field);
+        }
+
+        if invalidated {
+            self.secondary_index_generation = self.secondary_index_generation.saturating_add(1);
+            self.persist_metadata()?;
+        }
+
+        Ok(())
+    }
+
+    fn query_index_fields(&self) -> Vec<String> {
+        Self::schema_extension_fields(self.schema.as_ref(), "indexes")
+    }
+
     fn clear_unique_constraint(&mut self, field_name: &str) -> std::io::Result<()> {
         self.unique_constraints
             .retain(|constraint| constraint != field_name);
 
         if self.schema_has_index(field_name) {
+            self.materialized_secondary_indexes
+                .insert(field_name.to_string(), self.secondary_index_generation);
             return Ok(());
         }
 
@@ -1185,6 +1416,8 @@ impl Drawer {
     }
 
     fn clear_secondary_index_entries(&mut self, field_name: &str) -> std::io::Result<()> {
+        self.materialized_secondary_indexes.remove(field_name);
+        self.validated_secondary_indexes.remove(field_name);
         if let Some(field_map) = self.secondary_memory_index.remove(field_name) {
             for field_value in field_map.keys() {
                 self.tombstone_index_slot(field_name, field_value)?;
@@ -1270,20 +1503,6 @@ impl Drawer {
         Self::schema_extension_fields(self.schema.as_ref(), "indexes")
             .iter()
             .any(|field| field == field_name)
-    }
-
-    fn indexed_fields(&self) -> Vec<String> {
-        Self::indexed_fields_from(&self.unique_constraints, self.schema.as_ref())
-    }
-
-    fn indexed_fields_from(unique_constraints: &[String], schema: Option<&Value>) -> Vec<String> {
-        let mut fields = unique_constraints.to_vec();
-        for field in Self::schema_extension_fields(schema, "indexes") {
-            if !fields.contains(&field) {
-                fields.push(field);
-            }
-        }
-        fields
     }
 
     fn schema_extension_fields(schema: Option<&Value>, bucket: &str) -> Vec<String> {
@@ -2334,6 +2553,8 @@ impl Drawer {
             self.delete_rules.clone(),
             self.cascade_delete_rules.clone(),
             self.schema.clone(),
+            self.secondary_index_generation,
+            self.materialized_secondary_indexes.clone(),
         );
         metadata.persist(&self.meta_file_path)?;
         self.metadata_dirty = false;

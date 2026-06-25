@@ -1189,7 +1189,7 @@ impl WardrobeEngine {
             Vec::new(),
         )? {
             let mut drawer = Self::write_lock(&drawer)?;
-            if let Some(offsets) = drawer.indexed_candidate_offsets(filter_map) {
+            if let Some(offsets) = drawer.indexed_candidate_offsets(filter_map)? {
                 drawer.records_at_offsets_with_migration(offsets)?
             } else {
                 drawer.find_all_records_with_migration()?
@@ -1254,7 +1254,7 @@ impl WardrobeEngine {
             Vec::new(),
         )? {
             let mut drawer = Self::write_lock(&drawer)?;
-            if let Some(offsets) = drawer.indexed_candidate_offsets(filter_map) {
+            if let Some(offsets) = drawer.indexed_candidate_offsets(filter_map)? {
                 offsets.len()
             } else {
                 drawer
@@ -1716,7 +1716,7 @@ impl WardrobeEngine {
                 mapped_by.to_string(),
                 Value::String(parent_pointer.to_string()),
             );
-            if let Some(offsets) = drawer.indexed_candidate_offsets(&filter_map) {
+            if let Some(offsets) = drawer.indexed_candidate_offsets(&filter_map)? {
                 drawer.records_at_offsets_with_migration(offsets)?
             } else {
                 drawer.find_all_records_with_migration()?
