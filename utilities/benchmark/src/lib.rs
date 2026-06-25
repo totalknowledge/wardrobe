@@ -797,6 +797,7 @@ impl WardrobeTarget {
         let engine = Arc::new(WardrobeEngine::open(path.to_string_lossy().as_ref())?);
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
         let handle =
             thread::spawn(move || wardrobe_server::serve_tcp_listener(listener, engine, Some(1)));
         let runner =

@@ -3,8 +3,8 @@ use std::io::Write;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
-use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
     Command, CommandResult, ProtocolFrame, ProtocolOpcode, StorageCoordinate, WardrobeClient,
     WardrobeEngine,
@@ -17,6 +17,17 @@ fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
         .expect("system time should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("wardrobe_server_{test_name}_{nanos}"))
+}
+
+fn spawn_test_tcp_server(
+    listener: TcpListener,
+    engine: Arc<WardrobeEngine>,
+    connection_pool_limit: Option<usize>,
+) -> JoinHandle<std::io::Result<()>> {
+    listener
+        .set_nonblocking(true)
+        .expect("test listener should switch to nonblocking mode");
+    thread::spawn(move || serve_tcp_listener(listener, engine, connection_pool_limit))
 }
 
 fn write_command(stream: &mut TcpStream, command: &Command) {
@@ -74,7 +85,7 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
     let address = listener.local_addr().expect("listener address should read");
     let server = {
         let engine = Arc::clone(&engine);
-        thread::spawn(move || serve_tcp_listener(listener, engine, Some(1)))
+        spawn_test_tcp_server(listener, engine, Some(1))
     };
 
     let client =
@@ -110,6 +121,61 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
 }
 
 #[test]
+fn tcp_connection_pool_limit_does_not_terminate_listener() {
+    let storage_directory = temp_storage_directory("tcp_pool_limit_keeps_listener_alive");
+    let engine =
+        Arc::new(WardrobeEngine::open(storage_directory.to_string_lossy().as_ref()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener.local_addr().expect("listener address should read");
+    let server = {
+        let engine = Arc::clone(&engine);
+        spawn_test_tcp_server(listener, engine, Some(1))
+    };
+
+    let mut first = TcpStream::connect(address).expect("first client should connect");
+    let mut second = TcpStream::connect(address).expect("second client should queue");
+    second
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("second client read timeout should be configured");
+
+    write_command(
+        &mut first,
+        &Command::Upsert {
+            drawer_name: "gem".to_string(),
+            payload: json!({ "_id": "first", "element": "Fire" }),
+        },
+    );
+    assert!(matches!(read_result(&mut first), CommandResult::Pointer(_)));
+
+    first
+        .shutdown(Shutdown::Both)
+        .expect("first stream should close");
+
+    write_command(
+        &mut second,
+        &Command::Upsert {
+            drawer_name: "gem".to_string(),
+            payload: json!({ "_id": "second", "element": "Water" }),
+        },
+    );
+    assert!(matches!(
+        read_result(&mut second),
+        CommandResult::Pointer(_)
+    ));
+    second
+        .shutdown(Shutdown::Both)
+        .expect("second stream should close");
+
+    server
+        .join()
+        .expect("server thread should finish")
+        .expect("server should finish cleanly");
+
+    assert_eq!(engine.count("gem", None, None).expect("gem count"), 2);
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn tcp_daemon_handles_multiple_clients_concurrently() {
     let storage_directory = temp_storage_directory("tcp_handles_multiple_clients");
     let engine =
@@ -118,7 +184,7 @@ fn tcp_daemon_handles_multiple_clients_concurrently() {
     let address = listener.local_addr().expect("listener address should read");
     let server = {
         let engine = Arc::clone(&engine);
-        thread::spawn(move || serve_tcp_listener(listener, engine, Some(2)))
+        spawn_test_tcp_server(listener, engine, Some(2))
     };
 
     let first = thread::spawn(move || {
@@ -157,7 +223,7 @@ fn tcp_daemon_routes_scoped_commands_and_maintenance_frames() {
     let address = listener.local_addr().expect("listener address should read");
     let server = {
         let engine = Arc::clone(&engine);
-        thread::spawn(move || serve_tcp_listener(listener, engine, Some(1)))
+        spawn_test_tcp_server(listener, engine, Some(1))
     };
 
     let coordinate = StorageCoordinate::new("tenant_a", "prod", "core");
@@ -218,7 +284,7 @@ fn tcp_daemon_routes_full_cli_command_matrix() {
     let address = listener.local_addr().expect("listener address should read");
     let server = {
         let engine = Arc::clone(&engine);
-        thread::spawn(move || serve_tcp_listener(listener, engine, Some(1)))
+        spawn_test_tcp_server(listener, engine, Some(1))
     };
 
     let client =
@@ -349,7 +415,7 @@ fn malformed_frame_drops_only_that_client_channel() {
     let address = listener.local_addr().expect("listener address should read");
     let server = {
         let engine = Arc::clone(&engine);
-        thread::spawn(move || serve_tcp_listener(listener, engine, Some(2)))
+        spawn_test_tcp_server(listener, engine, Some(2))
     };
 
     {
@@ -406,7 +472,7 @@ fn run_returns_error_when_no_listeners_enabled() {
         check_only: false,
         tcp_bind: None,
         unix_socket: None,
-        max_connections: None,
+        connection_pool_limit: None,
     };
     let res = wardrobe_server::run(cfg);
     assert!(res.is_err());
@@ -471,7 +537,7 @@ fn run_execution_with_check_only_flag() {
         check_only: true,
         tcp_bind: None,
         unix_socket: None,
-        max_connections: None,
+        connection_pool_limit: None,
     };
     assert!(wardrobe_server::run(cfg).is_ok());
     let _ = std::fs::remove_dir_all(storage_directory);
@@ -485,7 +551,7 @@ fn run_execution_unsupported_unix_platform_guard() {
         check_only: false,
         tcp_bind: None,
         unix_socket: Some(std::path::PathBuf::from("unsupported.sock")),
-        max_connections: None,
+        connection_pool_limit: None,
     };
     assert!(wardrobe_server::run(cfg).is_err());
 }

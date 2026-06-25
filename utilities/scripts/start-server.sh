@@ -24,7 +24,7 @@ else
     CPU_CORES=4
 fi
 
-MAX_CONN=$(( (CPU_CORES + 1) / 2 ))
+CONNECTION_POOL_LIMIT=$(( (CPU_CORES + 1) / 2 ))
 
 echo "========================================================================="
 echo " STARTING WARDROBE DATABASE SERVER"
@@ -32,11 +32,11 @@ echo "========================================================================="
 echo " Storage Root   : $(cd "$STORAGE_ROOT" && pwd)"
 echo " Listen Address  : wardrobe://$SERVER_HOST:$SERVER_PORT"
 echo " CPU Cores Found : $CPU_CORES"
-echo " Max Connections : $MAX_CONN (0.5 * Cores, rounded up)"
+echo " Connection Pool : $CONNECTION_POOL_LIMIT active workers (0.5 * Cores, rounded up)"
 echo "========================================================================="
 echo ""
 
 exec "$SERVER_BIN" \
     --data-dir "$STORAGE_ROOT" \
     --tcp-bind "$SERVER_HOST:$SERVER_PORT" \
-    --max-connections "$MAX_CONN"
+    --connection-pool-limit "$CONNECTION_POOL_LIMIT"

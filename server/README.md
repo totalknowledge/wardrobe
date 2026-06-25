@@ -34,6 +34,12 @@ This starts the daemon with:
 - storage root at `./data`
 - TCP listener on `127.0.0.1:24842`
 
+To cap simultaneously active connection workers without shutting down the listener:
+
+```text
+cargo run -p wardrobe-server -- --data-dir ./data --connection-pool-limit 16
+```
+
 For a quick startup validation without staying resident:
 
 ```text

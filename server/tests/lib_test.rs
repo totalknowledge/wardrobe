@@ -20,14 +20,14 @@ fn server_config_explicit_valid_flags() {
         "./alt_dir".to_string(),
         "--tcp-bind".to_string(),
         "127.0.0.1:9999".to_string(),
-        "--max-connections".to_string(),
+        "--connection-pool-limit".to_string(),
         "42".to_string(),
         "--check".to_string(),
     ];
     let cfg = ServerConfig::from_args(args).unwrap();
     assert_eq!(cfg.data_dir, "./alt_dir");
     assert_eq!(cfg.tcp_bind, Some("127.0.0.1:9999".to_string()));
-    assert_eq!(cfg.max_connections, Some(42));
+    assert_eq!(cfg.connection_pool_limit, Some(42));
     assert!(cfg.check_only);
 }
 
@@ -48,12 +48,12 @@ fn server_config_missing_payload_args() {
     assert!(ServerConfig::from_args(vec!["--data-dir".to_string()]).is_err());
     assert!(ServerConfig::from_args(vec!["--tcp-bind".to_string()]).is_err());
     assert!(ServerConfig::from_args(vec!["--unix-socket".to_string()]).is_err());
-    assert!(ServerConfig::from_args(vec!["--max-connections".to_string()]).is_err());
+    assert!(ServerConfig::from_args(vec!["--connection-pool-limit".to_string()]).is_err());
 }
 
 #[test]
-fn server_config_invalid_max_connections_zero() {
-    let args = vec!["--max-connections".to_string(), "0".to_string()];
+fn server_config_invalid_connection_pool_limit_zero() {
+    let args = vec!["--connection-pool-limit".to_string(), "0".to_string()];
     let res = ServerConfig::from_args(args);
     assert!(res.is_err());
     assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
@@ -87,8 +87,19 @@ fn server_config_from_args_unknown_arg_errors() {
 }
 
 #[test]
-fn server_config_parse_max_connections_invalid_value() {
-    let args = vec!["--max-connections".to_string(), "not-a-number".to_string()];
+fn server_config_rejects_removed_max_connections_flag() {
+    let args = vec!["--max-connections".to_string(), "7".to_string()];
+    let res = ServerConfig::from_args(args);
+    assert!(res.is_err());
+    assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn server_config_parse_connection_pool_limit_invalid_value() {
+    let args = vec![
+        "--connection-pool-limit".to_string(),
+        "not-a-number".to_string(),
+    ];
     let res = ServerConfig::from_args(args);
     assert!(res.is_err());
     assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);

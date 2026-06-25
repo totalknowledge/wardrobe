@@ -8,7 +8,7 @@ DATA_VOLUME="${WARDROBE_BENCH_WARDROBE_VOLUME:-wardrobe-benchmark-wardrobe-data}
 TARGET_VOLUME="${WARDROBE_BENCH_WARDROBE_TARGET_VOLUME:-wardrobe-benchmark-wardrobe-target}"
 CARGO_REGISTRY_VOLUME="${WARDROBE_BENCH_CARGO_REGISTRY_VOLUME:-wardrobe-benchmark-cargo-registry}"
 CARGO_GIT_VOLUME="${WARDROBE_BENCH_CARGO_GIT_VOLUME:-wardrobe-benchmark-cargo-git}"
-MAX_CONNECTIONS="${WARDROBE_BENCH_WARDROBE_MAX_CONNECTIONS:-16}"
+CONNECTION_POOL_LIMIT="${WARDROBE_BENCH_WARDROBE_CONNECTION_POOL_LIMIT:-16}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -41,7 +41,7 @@ echo "Data volume         : $DATA_VOLUME"
 echo "Target volume       : $TARGET_VOLUME"
 echo "Cargo registry cache: $CARGO_REGISTRY_VOLUME"
 echo "Cargo git cache     : $CARGO_GIT_VOLUME"
-echo "Max connections     : $MAX_CONNECTIONS"
+echo "Connection pool     : $CONNECTION_POOL_LIMIT active workers"
 
 if container_running; then
     echo "Wardrobe benchmark container is already running: $CONTAINER_NAME"
@@ -52,7 +52,7 @@ else
 
     log_step "Creating Wardrobe container"
     echo "Docker may pull $IMAGE if it is not available locally."
-    echo "Server command: cargo run --release -p wardrobe-server -- --data-dir /data/wardrobe --tcp-bind 0.0.0.0:24842 --max-connections $MAX_CONNECTIONS"
+    echo "Server command: cargo run --release -p wardrobe-server -- --data-dir /data/wardrobe --tcp-bind 0.0.0.0:24842 --connection-pool-limit $CONNECTION_POOL_LIMIT"
     MSYS_NO_PATHCONV=1 docker run -d \
         --name "$CONTAINER_NAME" \
         -w /workspace \
@@ -63,7 +63,7 @@ else
         -v "$CARGO_REGISTRY_VOLUME:/usr/local/cargo/registry" \
         -v "$CARGO_GIT_VOLUME:/usr/local/cargo/git" \
         "$IMAGE" \
-        cargo run --release -p wardrobe-server -- --data-dir /data/wardrobe --tcp-bind 0.0.0.0:24842 --max-connections "$MAX_CONNECTIONS"
+        cargo run --release -p wardrobe-server -- --data-dir /data/wardrobe --tcp-bind 0.0.0.0:24842 --connection-pool-limit "$CONNECTION_POOL_LIMIT"
 fi
 
 log_step "Waiting for Wardrobe TCP server to start"

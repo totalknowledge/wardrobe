@@ -1,8 +1,9 @@
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use wardrobe_core::{Command, DEFAULT_NETWORK_PORT, ProtocolFrame, ProtocolOpcode, WardrobeEngine};
 
 #[cfg(unix)]
@@ -14,7 +15,7 @@ pub struct ServerConfig {
     pub check_only: bool,
     pub tcp_bind: Option<String>,
     pub unix_socket: Option<PathBuf>,
-    pub max_connections: Option<usize>,
+    pub connection_pool_limit: Option<usize>,
 }
 
 impl ServerConfig {
@@ -26,7 +27,7 @@ impl ServerConfig {
         let mut check_only = false;
         let mut tcp_bind = Some(format!("127.0.0.1:{DEFAULT_NETWORK_PORT}"));
         let mut unix_socket = None;
-        let mut max_connections = None;
+        let mut connection_pool_limit = None;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -56,26 +57,8 @@ impl ServerConfig {
                         )
                     })?));
                 }
-                "--max-connections" => {
-                    let raw = args.next().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "--max-connections requires a positive integer",
-                        )
-                    })?;
-                    let parsed = raw.parse::<usize>().map_err(|error| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --max-connections value '{raw}': {error}"),
-                        )
-                    })?;
-                    if parsed == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "--max-connections must be greater than zero",
-                        ));
-                    }
-                    max_connections = Some(parsed);
+                "--connection-pool-limit" => {
+                    connection_pool_limit = Some(parse_connection_pool_limit(&mut args, &arg)?);
                 }
                 "--check" => check_only = true,
                 "--help" | "-h" => {
@@ -96,7 +79,7 @@ impl ServerConfig {
             check_only,
             tcp_bind,
             unix_socket,
-            max_connections,
+            connection_pool_limit,
         })
     }
 }
@@ -107,7 +90,7 @@ pub fn print_help() {
     println!("  --tcp-bind <addr:port>     Bind TCP listener, default 127.0.0.1:24842");
     println!("  --no-tcp                   Disable TCP listener");
     println!("  --unix-socket <path>       Bind Unix domain socket listener on Unix");
-    println!("  --max-connections <count>  Stop after accepting count connections");
+    println!("  --connection-pool-limit <count>  Maximum active worker connections");
     println!("  --check                    Initialize the daemon and exit without blocking");
 }
 
@@ -138,9 +121,9 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
         let local_addr = listener.local_addr()?;
         println!("Wardrobe daemon listening on TCP: {local_addr}");
         let engine = Arc::clone(&engine);
-        let max_connections = config.max_connections;
+        let connection_pool_limit = config.connection_pool_limit;
         listener_threads.push(thread::spawn(move || {
-            serve_tcp_listener(listener, engine, max_connections)
+            serve_tcp_listener(listener, engine, connection_pool_limit)
         }));
     }
 
@@ -156,9 +139,9 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
                 socket_path.display()
             );
             let engine = Arc::clone(&engine);
-            let max_connections = config.max_connections;
+            let connection_pool_limit = config.connection_pool_limit;
             listener_threads.push(thread::spawn(move || {
-                serve_unix_listener(listener, engine, max_connections)
+                serve_unix_listener(listener, engine, connection_pool_limit)
             }));
         }
 
@@ -184,46 +167,70 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
 pub fn serve_tcp_listener(
     listener: TcpListener,
     engine: Arc<WardrobeEngine>,
-    max_connections: Option<usize>,
+    connection_pool_limit: Option<usize>,
 ) -> io::Result<()> {
-    let mut handlers = Vec::new();
+    let connection_pool = connection_pool_limit.map(ConnectionPool::new);
+    let mut idle_polls = 0usize;
 
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let engine = Arc::clone(&engine);
-        handlers.push(thread::spawn(move || {
-            handle_protocol_stream(engine, stream)
-        }));
-
-        if max_connections.is_some_and(|limit| handlers.len() >= limit) {
-            break;
+    loop {
+        let permit = connection_pool.as_ref().map(ConnectionPool::acquire);
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
+                idle_polls = 0;
+                spawn_connection_handler(Arc::clone(&engine), stream, permit);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                drop(permit);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                drop(permit);
+                if listener_is_idle(connection_pool.as_ref(), &mut idle_polls) {
+                    return Ok(());
+                }
+                thread::sleep(nonblocking_idle_sleep());
+            }
+            Err(error) => {
+                drop(permit);
+                return Err(error);
+            }
         }
     }
-
-    join_handlers(handlers)
 }
 
 #[cfg(unix)]
 pub fn serve_unix_listener(
     listener: UnixListener,
     engine: Arc<WardrobeEngine>,
-    max_connections: Option<usize>,
+    connection_pool_limit: Option<usize>,
 ) -> io::Result<()> {
-    let mut handlers = Vec::new();
+    let connection_pool = connection_pool_limit.map(ConnectionPool::new);
+    let mut idle_polls = 0usize;
 
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let engine = Arc::clone(&engine);
-        handlers.push(thread::spawn(move || {
-            handle_protocol_stream(engine, stream)
-        }));
-
-        if max_connections.is_some_and(|limit| handlers.len() >= limit) {
-            break;
+    loop {
+        let permit = connection_pool.as_ref().map(ConnectionPool::acquire);
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
+                idle_polls = 0;
+                spawn_connection_handler(Arc::clone(&engine), stream, permit);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                drop(permit);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                drop(permit);
+                if listener_is_idle(connection_pool.as_ref(), &mut idle_polls) {
+                    return Ok(());
+                }
+                thread::sleep(nonblocking_idle_sleep());
+            }
+            Err(error) => {
+                drop(permit);
+                return Err(error);
+            }
         }
     }
-
-    join_handlers(handlers)
 }
 
 pub fn handle_protocol_stream<S>(engine: Arc<WardrobeEngine>, mut stream: S) -> io::Result<()>
@@ -296,14 +303,130 @@ fn join_listener(handle: JoinHandle<io::Result<()>>) -> io::Result<()> {
         .map_err(|_| io::Error::other("Wardrobe listener thread panicked"))?
 }
 
-fn join_handlers(handlers: Vec<JoinHandle<io::Result<()>>>) -> io::Result<()> {
-    for handle in handlers {
-        handle
-            .join()
-            .map_err(|_| io::Error::other("Wardrobe connection handler thread panicked"))??;
+fn parse_connection_pool_limit(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> io::Result<usize> {
+    let raw = args.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} requires a positive integer"),
+        )
+    })?;
+    let parsed = raw.parse::<usize>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid {flag} value '{raw}': {error}"),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} must be greater than zero"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn spawn_connection_handler<S>(
+    engine: Arc<WardrobeEngine>,
+    stream: S,
+    permit: Option<ConnectionPoolPermit>,
+) where
+    S: Read + Write + Send + 'static,
+{
+    thread::spawn(move || {
+        let _permit = permit;
+        if let Err(error) = handle_protocol_stream(engine, stream) {
+            eprintln!("Wardrobe connection handler failed: {error}");
+        }
+    });
+}
+
+fn listener_is_idle(connection_pool: Option<&ConnectionPool>, idle_polls: &mut usize) -> bool {
+    if connection_pool.is_none_or(ConnectionPool::is_idle) {
+        *idle_polls += 1;
+    } else {
+        *idle_polls = 0;
     }
 
-    Ok(())
+    *idle_polls >= nonblocking_idle_poll_limit()
+}
+
+fn nonblocking_idle_sleep() -> Duration {
+    Duration::from_millis(10)
+}
+
+fn nonblocking_idle_poll_limit() -> usize {
+    100
+}
+
+#[derive(Clone)]
+struct ConnectionPool {
+    inner: Arc<ConnectionPoolState>,
+    limit: usize,
+}
+
+struct ConnectionPoolState {
+    active_connections: Mutex<usize>,
+    slot_available: Condvar,
+}
+
+struct ConnectionPoolPermit {
+    pool: ConnectionPool,
+}
+
+impl ConnectionPool {
+    fn new(limit: usize) -> Self {
+        Self {
+            inner: Arc::new(ConnectionPoolState {
+                active_connections: Mutex::new(0),
+                slot_available: Condvar::new(),
+            }),
+            limit,
+        }
+    }
+
+    fn acquire(&self) -> ConnectionPoolPermit {
+        let mut active_connections = self
+            .inner
+            .active_connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        while *active_connections >= self.limit {
+            active_connections = self
+                .inner
+                .slot_available
+                .wait(active_connections)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+
+        *active_connections += 1;
+        ConnectionPoolPermit { pool: self.clone() }
+    }
+
+    fn is_idle(&self) -> bool {
+        *self
+            .inner
+            .active_connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            == 0
+    }
+}
+
+impl Drop for ConnectionPoolPermit {
+    fn drop(&mut self) {
+        let mut active_connections = self
+            .pool
+            .inner
+            .active_connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active_connections = active_connections.saturating_sub(1);
+        self.pool.inner.slot_available.notify_one();
+    }
 }
 
 #[cfg(test)]
@@ -321,8 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn server_config_invalid_max_connections_zero() {
-        let args = vec!["--max-connections".to_string(), "0".to_string()];
+    fn server_config_invalid_connection_pool_limit_zero() {
+        let args = vec!["--connection-pool-limit".to_string(), "0".to_string()];
         let res = ServerConfig::from_args(args);
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
@@ -354,8 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn server_config_parse_max_connections_invalid_value() {
-        let args = vec!["--max-connections".to_string(), "not-a-number".to_string()];
+    fn server_config_parse_connection_pool_limit_invalid_value() {
+        let args = vec![
+            "--connection-pool-limit".to_string(),
+            "not-a-number".to_string(),
+        ];
         let res = ServerConfig::from_args(args);
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
