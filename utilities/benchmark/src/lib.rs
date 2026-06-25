@@ -837,24 +837,35 @@ impl WardrobeTarget {
         })
     }
 
-    fn find_entity_record(&mut self, entity_id: &str) -> io::Result<Value> {
-        expect_record(self.execute_scoped(Command::FindById {
-            pointer: format!("@{ENTITY_DRAWER}:{entity_id}"),
-        })?)?
-        .ok_or_else(|| {
+    fn find_entity_record(&mut self, entity_reference: &str) -> io::Result<Value> {
+        let pointer = if entity_reference.starts_with('@') {
+            entity_reference.to_string()
+        } else {
+            format!("@{ENTITY_DRAWER}:{entity_reference}")
+        };
+        expect_record(self.execute_scoped(Command::FindById { pointer })?)?.ok_or_else(|| {
             Error::new(
                 ErrorKind::NotFound,
-                format!("entity record '{entity_id}' was not found"),
+                format!("entity record '{entity_reference}' was not found"),
             )
         })
     }
 
+    fn materialize_entity_field(&mut self, record: &Value, field_name: &str) -> io::Result<Value> {
+        match record.get(field_name) {
+            Some(Value::Object(entity)) => Ok(Value::Object(entity.clone())),
+            Some(Value::String(entity_reference)) => self.find_entity_record(entity_reference),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("record is missing a materializable {field_name}"),
+            )),
+        }
+    }
+
     fn materialize_book_records(&mut self, mut records: Vec<Value>) -> io::Result<Vec<Value>> {
         for record in &mut records {
-            let author_id = record_string_field(record, "author_id")?;
-            let editor_id = record_string_field(record, "editor_id")?;
-            let author = self.find_entity_record(&author_id)?;
-            let editor = self.find_entity_record(&editor_id)?;
+            let author = self.materialize_entity_field(record, "author_id")?;
+            let editor = self.materialize_entity_field(record, "editor_id")?;
             let Some(record_map) = record.as_object_mut() else {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -865,6 +876,29 @@ impl WardrobeTarget {
             record_map.insert("editor".to_string(), editor);
         }
         Ok(records)
+    }
+
+    fn count_book_relationship_matches(&mut self, entity_reference: &str) -> io::Result<usize> {
+        expect_count(self.execute_scoped(Command::Count {
+            drawer_name: BOOK_DRAWER.to_string(),
+            filter: Some(json!({
+                "author_id": entity_reference,
+                "editor_id": entity_reference,
+            })),
+            modifiers: None,
+        })?)
+    }
+
+    fn traversal_uses_pointer_relationships(
+        &mut self,
+        profile: &LibraryProfile,
+    ) -> io::Result<bool> {
+        let entity_id = profile.traversal_entity_id(0);
+        if self.count_book_relationship_matches(&entity_id)? > 0 {
+            return Ok(false);
+        }
+        let entity_pointer = format!("@{ENTITY_DRAWER}:{entity_id}");
+        Ok(self.count_book_relationship_matches(&entity_pointer)? > 0)
     }
 }
 
@@ -912,33 +946,39 @@ impl BenchmarkTarget for WardrobeTarget {
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64> {
-        for index in 0..profile.entity_records {
-            let payload = profile.entity_payload(index);
-            recorder.measure(1, || {
-                expect_pointer(self.execute_scoped(Command::Upsert {
+        for (start, end) in chunk_ranges(profile.entity_records, profile.chunk_size) {
+            let records = (start..end)
+                .map(|index| profile.entity_payload(index))
+                .collect::<Vec<_>>();
+            recorder.measure((end - start) as u64, || {
+                expect_pointers(self.execute_scoped(Command::BulkUpsert {
                     drawer_name: ENTITY_DRAWER.to_string(),
-                    payload,
+                    records,
+                    atomic: true,
                 })?)
             })?;
             report_record_progress(
                 progress,
                 &format!("{}: entities ingested", self.name()),
-                index + 1,
+                end,
                 profile.entity_records,
             );
         }
-        for index in 0..profile.book_records {
-            let payload = profile.book_payload(index);
-            recorder.measure(1, || {
-                expect_pointer(self.execute_scoped(Command::Upsert {
+        for (start, end) in chunk_ranges(profile.book_records, profile.chunk_size) {
+            let records = (start..end)
+                .map(|index| profile.book_payload(index))
+                .collect::<Vec<_>>();
+            recorder.measure((end - start) as u64, || {
+                expect_pointers(self.execute_scoped(Command::BulkUpsert {
                     drawer_name: BOOK_DRAWER.to_string(),
-                    payload,
+                    records,
+                    atomic: true,
                 })?)
             })?;
             report_record_progress(
                 progress,
                 &format!("{}: books ingested", self.name()),
-                index + 1,
+                end,
                 profile.book_records,
             );
         }
@@ -981,14 +1021,30 @@ impl BenchmarkTarget for WardrobeTarget {
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64> {
+        let use_pointer_relationships = self.traversal_uses_pointer_relationships(profile)?;
+        let relationship_filter_mode = if use_pointer_relationships {
+            "pointer references"
+        } else {
+            "plain entity ids"
+        };
+        progress.log(format!(
+            "{}: traversal filters using {}",
+            self.name(),
+            relationship_filter_mode
+        ));
         for query_index in 0..profile.traversal_queries {
             let entity_id = profile.traversal_entity_id(query_index);
+            let entity_reference = if use_pointer_relationships {
+                format!("@{ENTITY_DRAWER}:{entity_id}")
+            } else {
+                entity_id
+            };
             recorder.measure(1, || {
                 let records = expect_records(self.execute_scoped(Command::FindByFilter {
                     drawer_name: BOOK_DRAWER.to_string(),
                     filter: json!({
-                        "author_id": entity_id,
-                        "editor_id": entity_id,
+                        "author_id": entity_reference,
+                        "editor_id": entity_reference,
                     }),
                     modifiers: None,
                 })?)?;
@@ -2007,10 +2063,10 @@ fn expect_inventory(result: CommandResult) -> io::Result<()> {
     }
 }
 
-fn expect_pointer(result: CommandResult) -> io::Result<()> {
+fn expect_pointers(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::Pointer(_) => Ok(()),
-        other => unexpected_wardrobe_result("pointer", other),
+        CommandResult::Pointers(_) => Ok(()),
+        other => unexpected_wardrobe_result("pointers", other),
     }
 }
 
@@ -2018,6 +2074,13 @@ fn expect_records(result: CommandResult) -> io::Result<Vec<Value>> {
     match result {
         CommandResult::Records(records) => Ok(records),
         other => unexpected_wardrobe_result("records", other),
+    }
+}
+
+fn expect_count(result: CommandResult) -> io::Result<usize> {
+    match result {
+        CommandResult::Count(count) => Ok(count),
+        other => unexpected_wardrobe_result("count", other),
     }
 }
 
@@ -2066,19 +2129,6 @@ fn pointer_from_record(record: &Value, drawer: &str) -> io::Result<String> {
     } else {
         Ok(format!("@{drawer}:{id}"))
     }
-}
-
-fn record_string_field(record: &Value, field_name: &str) -> io::Result<String> {
-    record
-        .get(field_name)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("record is missing a string {field_name}"),
-            )
-        })
 }
 
 fn chunk_ranges(total: usize, chunk_size: usize) -> Vec<(usize, usize)> {

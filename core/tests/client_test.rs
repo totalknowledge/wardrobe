@@ -223,6 +223,20 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             CommandResult::Pointer("@gem:network_fire".to_string()),
         ),
         (
+            Command::BulkUpsert {
+                drawer_name: "gem".to_string(),
+                records: vec![
+                    json!({"_id": "network_water", "element": "Water"}),
+                    json!({"_id": "network_earth", "element": "Earth"}),
+                ],
+                atomic: true,
+            },
+            CommandResult::Pointers(vec![
+                "@gem:network_water".to_string(),
+                "@gem:network_earth".to_string(),
+            ]),
+        ),
+        (
             Command::FindAll {
                 drawer_name: "gem".to_string(),
             },
@@ -317,6 +331,22 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             .upsert("gem", json!({"_id": "network_fire", "element": "Fire"}))
             .expect("upsert failed"),
         "@gem:network_fire"
+    );
+    assert_eq!(
+        client
+            .bulk_upsert(
+                "gem",
+                vec![
+                    json!({"_id": "network_water", "element": "Water"}),
+                    json!({"_id": "network_earth", "element": "Earth"}),
+                ],
+                true
+            )
+            .expect("bulk upsert failed"),
+        vec![
+            "@gem:network_water".to_string(),
+            "@gem:network_earth".to_string()
+        ]
     );
     assert_eq!(
         client.find_all("gem").expect("find failed"),

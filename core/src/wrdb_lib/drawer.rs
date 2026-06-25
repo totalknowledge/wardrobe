@@ -101,6 +101,12 @@ impl DrawerMetadata {
 const DATA_BLOCK_STATUS_DEAD: u8 = 0;
 const DATA_BLOCK_STATUS_LIVE: u8 = 1;
 
+#[derive(Clone, Copy)]
+enum MetadataPersistence {
+    Immediate,
+    Deferred,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DataBlockIndexEntry {
     payload_len: usize,
@@ -371,6 +377,38 @@ impl Drawer {
     }
 
     pub fn upsert_record(&mut self, record: Value) -> std::io::Result<Result<(), String>> {
+        self.upsert_record_internal(record, MetadataPersistence::Immediate)
+            .map(|result| result.map(|_| ()))
+    }
+
+    pub fn upsert_records_atomic(
+        &mut self,
+        records: Vec<Value>,
+    ) -> std::io::Result<Result<(), String>> {
+        if let Err(validation_error) = self.validate_bulk_upsert_records(&records)? {
+            return Ok(Err(validation_error));
+        }
+
+        let mut metadata_dirty = false;
+        for record in records {
+            match self.upsert_record_internal(record, MetadataPersistence::Deferred)? {
+                Ok(is_new_record) => metadata_dirty |= is_new_record,
+                Err(validation_error) => return Ok(Err(validation_error)),
+            }
+        }
+
+        if metadata_dirty {
+            self.persist_metadata()?;
+        }
+
+        Ok(Ok(()))
+    }
+
+    fn upsert_record_internal(
+        &mut self,
+        record: Value,
+        metadata_persistence: MetadataPersistence,
+    ) -> std::io::Result<Result<bool, String>> {
         let primary_key_value = match record.get(&self.primary_key).and_then(|v| v.as_str()) {
             Some(val) => val.to_string(),
             None => {
@@ -492,7 +530,70 @@ impl Drawer {
 
         if is_new_record {
             self.record_count += 1;
-            self.persist_metadata()?;
+            if matches!(metadata_persistence, MetadataPersistence::Immediate) {
+                self.persist_metadata()?;
+            }
+        }
+
+        Ok(Ok(is_new_record))
+    }
+
+    fn validate_bulk_upsert_records(
+        &self,
+        records: &[Value],
+    ) -> std::io::Result<Result<(), String>> {
+        let mut batch_unique_values = HashMap::new();
+
+        for record in records {
+            let primary_key_value = match record.get(&self.primary_key).and_then(|v| v.as_str()) {
+                Some(val) => val.to_string(),
+                None => {
+                    return Ok(Err(format!(
+                        "Missing primary key field: {}",
+                        self.primary_key
+                    )));
+                }
+            };
+
+            if let Err(validation_error) = self.validate_schema(record) {
+                return Ok(Err(validation_error));
+            }
+
+            if let Some(validation_error) =
+                self.validate_relationship_constraints(record, &primary_key_value)?
+            {
+                return Ok(Err(validation_error));
+            }
+
+            let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
+            for unique_field in &self.unique_constraints {
+                let Some(field_value) = record.get(unique_field).and_then(Value::as_str) else {
+                    continue;
+                };
+
+                if let Some(field_map) = self.secondary_memory_index.get(unique_field) {
+                    if let Some(offsets) = field_map.get(field_value) {
+                        if offsets.iter().any(|&o| Some(o) != old_data_offset) {
+                            return Ok(Err(format!(
+                                "Unique constraint violation: Field '{}' with value '{}' already exists",
+                                unique_field, field_value
+                            )));
+                        }
+                    }
+                }
+
+                let batch_key = format!("{unique_field}\u{1f}{field_value}");
+                if let Some(previous_primary_key) =
+                    batch_unique_values.insert(batch_key, primary_key_value.clone())
+                {
+                    if previous_primary_key != primary_key_value {
+                        return Ok(Err(format!(
+                            "Unique constraint violation: Field '{}' with value '{}' already exists",
+                            unique_field, field_value
+                        )));
+                    }
+                }
+            }
         }
 
         Ok(Ok(()))

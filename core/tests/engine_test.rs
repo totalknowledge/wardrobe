@@ -4039,3 +4039,152 @@ fn us_066_binary_wal_logs_mutating_commands() {
     assert_eq!(routed_verification.entry_count, 1);
     assert_eq!(routed_verification.last_sequence, Some(1));
 }
+
+#[test]
+fn us_101_bulk_upsert_returns_ordered_pointers() {
+    let database = TempDatabase::new("us_101_bulk_upsert_ordered_pointers");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let result = engine
+        .execute_command(Command::BulkUpsert {
+            drawer_name: "gem".to_string(),
+            records: vec![
+                json!({"_id": "bulk_fire", "element": "Fire"}),
+                json!({"_id": "bulk_water", "element": "Water"}),
+            ],
+            atomic: true,
+        })
+        .expect("bulk upsert should succeed");
+
+    assert_eq!(
+        result,
+        CommandResult::Pointers(vec![
+            "@gem:bulk_fire".to_string(),
+            "@gem:bulk_water".to_string()
+        ])
+    );
+    assert_eq!(
+        engine
+            .count("gem", None, None)
+            .expect("count should succeed"),
+        2
+    );
+}
+
+#[test]
+fn us_101_bulk_upsert_normalizes_plain_relationship_ids() {
+    let database = TempDatabase::new("us_101_bulk_upsert_relationship_ids");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "book",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "author_id": {
+                    "type": "M:1",
+                    "target_drawer": "entity"
+                },
+                "editor_id": {
+                    "type": "M:1",
+                    "target_drawer": "entity"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .bulk_upsert(
+            "entity",
+            vec![
+                json!({"_id": "entity_00000000", "display_name": "Author"}),
+                json!({"_id": "entity_00000001", "display_name": "Editor"}),
+            ],
+            true,
+        )
+        .expect("entity batch should upsert");
+
+    let pointers = engine
+        .bulk_upsert(
+            "book",
+            vec![json!({
+                "_id": "book_00000000",
+                "title": "Bulk Relationship Book",
+                "author_id": "entity_00000000",
+                "editor_id": "entity_00000001"
+            })],
+            true,
+        )
+        .expect("book batch should normalize relationship ids");
+
+    assert_eq!(pointers, vec!["@book:book_00000000".to_string()]);
+    let book_records = drawer_records_from_disk(&database.path.join("book.drw"));
+    assert_eq!(book_records[0]["author_id"], "@entity:entity_00000000");
+    assert_eq!(book_records[0]["editor_id"], "@entity:entity_00000001");
+}
+
+#[test]
+fn us_101_atomic_bulk_upsert_rejects_invalid_batch_without_writes() {
+    let database = TempDatabase::new("us_101_atomic_bulk_upsert_rollback");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "gem",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {},
+            "delete_rules": {},
+            "cascade_delete_rules": {},
+            "schema": {
+                "type": "object",
+                "required": ["element"],
+                "properties": {
+                    "_id": { "type": "string" },
+                    "element": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let error = engine
+        .bulk_upsert(
+            "gem",
+            vec![
+                json!({"_id": "bulk_fire", "element": "Fire"}),
+                json!({"_id": "bulk_broken"}),
+            ],
+            true,
+        )
+        .expect_err("invalid atomic batch should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        engine
+            .count("gem", None, None)
+            .expect("count should succeed"),
+        0
+    );
+
+    drop(engine);
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
+    assert_eq!(
+        reopened
+            .count("gem", None, None)
+            .expect("count should succeed"),
+        0
+    );
+}

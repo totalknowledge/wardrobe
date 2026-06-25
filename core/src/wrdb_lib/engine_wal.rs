@@ -21,6 +21,12 @@ enum WalOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         drawer_namespace: Option<String>,
     },
+    BulkUpsert {
+        drawer_name: String,
+        records: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawer_namespace: Option<String>,
+    },
     DeleteById {
         pointer: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +56,13 @@ pub(crate) trait WalReplayExecutor {
         database_core: &RwLock<Database>,
         drawer_name: &str,
         payload: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<()>;
+
+    fn replay_bulk_upsert(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        records: Vec<Value>,
         context: ExecutionContext<'_>,
     ) -> Result<()>;
 
@@ -184,6 +197,24 @@ where
     run_transaction(database_core, operation, apply)
 }
 
+pub(crate) fn run_bulk_upsert_transaction<T, F>(
+    database_core: &RwLock<Database>,
+    drawer_name: &str,
+    records: &[Value],
+    context: ExecutionContext<'_>,
+    apply: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let operation = WalOperation::BulkUpsert {
+        drawer_name: drawer_name.to_string(),
+        records: records.to_vec(),
+        drawer_namespace: context.drawer_namespace.map(str::to_string),
+    };
+    run_transaction(database_core, operation, apply)
+}
+
 pub(crate) fn run_delete_transaction<T, F>(
     database_core: &RwLock<Database>,
     pointer: &str,
@@ -202,7 +233,7 @@ where
 
 fn command_operation(command: &Command) -> Option<DurableWalOperation> {
     match command {
-        Command::Upsert { .. } => Some(DurableWalOperation::Upsert),
+        Command::Upsert { .. } | Command::BulkUpsert { .. } => Some(DurableWalOperation::Upsert),
         Command::Delete { .. } => Some(DurableWalOperation::Delete),
         Command::Vacuum { .. } | Command::Migrate { .. } => Some(DurableWalOperation::Maintenance),
         Command::DefineDatabase { .. }
@@ -256,6 +287,16 @@ where
                 drawer_namespace: drawer_namespace.as_deref(),
             };
             E::replay_upsert(database_core, drawer_name, payload.clone(), context)?;
+        }
+        WalOperation::BulkUpsert {
+            drawer_name,
+            records,
+            drawer_namespace,
+        } => {
+            let context = ExecutionContext {
+                drawer_namespace: drawer_namespace.as_deref(),
+            };
+            E::replay_bulk_upsert(database_core, drawer_name, records.clone(), context)?;
         }
         WalOperation::DeleteById {
             pointer,

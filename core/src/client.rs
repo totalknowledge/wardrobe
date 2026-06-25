@@ -85,6 +85,27 @@ impl WardrobeClient {
         }
     }
 
+    pub fn bulk_upsert(
+        &self,
+        drawer_name: &str,
+        records: Vec<Value>,
+        atomic: bool,
+    ) -> Result<Vec<String>> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.bulk_upsert(drawer_name, records, atomic),
+            Driver::Network(driver) => expect_pointers(driver.execute(Command::BulkUpsert {
+                drawer_name: drawer_name.to_string(),
+                records,
+                atomic,
+            })?),
+            Driver::UnixSocket(driver) => expect_pointers(driver.execute(Command::BulkUpsert {
+                drawer_name: drawer_name.to_string(),
+                records,
+                atomic,
+            })?),
+        }
+    }
+
     pub fn find_all(&self, drawer_name: &str) -> Result<Vec<Value>> {
         match &self.driver {
             Driver::Embedded(engine) => engine.find_all(drawer_name),
@@ -626,6 +647,13 @@ fn expect_pointer(result: CommandResult) -> Result<String> {
     match result {
         CommandResult::Pointer(pointer) => Ok(pointer),
         other => unexpected_result("pointer", other),
+    }
+}
+
+fn expect_pointers(result: CommandResult) -> Result<Vec<String>> {
+    match result {
+        CommandResult::Pointers(pointers) => Ok(pointers),
+        other => unexpected_result("pointers", other),
     }
 }
 

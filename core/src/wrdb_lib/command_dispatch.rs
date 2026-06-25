@@ -67,6 +67,14 @@ pub(crate) trait DatabaseCommandExecutor {
         context: ExecutionContext<'_>,
     ) -> Result<String>;
 
+    fn bulk_upsert_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        records: Vec<Value>,
+        atomic: bool,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<String>>;
+
     fn find_all_in_database(
         database: &RwLock<Database>,
         drawer_name: &str,
@@ -252,6 +260,12 @@ where
             payload,
         } => E::upsert_in_database(database, &drawer_name, payload, context)
             .map(CommandResult::Pointer),
+        Command::BulkUpsert {
+            drawer_name,
+            records,
+            atomic,
+        } => E::bulk_upsert_in_database(database, &drawer_name, records, atomic, context)
+            .map(CommandResult::Pointers),
         Command::FindAll { drawer_name } => {
             E::find_all_in_database(database, &drawer_name, context).map(CommandResult::Records)
         }
@@ -351,6 +365,7 @@ pub(crate) fn validate_command_against_registry(
 pub(crate) fn command_drawer_name(command: &Command) -> Option<String> {
     match command {
         Command::Upsert { drawer_name, .. }
+        | Command::BulkUpsert { drawer_name, .. }
         | Command::FindAll { drawer_name }
         | Command::FindByFilter { drawer_name, .. }
         | Command::Count { drawer_name, .. }

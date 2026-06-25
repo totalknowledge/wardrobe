@@ -80,6 +80,11 @@ pub enum Command {
         drawer_name: String,
         payload: Value,
     },
+    BulkUpsert {
+        drawer_name: String,
+        records: Vec<Value>,
+        atomic: bool,
+    },
     FindAll {
         drawer_name: String,
     },
@@ -173,6 +178,7 @@ pub enum CommandResult {
     Schemas(Vec<String>),
     Drawers(Vec<StorageInventory>),
     Pointer(String),
+    Pointers(Vec<String>),
     Records(Vec<Value>),
     Record(Option<Value>),
     Count(usize),

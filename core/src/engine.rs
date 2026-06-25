@@ -183,6 +183,21 @@ impl WardrobeEngine {
         )
     }
 
+    pub fn bulk_upsert(
+        &self,
+        drawer_name: &str,
+        records: Vec<Value>,
+        atomic: bool,
+    ) -> Result<Vec<String>> {
+        Self::bulk_upsert_in_database(
+            &self.database_core,
+            drawer_name,
+            records,
+            atomic,
+            ExecutionContext::root(),
+        )
+    }
+
     pub fn find_all(&self, drawer_name: &str) -> std::io::Result<Vec<Value>> {
         Self::find_all_in_database(&self.database_core, drawer_name, ExecutionContext::root())
     }
@@ -815,6 +830,115 @@ impl WardrobeEngine {
             context,
             || Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context),
         )
+    }
+
+    fn bulk_upsert_in_database(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        records: Vec<Value>,
+        atomic: bool,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<String>> {
+        if !atomic {
+            let mut pointers = Vec::with_capacity(records.len());
+            for record in records {
+                pointers.push(Self::upsert_in_database(
+                    database_core,
+                    drawer_name,
+                    record,
+                    context,
+                )?);
+            }
+            return Ok(pointers);
+        }
+
+        let wal_records = records.clone();
+        engine_wal::run_bulk_upsert_transaction(
+            database_core,
+            drawer_name,
+            &wal_records,
+            context,
+            || Self::bulk_upsert_in_database_unlogged(database_core, drawer_name, records, context),
+        )
+    }
+
+    fn bulk_upsert_in_database_unlogged(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        records: Vec<Value>,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<String>> {
+        let target_primary_key = "_id";
+        let physical_drawer_name =
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
+        let mut pointers = Vec::with_capacity(records.len());
+        let mut prepared_records = Vec::with_capacity(records.len());
+
+        for payload in records {
+            let Value::Object(map) = payload else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "Payload root must be a JSON object",
+                ));
+            };
+
+            let record_key = match map.get(target_primary_key).and_then(|v| v.as_str()) {
+                Some(existing_id) => {
+                    pointer::normalize_primary_key(&physical_drawer_name, drawer_name, existing_id)
+                }
+                None => Uuid::new_v4().simple().to_string(),
+            };
+            pointers.push(pointer::format_pointer(&physical_drawer_name, &record_key));
+            prepared_records.push((record_key, map));
+        }
+
+        let drawer_handle = Self::load_drawer_handle(
+            database_core,
+            &physical_drawer_name,
+            target_primary_key,
+            Vec::new(),
+        )?;
+        let mut full_records = Vec::with_capacity(prepared_records.len());
+
+        for (record_key, map) in prepared_records {
+            let mut relationship_constraints =
+                Self::read_lock(&drawer_handle)?.relationship_constraints();
+            nested_decomposition::register_inline_relationship_aliases(
+                &map,
+                &mut relationship_constraints,
+                |field_name, rule| {
+                    Self::write_lock(&drawer_handle)?
+                        .register_relationship_constraint(field_name, rule)
+                        .map_err(|error| Error::new(ErrorKind::InvalidData, error))
+                },
+            )?;
+            let processed_map = nested_decomposition::decompose_nested_objects(
+                map,
+                &physical_drawer_name,
+                &relationship_constraints,
+                context,
+                |drawer_name, value, child_context| {
+                    Self::upsert_in_database_unlogged(
+                        database_core,
+                        drawer_name,
+                        value,
+                        child_context,
+                    )
+                },
+            )?;
+
+            let mut full_record = processed_map;
+            full_record.insert(
+                target_primary_key.to_string(),
+                Value::String(record_key.clone()),
+            );
+            full_records.push(Value::Object(full_record));
+        }
+
+        match Self::write_lock(&drawer_handle)?.upsert_records_atomic(full_records)? {
+            Ok(_) => Ok(pointers),
+            Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
+        }
     }
 
     fn upsert_in_database_unlogged(
@@ -2220,6 +2344,16 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         WardrobeEngine::upsert_in_database(database, drawer_name, payload, context)
     }
 
+    fn bulk_upsert_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        records: Vec<Value>,
+        atomic: bool,
+        context: ExecutionContext<'_>,
+    ) -> Result<Vec<String>> {
+        WardrobeEngine::bulk_upsert_in_database(database, drawer_name, records, atomic, context)
+    }
+
     fn find_all_in_database(
         database: &RwLock<Database>,
         drawer_name: &str,
@@ -2316,6 +2450,21 @@ impl engine_wal::WalReplayExecutor for WardrobeEngine {
     ) -> Result<()> {
         WardrobeEngine::upsert_in_database_unlogged(database_core, drawer_name, payload, context)
             .map(|_| ())
+    }
+
+    fn replay_bulk_upsert(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        records: Vec<Value>,
+        context: ExecutionContext<'_>,
+    ) -> Result<()> {
+        WardrobeEngine::bulk_upsert_in_database_unlogged(
+            database_core,
+            drawer_name,
+            records,
+            context,
+        )
+        .map(|_| ())
     }
 
     fn replay_delete(
