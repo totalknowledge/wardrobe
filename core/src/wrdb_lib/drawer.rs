@@ -101,12 +101,6 @@ impl DrawerMetadata {
 const DATA_BLOCK_STATUS_DEAD: u8 = 0;
 const DATA_BLOCK_STATUS_LIVE: u8 = 1;
 
-#[derive(Clone, Copy)]
-enum MetadataPersistence {
-    Immediate,
-    Deferred,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct DataBlockIndexEntry {
     payload_len: usize,
@@ -176,6 +170,7 @@ pub struct Drawer {
     cascade_delete_rules: BTreeMap<String, bool>,
     schema: Option<Value>,
     record_count: usize,
+    metadata_dirty: bool,
     metadata_format_version: u8,
     index_file_path: PathBuf,
     meta_file_path: PathBuf,
@@ -345,7 +340,7 @@ impl Drawer {
 
         let record_count = primary_memory_index.len();
 
-        let drawer = Self {
+        let mut drawer = Self {
             name: name.to_string(),
             primary_key: primary_key.to_string(),
             unique_constraints: inferred_unique_constraints,
@@ -364,6 +359,7 @@ impl Drawer {
             cascade_delete_rules,
             schema,
             record_count,
+            metadata_dirty: false,
             metadata_format_version,
             index_file_path,
             meta_file_path,
@@ -377,7 +373,7 @@ impl Drawer {
     }
 
     pub fn upsert_record(&mut self, record: Value) -> std::io::Result<Result<(), String>> {
-        self.upsert_record_internal(record, MetadataPersistence::Immediate)
+        self.upsert_record_internal(record)
             .map(|result| result.map(|_| ()))
     }
 
@@ -389,26 +385,19 @@ impl Drawer {
             return Ok(Err(validation_error));
         }
 
-        let mut metadata_dirty = false;
         for record in records {
-            match self.upsert_record_internal(record, MetadataPersistence::Deferred)? {
-                Ok(is_new_record) => metadata_dirty |= is_new_record,
+            match self.upsert_record_internal(record)? {
+                Ok(_) => {}
                 Err(validation_error) => return Ok(Err(validation_error)),
             }
         }
 
-        if metadata_dirty {
-            self.persist_metadata()?;
-        }
+        self.flush_metadata_if_dirty()?;
 
         Ok(Ok(()))
     }
 
-    fn upsert_record_internal(
-        &mut self,
-        record: Value,
-        metadata_persistence: MetadataPersistence,
-    ) -> std::io::Result<Result<bool, String>> {
+    fn upsert_record_internal(&mut self, record: Value) -> std::io::Result<Result<bool, String>> {
         let primary_key_value = match record.get(&self.primary_key).and_then(|v| v.as_str()) {
             Some(val) => val.to_string(),
             None => {
@@ -530,9 +519,7 @@ impl Drawer {
 
         if is_new_record {
             self.record_count += 1;
-            if matches!(metadata_persistence, MetadataPersistence::Immediate) {
-                self.persist_metadata()?;
-            }
+            self.mark_metadata_dirty();
         }
 
         Ok(Ok(is_new_record))
@@ -657,6 +644,7 @@ impl Drawer {
         self.data_recycler
             .register_free_slot(old_block.size_class, stale_offset);
         self.record_count = self.record_count.saturating_sub(1);
+        self.mark_metadata_dirty();
 
         let fields_to_clear = self.unique_constraints.clone();
         for unique_field in fields_to_clear {
@@ -676,8 +664,6 @@ impl Drawer {
                 self.write_index_log(&unique_field, field_value, Value::Array(Vec::new()), None)?;
             }
         }
-
-        self.persist_metadata()?;
 
         Ok(Some(deleted_record))
     }
@@ -2080,7 +2066,18 @@ impl Drawer {
         Ok(live_records)
     }
 
-    fn persist_metadata(&self) -> std::io::Result<()> {
+    fn mark_metadata_dirty(&mut self) {
+        self.metadata_dirty = true;
+    }
+
+    pub(crate) fn flush_metadata_if_dirty(&mut self) -> std::io::Result<()> {
+        if self.metadata_dirty {
+            self.persist_metadata()?;
+        }
+        Ok(())
+    }
+
+    fn persist_metadata(&mut self) -> std::io::Result<()> {
         let metadata = DrawerMetadata::from_configuration(
             &self.primary_key,
             self.record_count,
@@ -2090,13 +2087,15 @@ impl Drawer {
             self.cascade_delete_rules.clone(),
             self.schema.clone(),
         );
-        metadata.persist(&self.meta_file_path)
+        metadata.persist(&self.meta_file_path)?;
+        self.metadata_dirty = false;
+        Ok(())
     }
 
     pub fn checkpoint(&mut self) -> std::io::Result<()> {
         self.data_writer.sync_all()?;
         self.index_writer.sync_all()?;
-        self.persist_metadata()?;
+        self.flush_metadata_if_dirty()?;
         Ok(())
     }
 }

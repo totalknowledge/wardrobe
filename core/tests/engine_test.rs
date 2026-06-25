@@ -4262,3 +4262,43 @@ fn us_101_atomic_bulk_upsert_rejects_invalid_batch_without_writes() {
         0
     );
 }
+
+#[test]
+fn us_102_engine_transactions_flush_dirty_metadata_on_commit() {
+    let database = TempDatabase::new("us_102_engine_metadata_commit_flush");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .bulk_upsert(
+            "gem",
+            vec![
+                json!({"_id": "fire", "element": "Fire"}),
+                json!({"_id": "water", "element": "Water"}),
+            ],
+            true,
+        )
+        .expect("bulk upsert should commit");
+
+    let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
+        .expect("metadata should read after bulk upsert");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_contents).expect("metadata should parse after bulk upsert");
+    assert_eq!(metadata["record_count"], 2);
+
+    engine
+        .upsert("gem", json!({"_id": "fire", "element": "Flame"}))
+        .expect("update should commit");
+    let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
+        .expect("metadata should read after update");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_contents).expect("metadata should parse after update");
+    assert_eq!(metadata["record_count"], 2);
+
+    assert!(engine.delete("@gem:water").expect("delete should commit"));
+    let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
+        .expect("metadata should read after delete");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_contents).expect("metadata should parse after delete");
+    assert_eq!(metadata["record_count"], 1);
+}

@@ -265,7 +265,10 @@ where
         },
     )?;
 
-    let result = apply();
+    let result = apply().and_then(|value| {
+        flush_dirty_metadata(database_core)?;
+        Ok(value)
+    });
     if result.is_ok() {
         append_wal_record(database_core, &WalRecord::Commit { tx_id })?;
     } else {
@@ -340,6 +343,15 @@ fn check_wal_thresholds(database_core: &RwLock<Database>) -> Result<()> {
     let (threshold_bytes, threshold_ops) = read_lock(database_core)?.wal_thresholds();
     if bytes >= threshold_bytes || ops >= threshold_ops {
         flush_checkpoint(database_core)?;
+    }
+    Ok(())
+}
+
+fn flush_dirty_metadata(database_core: &RwLock<Database>) -> Result<()> {
+    let drawers = read_lock(database_core)?.get_all_drawers();
+    for (_name, drawer) in drawers {
+        let mut guard = write_lock(&drawer)?;
+        guard.flush_metadata_if_dirty()?;
     }
     Ok(())
 }

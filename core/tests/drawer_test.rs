@@ -319,8 +319,8 @@ fn us_017_open_creates_metadata_sidecar_file_for_drawer() {
 }
 
 #[test]
-fn us_017_metadata_sidecar_tracks_record_count_during_standard_writes() {
-    let database_directory = TempDatabase::new("drawer_metadata_sidecar_record_count");
+fn us_102_metadata_sidecar_defers_record_count_until_checkpoint() {
+    let database_directory = TempDatabase::new("us_102_deferred_metadata_record_count");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");
 
     let mut drawer = Drawer::open(&database_directory.path, "socks", "_id", Vec::new())
@@ -344,10 +344,21 @@ fn us_017_metadata_sidecar_tracks_record_count_during_standard_writes() {
         .expect("second upsert should succeed")
         .expect("record should validate");
 
-    let metadata_after_upserts = load_metadata(&database_directory, "socks");
-    assert_eq!(metadata_after_upserts["record_count"], 1);
-    assert!(metadata_after_upserts.get("blocks").is_none());
-    assert!(metadata_after_upserts.get("free_slots").is_none());
+    assert_eq!(drawer.record_count(), 1);
+    let stale_metadata_after_upserts = load_metadata(&database_directory, "socks");
+    assert_eq!(stale_metadata_after_upserts["record_count"], 0);
+
+    drawer
+        .checkpoint()
+        .expect("checkpoint should flush dirty metadata");
+    let checkpointed_metadata_after_upserts = load_metadata(&database_directory, "socks");
+    assert_eq!(checkpointed_metadata_after_upserts["record_count"], 1);
+    assert!(checkpointed_metadata_after_upserts.get("blocks").is_none());
+    assert!(
+        checkpointed_metadata_after_upserts
+            .get("free_slots")
+            .is_none()
+    );
 
     drawer
         .upsert_record(json!({
@@ -356,15 +367,93 @@ fn us_017_metadata_sidecar_tracks_record_count_during_standard_writes() {
         }))
         .expect("third upsert should succeed")
         .expect("record should validate");
-    let metadata_after_insert = load_metadata(&database_directory, "socks");
-    assert_eq!(metadata_after_insert["record_count"], 2);
+    assert_eq!(drawer.record_count(), 2);
+    let stale_metadata_after_insert = load_metadata(&database_directory, "socks");
+    assert_eq!(stale_metadata_after_insert["record_count"], 1);
+
+    drawer
+        .checkpoint()
+        .expect("checkpoint should flush second insert metadata");
+    let checkpointed_metadata_after_insert = load_metadata(&database_directory, "socks");
+    assert_eq!(checkpointed_metadata_after_insert["record_count"], 2);
 
     drawer
         .delete_by_primary_key("@socks:lnk_a")
         .expect("delete should succeed")
         .expect("record should exist");
-    let metadata_after_delete = load_metadata(&database_directory, "socks");
-    assert_eq!(metadata_after_delete["record_count"], 1);
+    assert_eq!(drawer.record_count(), 1);
+    let stale_metadata_after_delete = load_metadata(&database_directory, "socks");
+    assert_eq!(stale_metadata_after_delete["record_count"], 2);
+
+    drawer
+        .checkpoint()
+        .expect("checkpoint should flush delete metadata");
+    let checkpointed_metadata_after_delete = load_metadata(&database_directory, "socks");
+    assert_eq!(checkpointed_metadata_after_delete["record_count"], 1);
+}
+
+#[test]
+fn us_102_open_recovers_record_count_from_index_when_metadata_is_stale() {
+    let database_directory = TempDatabase::new("us_102_recover_stale_record_count");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    {
+        let mut drawer = Drawer::open(&database_directory.path, "gem", "_id", Vec::new())
+            .expect("drawer should open");
+        drawer
+            .upsert_record(json!({
+                "_id": "@gem:lnk_fire",
+                "element": "Fire"
+            }))
+            .expect("upsert should succeed")
+            .expect("record should validate");
+
+        let stale_metadata = load_metadata(&database_directory, "gem");
+        assert_eq!(stale_metadata["record_count"], 0);
+    }
+
+    let reopened = Drawer::open(&database_directory.path, "gem", "_id", Vec::new())
+        .expect("drawer should reopen");
+    assert_eq!(reopened.record_count(), 1);
+
+    let recovered_metadata = load_metadata(&database_directory, "gem");
+    assert_eq!(recovered_metadata["record_count"], 1);
+}
+
+#[test]
+fn us_102_structural_metadata_persists_immediately_with_dirty_record_count() {
+    let database_directory = TempDatabase::new("us_102_structural_metadata_immediate");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    let mut drawer = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
+        .expect("drawer should open");
+    drawer
+        .upsert_record(json!({
+            "_id": "@weapon:lnk_blade",
+            "name": "Blade"
+        }))
+        .expect("upsert should succeed")
+        .expect("record should validate");
+
+    let stale_metadata = load_metadata(&database_directory, "weapon");
+    assert_eq!(stale_metadata["record_count"], 0);
+
+    drawer
+        .register_relationship_constraint(
+            "gem_slot",
+            json!({
+                "type": "M:1",
+                "target_drawer": "gem"
+            }),
+        )
+        .expect("relationship metadata should persist");
+
+    let structural_metadata = load_metadata(&database_directory, "weapon");
+    assert_eq!(structural_metadata["record_count"], 1);
+    assert_eq!(
+        structural_metadata["relationship_constraints"]["gem_slot"]["target_drawer"],
+        "gem"
+    );
 }
 
 #[test]
@@ -929,6 +1018,9 @@ fn us_035_drawer_schema_rejects_missing_required_or_wrong_type_fields() {
         .expect("valid record should pass schema");
 
     assert_eq!(drawer.record_count(), 1);
+    drawer
+        .checkpoint()
+        .expect("checkpoint should flush valid record count");
     let metadata = load_metadata(&database_directory, "weapon");
     assert!(metadata.get("schema").is_some());
     assert_eq!(metadata["record_count"], 1);
@@ -1022,6 +1114,9 @@ fn us_042_vacuum_compacts_live_records_and_rebuilds_indexes() {
             .is_empty()
     );
 
+    drawer
+        .checkpoint()
+        .expect("checkpoint should flush secondary index test metadata");
     let metadata = load_metadata(&database_directory, "gem");
     assert_eq!(metadata["record_count"], 1);
 
