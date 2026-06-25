@@ -186,6 +186,22 @@ impl WardrobeClient {
         }
     }
 
+    pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize> {
+        match &self.driver {
+            Driver::Embedded(engine) => engine.delete_by_filter(drawer_name, filter),
+            Driver::Network(driver) => expect_count(driver.execute(Command::DeleteByFilter {
+                drawer_name: drawer_name.to_string(),
+                filter,
+            })?),
+            Driver::UnixSocket(driver) => {
+                expect_count(driver.execute(Command::DeleteByFilter {
+                    drawer_name: drawer_name.to_string(),
+                    filter,
+                })?)
+            }
+        }
+    }
+
     pub fn delete<L>(&self, locator: L) -> Result<bool>
     where
         L: Into<StorageLocator>,

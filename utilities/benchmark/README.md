@@ -67,8 +67,14 @@ The benchmark phases are:
 
 - Massive Ingestion: upsert entity and book records.
 - Index Mutation: create, drop, and rebuild the book ISBN index.
-- Complex Traversal: query books where author and editor criteria overlap, then materialize author and editor details into each returned book.
-- Targeted Purge: delete books matching a purge bucket filter.
+- Complex Traversal: query books where author and editor criteria overlap using each engine's server-side traversal behavior, without benchmark-side N+1 follow-up fetches.
+- Targeted Purge: delete books matching a purge bucket filter using one server-side filter-delete command per target phase sample.
 - Compaction: run the target's clean/vacuum/compact directive.
+
+Current parity baseline:
+
+- All targets use equivalent set-based traversal and purge operations for the same book relationship and purge-bucket predicates.
+- The benchmark currently avoids declaring additional non-unique application indexes (`author_id`, `editor_id`, `purge_bucket`) until Wardrobe exposes equivalent non-unique secondary index declarations.
+- The Index Mutation phase exercises the shared ISBN index lifecycle (`books.isbn`) for each target.
 
 The Markdown report includes operations per second, mean latency, p95 latency, p99 latency, and final storage footprint in bytes.

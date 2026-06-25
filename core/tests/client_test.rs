@@ -143,6 +143,11 @@ fn client_embedded_driver_exhaustive_execution() {
     };
     let delete_explicit_res = client.delete(explicit_locator).expect("delete failed");
     assert!(!delete_explicit_res);
+
+    let deleted_by_filter = client
+        .delete_by_filter("gem", json!({ "element": "Unknown" }))
+        .expect("delete_by_filter failed");
+    assert_eq!(deleted_by_filter, 0);
 }
 
 #[test]
@@ -277,6 +282,13 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             CommandResult::Deleted(true),
         ),
         (
+            Command::DeleteByFilter {
+                drawer_name: "gem".to_string(),
+                filter: json!({"element": "Water"}),
+            },
+            CommandResult::Count(1),
+        ),
+        (
             Command::Vacuum {
                 drawer_name: "gem".to_string(),
             },
@@ -377,6 +389,12 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
         client
             .delete(("gem", "lnk_explicit_delete"))
             .expect("delete failed")
+    );
+    assert_eq!(
+        client
+            .delete_by_filter("gem", json!({"element": "Water"}))
+            .expect("delete_by_filter failed"),
+        1
     );
     assert_eq!(client.vacuum_drawer("gem").expect("vacuum failed"), report);
     assert_eq!(
@@ -635,6 +653,25 @@ fn client_unexpected_result_on_upsert_returns_invaliddata() {
 }
 
 #[test]
+fn client_unexpected_result_on_bulk_upsert_returns_invaliddata() {
+    let (connection, handle) = spawn_tcp_protocol_server(vec![(
+        Command::BulkUpsert {
+            drawer_name: "gem".to_string(),
+            records: vec![json!({"_id": "x"})],
+            atomic: true,
+        },
+        CommandResult::Pointer("@gem:wrong".to_string()),
+    )]);
+
+    let client = WardrobeClient::open(connection).expect("open failed");
+    let result = client.bulk_upsert("gem", vec![json!({"_id": "x"})], true);
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    handle.join().expect("join failed");
+}
+
+#[test]
 fn client_unexpected_result_on_find_all_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
         Command::FindAll {
@@ -810,6 +847,24 @@ fn client_unexpected_result_on_delete_returns_invaliddata() {
 
     let client = WardrobeClient::open(connection).expect("open failed");
     let result = client.delete_by_id("@gem:target_identifier");
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    handle.join().expect("join failed");
+}
+
+#[test]
+fn client_unexpected_result_on_delete_by_filter_returns_invaliddata() {
+    let (connection, handle) = spawn_tcp_protocol_server(vec![(
+        Command::DeleteByFilter {
+            drawer_name: "gem".to_string(),
+            filter: json!({"element": "Fire"}),
+        },
+        CommandResult::Deleted(true),
+    )]);
+
+    let client = WardrobeClient::open(connection).expect("open failed");
+    let result = client.delete_by_filter("gem", json!({"element": "Fire"}));
+
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");

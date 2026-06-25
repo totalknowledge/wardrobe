@@ -109,6 +109,13 @@ pub(crate) trait DatabaseCommandExecutor {
         context: ExecutionContext<'_>,
     ) -> Result<bool>;
 
+    fn delete_by_filter_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<usize>;
+
     fn manage_schema_in_database(
         database: &RwLock<Database>,
         drawer_name: &str,
@@ -288,6 +295,11 @@ where
             E::delete_by_id_in_database(database, StorageLocator::Inline(pointer), context)
                 .map(CommandResult::Deleted)
         }
+        Command::DeleteByFilter {
+            drawer_name,
+            filter,
+        } => E::delete_by_filter_in_database(database, &drawer_name, filter, context)
+            .map(CommandResult::Count),
         Command::ManageSchema {
             action,
             kind,
@@ -369,6 +381,7 @@ pub(crate) fn command_drawer_name(command: &Command) -> Option<String> {
         | Command::FindAll { drawer_name }
         | Command::FindByFilter { drawer_name, .. }
         | Command::Count { drawer_name, .. }
+        | Command::DeleteByFilter { drawer_name, .. }
         | Command::ManageSchema { drawer_name, .. }
         | Command::Vacuum { drawer_name }
         | Command::Migrate { drawer_name } => Some(drawer_name.clone()),

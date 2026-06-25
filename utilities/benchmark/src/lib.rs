@@ -837,47 +837,6 @@ impl WardrobeTarget {
         })
     }
 
-    fn find_entity_record(&mut self, entity_reference: &str) -> io::Result<Value> {
-        let pointer = if entity_reference.starts_with('@') {
-            entity_reference.to_string()
-        } else {
-            format!("@{ENTITY_DRAWER}:{entity_reference}")
-        };
-        expect_record(self.execute_scoped(Command::FindById { pointer })?)?.ok_or_else(|| {
-            Error::new(
-                ErrorKind::NotFound,
-                format!("entity record '{entity_reference}' was not found"),
-            )
-        })
-    }
-
-    fn materialize_entity_field(&mut self, record: &Value, field_name: &str) -> io::Result<Value> {
-        match record.get(field_name) {
-            Some(Value::Object(entity)) => Ok(Value::Object(entity.clone())),
-            Some(Value::String(entity_reference)) => self.find_entity_record(entity_reference),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("record is missing a materializable {field_name}"),
-            )),
-        }
-    }
-
-    fn materialize_book_records(&mut self, mut records: Vec<Value>) -> io::Result<Vec<Value>> {
-        for record in &mut records {
-            let author = self.materialize_entity_field(record, "author_id")?;
-            let editor = self.materialize_entity_field(record, "editor_id")?;
-            let Some(record_map) = record.as_object_mut() else {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "book record is not a JSON object",
-                ));
-            };
-            record_map.insert("author".to_string(), author);
-            record_map.insert("editor".to_string(), editor);
-        }
-        Ok(records)
-    }
-
     fn count_book_relationship_matches(&mut self, entity_reference: &str) -> io::Result<usize> {
         expect_count(self.execute_scoped(Command::Count {
             drawer_name: BOOK_DRAWER.to_string(),
@@ -1040,7 +999,7 @@ impl BenchmarkTarget for WardrobeTarget {
                 entity_id
             };
             recorder.measure(1, || {
-                let records = expect_records(self.execute_scoped(Command::FindByFilter {
+                expect_records(self.execute_scoped(Command::FindByFilter {
                     drawer_name: BOOK_DRAWER.to_string(),
                     filter: json!({
                         "author_id": entity_reference,
@@ -1048,7 +1007,7 @@ impl BenchmarkTarget for WardrobeTarget {
                     }),
                     modifiers: None,
                 })?)?;
-                self.materialize_book_records(records)
+                Ok(())
             })?;
             report_record_progress(
                 progress,
@@ -1062,42 +1021,24 @@ impl BenchmarkTarget for WardrobeTarget {
 
     fn targeted_purge(
         &mut self,
-        _profile: &LibraryProfile,
+        profile: &LibraryProfile,
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64> {
+        let operations = profile.expected_purge_count() as u64;
         progress.log(format!(
-            "{}: finding records where purge_bucket = 0",
-            self.name()
+            "{}: deleting about {} book records where purge_bucket = 0",
+            self.name(),
+            operations
         ));
-        let records = recorder.measure(1, || {
-            expect_records(self.execute_scoped(Command::FindByFilter {
+        recorder.measure(operations.max(1), || {
+            expect_count(self.execute_scoped(Command::DeleteByFilter {
                 drawer_name: BOOK_DRAWER.to_string(),
                 filter: json!({ "purge_bucket": 0 }),
-                modifiers: None,
             })?)
+            .map(|_| ())
         })?;
-        progress.log(format!(
-            "{}: purge matched {} book records",
-            self.name(),
-            records.len()
-        ));
-        let total_records = records.len();
-        let mut operations = 1;
-        for (index, record) in records.into_iter().enumerate() {
-            let pointer = pointer_from_record(&record, BOOK_DRAWER)?;
-            recorder.measure(1, || {
-                expect_deleted(self.execute_scoped(Command::Delete { pointer })?)
-            })?;
-            report_record_progress(
-                progress,
-                &format!("{}: purge deletes completed", self.name()),
-                index + 1,
-                total_records,
-            );
-            operations += 1;
-        }
-        Ok(operations)
+        Ok(operations.max(1))
     }
 
     fn compaction(
@@ -1132,6 +1073,9 @@ impl BenchmarkTarget for WardrobeTarget {
             return directory_size(root);
         }
         if let CommandResult::Diagnosis(diagnosis) = self.execute(Command::Diagnose)? {
+            if diagnosis.storage_bytes > 0 {
+                return Ok(diagnosis.storage_bytes);
+            }
             let path = PathBuf::from(diagnosis.storage_directory);
             if path.exists() {
                 return directory_size(path);
@@ -2084,20 +2028,6 @@ fn expect_count(result: CommandResult) -> io::Result<usize> {
     }
 }
 
-fn expect_record(result: CommandResult) -> io::Result<Option<Value>> {
-    match result {
-        CommandResult::Record(record) => Ok(record),
-        other => unexpected_wardrobe_result("record", other),
-    }
-}
-
-fn expect_deleted(result: CommandResult) -> io::Result<()> {
-    match result {
-        CommandResult::Deleted(_) => Ok(()),
-        other => unexpected_wardrobe_result("deleted flag", other),
-    }
-}
-
 fn expect_vacuumed(result: CommandResult) -> io::Result<()> {
     match result {
         CommandResult::Vacuumed(_) => Ok(()),
@@ -2117,18 +2047,6 @@ fn unexpected_wardrobe_result<T>(expected: &str, actual: CommandResult) -> io::R
         ErrorKind::InvalidData,
         format!("Expected Wardrobe {expected}, got {actual:?}"),
     ))
-}
-
-fn pointer_from_record(record: &Value, drawer: &str) -> io::Result<String> {
-    let id = record
-        .get("_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "record is missing a string _id"))?;
-    if id.starts_with('@') {
-        Ok(id.to_string())
-    } else {
-        Ok(format!("@{drawer}:{id}"))
-    }
 }
 
 fn chunk_ranges(total: usize, chunk_size: usize) -> Vec<(usize, usize)> {
@@ -2514,6 +2432,50 @@ fn unix_timestamp_micros() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    #[derive(Debug, Clone)]
+    struct MockRunnerState {
+        commands: Vec<Command>,
+        responses: VecDeque<CommandResult>,
+    }
+
+    struct MockWardrobeRunner {
+        state: Rc<RefCell<MockRunnerState>>,
+    }
+
+    impl WardrobeCommandRunner for MockWardrobeRunner {
+        fn execute(&mut self, command: Command) -> io::Result<CommandResult> {
+            let mut state = self.state.borrow_mut();
+            state.commands.push(command);
+            state.responses.pop_front().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "mock Wardrobe runner ran out of responses",
+                )
+            })
+        }
+    }
+
+    fn scoped_command(command: &Command) -> &Command {
+        if let Command::ExecuteInScope { command, .. } = command {
+            command.as_ref()
+        } else {
+            panic!("expected ExecuteInScope command")
+        }
+    }
+
+    fn tiny_profile() -> LibraryProfile {
+        LibraryProfile {
+            entity_records: 3,
+            book_records: 6,
+            chunk_size: 2,
+            traversal_queries: 2,
+            purge_buckets: 2,
+        }
+    }
 
     #[test]
     fn parses_all_targets() {
@@ -2524,6 +2486,394 @@ mod tests {
             panic!("expected run config");
         };
         assert_eq!(config.targets, TargetSpec::all());
+    }
+
+    #[test]
+    fn benchmark_config_parses_full_option_matrix() {
+        let ParseOutcome::Run(config) = BenchmarkConfig::from_args([
+            "--targets".to_string(),
+            "wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql".to_string(),
+            "--work-dir".to_string(),
+            "target/custom-bench".to_string(),
+            "--output".to_string(),
+            "target/custom-bench/report.md".to_string(),
+            "--quiet".to_string(),
+            "--entities".to_string(),
+            "7".to_string(),
+            "--books".to_string(),
+            "11".to_string(),
+            "--chunk-size".to_string(),
+            "3".to_string(),
+            "--traversal-queries".to_string(),
+            "5".to_string(),
+            "--purge-buckets".to_string(),
+            "4".to_string(),
+            "--wardrobe-embedded-path".to_string(),
+            "target/custom-bench/embedded".to_string(),
+            "--wardrobe-remote-uri".to_string(),
+            "wardrobe://127.0.0.1:24842".to_string(),
+            "--sqlite-db".to_string(),
+            "target/custom-bench/sqlite.db".to_string(),
+            "--mongo-uri".to_string(),
+            "mongodb://127.0.0.1:27018".to_string(),
+            "--mongo-database".to_string(),
+            "mongo_suite".to_string(),
+            "--mysql-host".to_string(),
+            "mysql.local".to_string(),
+            "--mysql-port".to_string(),
+            "4406".to_string(),
+            "--mysql-database".to_string(),
+            "mysql_suite".to_string(),
+            "--mysql-user".to_string(),
+            "benchmark_user".to_string(),
+            "--mysql-password-env".to_string(),
+            "BENCH_PASSWORD".to_string(),
+        ])
+        .expect("full benchmark options should parse") else {
+            panic!("expected run config");
+        };
+
+        assert_eq!(config.targets, TargetSpec::all());
+        assert_eq!(config.work_dir, PathBuf::from("target/custom-bench"));
+        assert_eq!(
+            config.output_path,
+            Some(PathBuf::from("target/custom-bench/report.md"))
+        );
+        assert!(!config.progress_enabled);
+        assert_eq!(config.profile.entity_records, 7);
+        assert_eq!(config.profile.book_records, 11);
+        assert_eq!(config.profile.chunk_size, 3);
+        assert_eq!(config.profile.traversal_queries, 5);
+        assert_eq!(config.profile.purge_buckets, 4);
+        assert_eq!(
+            config.wardrobe_embedded_path,
+            Some(PathBuf::from("target/custom-bench/embedded"))
+        );
+        assert_eq!(
+            config.wardrobe_remote_uri,
+            Some("wardrobe://127.0.0.1:24842".to_string())
+        );
+        assert_eq!(
+            config.sqlite_db,
+            Some(PathBuf::from("target/custom-bench/sqlite.db"))
+        );
+        assert_eq!(config.mongo_uri, "mongodb://127.0.0.1:27018");
+        assert_eq!(config.mongo_database, "mongo_suite");
+        assert_eq!(config.mysql_host, "mysql.local");
+        assert_eq!(config.mysql_port, 4406);
+        assert_eq!(config.mysql_database, "mysql_suite");
+        assert_eq!(config.mysql_user, Some("benchmark_user".to_string()));
+        assert_eq!(
+            config.mysql_password_env,
+            Some("BENCH_PASSWORD".to_string())
+        );
+    }
+
+    #[test]
+    fn benchmark_config_supports_no_mysql_password_override() {
+        let ParseOutcome::Run(config) = BenchmarkConfig::from_args([
+            "--targets".to_string(),
+            "mysql".to_string(),
+            "--mysql-no-password".to_string(),
+        ])
+        .expect("mysql no-password flag should parse") else {
+            panic!("expected run config");
+        };
+
+        assert_eq!(config.targets, vec![TargetSpec::MySql]);
+        assert_eq!(config.mysql_password_env, None);
+    }
+
+    #[test]
+    fn parse_targets_supports_aliases_and_case_insensitive_values() {
+        let targets =
+            parse_targets("embedded,REMOTE,mongo,mariadb").expect("target aliases should parse");
+        assert_eq!(
+            targets,
+            vec![
+                TargetSpec::WardrobeEmbedded,
+                TargetSpec::WardrobeRemote,
+                TargetSpec::MongoDb,
+                TargetSpec::MySql,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_targets_rejects_empty_entries() {
+        let error =
+            parse_targets("wardrobe-embedded,,sqlite").expect_err("empty target entry should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("empty target name"));
+    }
+
+    #[test]
+    fn benchmark_config_help_flag_returns_help_outcome() {
+        let outcome =
+            BenchmarkConfig::from_args(["--help".to_string()]).expect("help should parse");
+        assert_eq!(outcome, ParseOutcome::Help);
+    }
+
+    #[test]
+    fn benchmark_config_requires_flag_values() {
+        let error = BenchmarkConfig::from_args(["--targets".to_string()])
+            .expect_err("missing --targets value should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("--targets requires a following value")
+        );
+    }
+
+    #[test]
+    fn benchmark_config_rejects_invalid_mysql_port() {
+        let error =
+            BenchmarkConfig::from_args(["--mysql-port".to_string(), "not-a-port".to_string()])
+                .expect_err("invalid mysql port should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Invalid --mysql-port value"));
+    }
+
+    #[test]
+    fn benchmark_config_rejects_zero_counts() {
+        let error = BenchmarkConfig::from_args(["--entities".to_string(), "0".to_string()])
+            .expect_err("zero entities should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("--entities"));
+    }
+
+    #[test]
+    fn chunk_ranges_splits_exact_and_remainder_segments() {
+        assert_eq!(chunk_ranges(6, 3), vec![(0, 3), (3, 6)]);
+        assert_eq!(chunk_ranges(7, 3), vec![(0, 3), (3, 6), (6, 7)]);
+        assert!(chunk_ranges(0, 3).is_empty());
+    }
+
+    #[test]
+    fn expected_purge_count_matches_bucket_distribution_formula() {
+        let profile = LibraryProfile {
+            entity_records: 10,
+            book_records: 11,
+            chunk_size: 2,
+            traversal_queries: 3,
+            purge_buckets: 4,
+        };
+
+        assert_eq!(profile.expected_purge_count(), 3);
+    }
+
+    #[test]
+    fn library_profile_generates_joinable_book_payloads() {
+        let profile = tiny_profile();
+
+        let entity = profile.entity_payload(2);
+        assert_eq!(entity["_id"], "entity_00000002");
+        assert_eq!(entity["entity_id"], "entity_00000002");
+        assert_eq!(entity["role"], "author");
+        assert_eq!(entity["cohort"], 2);
+
+        let book = profile.book_payload(1);
+        assert_eq!(book["_id"], "book_00000001");
+        assert_eq!(book["author_id"], "entity_00000001");
+        assert_eq!(book["editor_id"], "entity_00000000");
+        assert_eq!(book["purge_bucket"], 1);
+        assert_eq!(profile.traversal_entity_id(4), "entity_00000001");
+    }
+
+    #[test]
+    fn sql_generators_escape_values_and_use_materialized_joins() {
+        let profile = tiny_profile();
+
+        assert_eq!(sql_string("O'Hare"), "'O''Hare'");
+        assert_eq!(mysql_identifier("bad`name"), "bad``name");
+
+        let sqlite_entities = sqlite_entity_insert(&profile, 0, 2);
+        assert!(sqlite_entities.contains("BEGIN IMMEDIATE;"));
+        assert!(sqlite_entities.contains("INSERT OR REPLACE INTO entities"));
+        assert!(sqlite_entities.contains("'entity_00000000'"));
+
+        let sqlite_books = sqlite_book_insert(&profile, 0, 1);
+        assert!(sqlite_books.contains("INSERT OR REPLACE INTO books"));
+        assert!(sqlite_books.contains("'book_00000000'"));
+        assert!(sqlite_books.contains("'entity_00000000'"));
+
+        let mysql_entities = mysql_entity_insert(&profile, 0, 2);
+        assert!(mysql_entities.contains("ON DUPLICATE KEY UPDATE display_name"));
+
+        let mysql_books = mysql_book_insert(&profile, 0, 1);
+        assert!(mysql_books.contains("ON DUPLICATE KEY UPDATE isbn"));
+
+        let mysql_query = mysql_materialized_book_query(&sql_string("entity_00000000"));
+        assert!(mysql_query.contains("JOIN entities author ON author.id = b.author_id"));
+        assert!(mysql_query.contains("JOIN entities editor ON editor.id = b.editor_id"));
+        assert!(mysql_query.contains("WHERE b.author_id = 'entity_00000000'"));
+    }
+
+    #[test]
+    fn mongo_documents_and_pipeline_preserve_library_shape() {
+        let profile = tiny_profile();
+
+        let entities = mongo_documents(&profile, ENTITY_DRAWER, 0, 2).expect("entities convert");
+        assert_eq!(entities.len(), 2);
+        assert_eq!(
+            entities[0].get_str("_id").expect("entity id"),
+            "entity_00000000"
+        );
+        assert_eq!(
+            entities[1].get_str("display_name").expect("entity display"),
+            "Library Entity 00000001"
+        );
+
+        let books = mongo_documents(&profile, BOOK_DRAWER, 0, 1).expect("books convert");
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].get_str("_id").expect("book id"), "book_00000000");
+        assert_eq!(
+            books[0].get_str("author_id").expect("book author"),
+            "entity_00000000"
+        );
+
+        let pipeline = mongo_materialized_book_pipeline("entity_00000000");
+        assert_eq!(pipeline.len(), 6);
+        assert_eq!(
+            pipeline[0]
+                .get_document("$match")
+                .expect("match stage")
+                .get_str("author_id")
+                .expect("author match"),
+            "entity_00000000"
+        );
+        assert!(pipeline[1].contains_key("$lookup"));
+        assert!(pipeline[5].contains_key("$project"));
+    }
+
+    #[test]
+    fn sqlite_materialized_query_hydrates_author_and_editor_records() {
+        let connection = Connection::open_in_memory().expect("sqlite memory open");
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE entities (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    cohort INTEGER NOT NULL
+);
+CREATE TABLE books (
+    id TEXT PRIMARY KEY,
+    isbn TEXT NOT NULL,
+    title TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    editor_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    purge_bucket INTEGER NOT NULL
+);
+INSERT INTO entities (id, display_name, role, cohort) VALUES
+('entity_00000000', 'Author Zero', 'author', 7),
+('entity_00000001', 'Editor One', 'editor', 9);
+INSERT INTO books (id, isbn, title, author_id, editor_id, branch, quantity, purge_bucket)
+VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entity_00000000', 'central', 3, 1);
+"#,
+            )
+            .expect("schema and fixtures should load");
+
+        let mut statement = connection
+            .prepare(SQLITE_MATERIALIZED_BOOK_QUERY)
+            .expect("materialized query should prepare");
+        let rows = statement
+            .query_map(["entity_00000000"], sqlite_materialized_book_value)
+            .expect("materialized query should run");
+        let records = rows
+            .map(|row| row.expect("row should materialize"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["_id"], "book_00000000");
+        assert_eq!(records[0]["author"]["display_name"], "Author Zero");
+        assert_eq!(records[0]["editor"]["role"], "author");
+    }
+
+    #[test]
+    fn bson_storage_size_numbers_convert_safely() {
+        assert_eq!(bson_number_to_u64(Some(&Bson::Int32(42))), Some(42));
+        assert_eq!(bson_number_to_u64(Some(&Bson::Int64(42))), Some(42));
+        assert_eq!(bson_number_to_u64(Some(&Bson::Double(42.9))), Some(42));
+        assert_eq!(bson_number_to_u64(Some(&Bson::Int32(-1))), None);
+        assert_eq!(bson_number_to_u64(Some(&Bson::Int64(-1))), None);
+        assert_eq!(bson_number_to_u64(Some(&Bson::Double(-1.0))), None);
+        assert_eq!(bson_number_to_u64(Some(&Bson::Double(f64::INFINITY))), None);
+        assert_eq!(
+            bson_number_to_u64(Some(&Bson::String("42".to_string()))),
+            None
+        );
+        assert_eq!(bson_number_to_u64(None), None);
+    }
+
+    #[test]
+    fn filesystem_helpers_count_nested_files_and_handle_missing_paths() {
+        let root = env::temp_dir().join(format!(
+            "wardrobe_benchmark_fs_helpers_{}",
+            unix_timestamp_micros()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("nested dir should create");
+        fs::write(root.join("root.bin"), [1_u8, 2, 3]).expect("root file should write");
+        fs::write(nested.join("child.bin"), [4_u8, 5]).expect("child file should write");
+
+        assert_eq!(directory_size(&root).expect("directory size"), 5);
+        assert_eq!(
+            file_size_or_zero(root.join("missing.bin")).expect("missing size"),
+            0
+        );
+        assert_eq!(
+            sqlite_sidecar(Path::new("library.sqlite"), "-wal"),
+            PathBuf::from("library.sqlite-wal")
+        );
+        sync_file_if_exists(&root.join("missing.bin")).expect("missing sync should be ok");
+        fsync_tree(&root).expect("fsync tree should complete");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wardrobe_expect_helpers_reject_wrong_command_results() {
+        assert_eq!(
+            expect_inventory(CommandResult::Count(0))
+                .expect_err("inventory mismatch")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            expect_pointers(CommandResult::Deleted(false))
+                .expect_err("pointers mismatch")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            expect_records(CommandResult::Count(0))
+                .expect_err("records mismatch")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            expect_count(CommandResult::Records(Vec::new()))
+                .expect_err("count mismatch")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            expect_vacuumed(CommandResult::Count(0))
+                .expect_err("vacuum mismatch")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            expect_admin(CommandResult::Count(0))
+                .expect_err("admin mismatch")
+                .kind(),
+            ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -2664,5 +3014,144 @@ mod tests {
         assert!(report.targets[0].storage_bytes > 0);
 
         let _ = fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn wardrobe_remote_storage_uses_server_reported_bytes() {
+        let state = Rc::new(RefCell::new(MockRunnerState {
+            commands: Vec::new(),
+            responses: VecDeque::from(vec![CommandResult::Diagnosis(
+                wardrobe_core::StorageDiagnosis {
+                    storage_directory: "/data/wardrobe".to_string(),
+                    storage_bytes: 12_345,
+                    drawer_count: 2,
+                    status: "ok".to_string(),
+                    drawers: vec![
+                        "wardrobe/library/entity".to_string(),
+                        "wardrobe/library/book".to_string(),
+                    ],
+                },
+            )]),
+        }));
+
+        let mut target = WardrobeTarget {
+            name: "Wardrobe (Remote TCP Server Mode)".to_string(),
+            runner: Some(Box::new(MockWardrobeRunner {
+                state: Rc::clone(&state),
+            })),
+            storage_root: None,
+            server_handle: None,
+        };
+
+        let storage_bytes = target
+            .storage_footprint_bytes()
+            .expect("remote storage bytes should be reported");
+
+        assert_eq!(storage_bytes, 12_345);
+        assert!(matches!(state.borrow().commands[0], Command::Diagnose));
+    }
+
+    #[test]
+    fn wardrobe_traversal_does_not_issue_find_by_id_materialization_calls() {
+        let state = Rc::new(RefCell::new(MockRunnerState {
+            commands: Vec::new(),
+            responses: VecDeque::from(vec![
+                CommandResult::Count(1),
+                CommandResult::Records(vec![json!({
+                    "_id": "book_00000000",
+                    "author_id": "entity_00000000",
+                    "editor_id": "entity_00000000",
+                })]),
+                CommandResult::Records(vec![json!({
+                    "_id": "book_00000001",
+                    "author_id": "entity_00000000",
+                    "editor_id": "entity_00000000",
+                })]),
+            ]),
+        }));
+
+        let mut target = WardrobeTarget {
+            name: "Wardrobe (Remote TCP Server Mode)".to_string(),
+            runner: Some(Box::new(MockWardrobeRunner {
+                state: Rc::clone(&state),
+            })),
+            storage_root: None,
+            server_handle: None,
+        };
+
+        let profile = LibraryProfile {
+            entity_records: 1,
+            book_records: 2,
+            chunk_size: 1,
+            traversal_queries: 2,
+            purge_buckets: 1,
+        };
+        let progress = ProgressReporter::new(false);
+        let mut recorder = PhaseRecorder::new(PhaseName::ComplexTraversal);
+
+        let operations = target
+            .complex_traversal(&profile, &mut recorder, &progress)
+            .expect("traversal should complete");
+
+        assert_eq!(operations, 2);
+
+        let commands = &state.borrow().commands;
+        let find_by_filter_calls = commands
+            .iter()
+            .filter(|command| matches!(scoped_command(command), Command::FindByFilter { .. }))
+            .count();
+        let find_by_id_calls = commands
+            .iter()
+            .filter(|command| matches!(scoped_command(command), Command::FindById { .. }))
+            .count();
+
+        assert_eq!(find_by_filter_calls, 2);
+        assert_eq!(find_by_id_calls, 0);
+    }
+
+    #[test]
+    fn wardrobe_purge_uses_single_delete_by_filter_command() {
+        let state = Rc::new(RefCell::new(MockRunnerState {
+            commands: Vec::new(),
+            responses: VecDeque::from(vec![CommandResult::Count(2)]),
+        }));
+
+        let mut target = WardrobeTarget {
+            name: "Wardrobe (Remote TCP Server Mode)".to_string(),
+            runner: Some(Box::new(MockWardrobeRunner {
+                state: Rc::clone(&state),
+            })),
+            storage_root: None,
+            server_handle: None,
+        };
+
+        let profile = LibraryProfile {
+            entity_records: 2,
+            book_records: 4,
+            chunk_size: 1,
+            traversal_queries: 1,
+            purge_buckets: 2,
+        };
+        let progress = ProgressReporter::new(false);
+        let mut recorder = PhaseRecorder::new(PhaseName::TargetedPurge);
+
+        let operations = target
+            .targeted_purge(&profile, &mut recorder, &progress)
+            .expect("purge should complete");
+
+        assert_eq!(operations, 2);
+
+        let commands = &state.borrow().commands;
+        let delete_by_filter_calls = commands
+            .iter()
+            .filter(|command| matches!(scoped_command(command), Command::DeleteByFilter { .. }))
+            .count();
+        let per_record_delete_calls = commands
+            .iter()
+            .filter(|command| matches!(scoped_command(command), Command::Delete { .. }))
+            .count();
+
+        assert_eq!(delete_by_filter_calls, 1);
+        assert_eq!(per_record_delete_calls, 0);
     }
 }

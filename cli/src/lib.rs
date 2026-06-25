@@ -288,6 +288,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         "diagnose" => {
             let diagnosis = client.diagnose_storage().map_err(client_error)?;
             println!("Storage directory: {}", diagnosis.storage_directory);
+            println!("Storage bytes: {}", diagnosis.storage_bytes);
             println!("Drawer count: {}", diagnosis.drawer_count);
             if diagnosis.drawers.is_empty() {
                 println!("Status: {}", diagnosis.status);

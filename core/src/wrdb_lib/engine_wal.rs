@@ -234,7 +234,9 @@ where
 fn command_operation(command: &Command) -> Option<DurableWalOperation> {
     match command {
         Command::Upsert { .. } | Command::BulkUpsert { .. } => Some(DurableWalOperation::Upsert),
-        Command::Delete { .. } => Some(DurableWalOperation::Delete),
+        Command::Delete { .. } | Command::DeleteByFilter { .. } => {
+            Some(DurableWalOperation::Delete)
+        }
         Command::Vacuum { .. } | Command::Migrate { .. } => Some(DurableWalOperation::Maintenance),
         Command::DefineDatabase { .. }
         | Command::DefineSchema { .. }

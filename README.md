@@ -56,7 +56,7 @@ The two main application entry points are:
 
 `WardrobeClient` currently exposes:
 
-- Record operations: `upsert`, `find_all`, `find_by_filter`, `count`, `find_by_id`, `delete`, `delete_by_id`
+- Record operations: `upsert`, `find_all`, `find_by_filter`, `count`, `find_by_id`, `delete`, `delete_by_id`, `delete_by_filter`
 - Maintenance and inspection: `vacuum_drawer`, `migrate_drawer`, `inspect_drawer`, `check_path`, `diagnose_storage`, `list_drawer_names`, `verify_wal`
 - Lifecycle and recovery: `create_database`, `create_schema`, `create_drawer`, `register_tenant_route`, `backup_archive`, `restore_archive`
 - Administrative management: `manage_schema`, `manage_user`

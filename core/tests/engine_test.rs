@@ -175,6 +175,36 @@ fn embedded_engine_opens_direct_storage_path_and_writes_records() {
 }
 
 #[test]
+fn diagnose_storage_reports_recursive_storage_bytes() {
+    let database = TempDatabase::new("diagnose_storage_reports_recursive_bytes");
+    let nested_directory = database.path.join("nested").join("storage");
+    fs::create_dir_all(&nested_directory).expect("nested directory should create");
+    fs::write(nested_directory.join("manual.bin"), [1_u8, 2, 3, 4])
+        .expect("manual fixture should write");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "diagnose_fire",
+                "element": "Fire"
+            }),
+        )
+        .expect("record should upsert");
+
+    let diagnosis = engine
+        .diagnose_storage()
+        .expect("diagnosis should be available");
+
+    assert_eq!(diagnosis.storage_directory, database_directory);
+    assert!(diagnosis.storage_bytes >= 4);
+    assert!(diagnosis.drawer_count >= 1);
+    assert!(diagnosis.drawers.iter().any(|drawer| drawer == "gem"));
+}
+
+#[test]
 fn find_all_loads_existing_drawer_files_after_restart() {
     let database = TempDatabase::new("find_all_loads_existing_drawer_files");
     let database_directory = database.path.to_string_lossy().into_owned();
@@ -1018,6 +1048,50 @@ fn us_020_delete_by_id_returns_false_for_missing_record_in_existing_drawer() {
         .expect("delete against existing drawer should succeed");
 
     assert!(!deleted);
+}
+
+#[test]
+fn us_020_delete_by_filter_deletes_matching_records_and_returns_count() {
+    let database = TempDatabase::new("us_020_delete_by_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "lnk_delete_filter_fire",
+                "element": "Fire"
+            }),
+        )
+        .expect("first gem should upsert");
+    engine
+        .upsert(
+            "gem",
+            json!({
+                "_id": "lnk_delete_filter_water",
+                "element": "Water"
+            }),
+        )
+        .expect("second gem should upsert");
+
+    let deleted = engine
+        .delete_by_filter("gem", json!({ "element": "Fire" }))
+        .expect("delete by filter should succeed");
+
+    assert_eq!(deleted, 1);
+    assert!(
+        engine
+            .find_by_id("@gem:lnk_delete_filter_fire")
+            .expect("deleted record lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        engine
+            .find_by_id("@gem:lnk_delete_filter_water")
+            .expect("remaining record lookup should succeed")
+            .is_some()
+    );
 }
 
 #[test]

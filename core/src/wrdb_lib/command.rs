@@ -35,6 +35,8 @@ pub struct CheckEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageDiagnosis {
     pub storage_directory: String,
+    #[serde(default)]
+    pub storage_bytes: u64,
     pub drawer_count: usize,
     pub status: String,
     pub drawers: Vec<String>,
@@ -103,6 +105,10 @@ pub enum Command {
     },
     Delete {
         pointer: String,
+    },
+    DeleteByFilter {
+        drawer_name: String,
+        filter: Value,
     },
     Vacuum {
         drawer_name: String,
@@ -192,4 +198,28 @@ pub enum CommandResult {
     Backup(BackupArchive),
     Restored(RestoreReport),
     Admin(Value),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_diagnosis_defaults_missing_storage_bytes_for_older_payloads() {
+        let payload = r#"{
+            "storage_directory": "/srv/wardrobe",
+            "drawer_count": 0,
+            "status": "empty",
+            "drawers": []
+        }"#;
+
+        let diagnosis: StorageDiagnosis =
+            serde_json::from_str(payload).expect("legacy diagnosis should deserialize");
+
+        assert_eq!(diagnosis.storage_directory, "/srv/wardrobe");
+        assert_eq!(diagnosis.storage_bytes, 0);
+        assert_eq!(diagnosis.drawer_count, 0);
+        assert_eq!(diagnosis.status, "empty");
+        assert!(diagnosis.drawers.is_empty());
+    }
 }

@@ -60,6 +60,7 @@ pub fn count(
 ) -> Result<usize>
 pub fn find_by_id(&self, pointer: &str) -> Result<Option<Value>>
 pub fn delete_by_id(&self, pointer: &str) -> Result<bool>
+pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize>
 pub fn delete<L>(&self, locator: L) -> Result<bool>
 where
     L: Into<StorageLocator>
@@ -199,6 +200,7 @@ where
 pub fn delete_by_id<L>(&self, locator: L) -> Result<bool>
 where
     L: Into<StorageLocator>
+pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize>
 ```
 
 #### Maintenance, inspection, lifecycle, and recovery
@@ -412,6 +414,7 @@ High-level storage diagnosis returned by `diagnose_storage`.
 Fields:
 
 - `storage_directory: String`
+- `storage_bytes: u64`
 - `drawer_count: usize`
 - `status: String`
 - `drawers: Vec<String>`
@@ -500,6 +503,7 @@ Variants:
 - `FindByFilter { drawer_name, filter, modifiers }`
 - `Count { drawer_name, filter, modifiers }`
 - `Delete { pointer }`
+- `DeleteByFilter { drawer_name, filter }`
 - `Vacuum { drawer_name }`
 - `Migrate { drawer_name }`
 - `Inspect { drawer_name }`

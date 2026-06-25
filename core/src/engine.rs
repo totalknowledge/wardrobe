@@ -254,6 +254,15 @@ impl WardrobeEngine {
         self.delete(locator)
     }
 
+    pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize> {
+        Self::delete_by_filter_in_database(
+            &self.database_core,
+            drawer_name,
+            filter,
+            ExecutionContext::root(),
+        )
+    }
+
     pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
         Self::vacuum_drawer_in_database(&self.database_core, drawer_name, ExecutionContext::root())
     }
@@ -350,6 +359,7 @@ impl WardrobeEngine {
         let drawers = self.list_drawer_names()?;
         Ok(StorageDiagnosis {
             storage_directory: self.root_directory.display().to_string(),
+            storage_bytes: directory_size(&self.root_directory)?,
             drawer_count: drawers.len(),
             status: if drawers.is_empty() {
                 "empty".to_string()
@@ -1240,6 +1250,40 @@ impl WardrobeEngine {
         )
     }
 
+    fn delete_by_filter_in_database(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<usize> {
+        let records =
+            Self::find_by_filter_in_database(database_core, drawer_name, filter, None, context)?;
+
+        let mut deleted_count = 0_usize;
+        for record in records {
+            let id = record.get("_id").and_then(Value::as_str).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "record is missing a string _id for delete-by-filter",
+                )
+            })?;
+            let pointer = if id.starts_with('@') {
+                id.to_string()
+            } else {
+                format!("@{drawer_name}:{id}")
+            };
+            if Self::delete_by_id_in_database(
+                database_core,
+                StorageLocator::Inline(pointer),
+                context,
+            )? {
+                deleted_count += 1;
+            }
+        }
+
+        Ok(deleted_count)
+    }
+
     fn delete_by_id_inner(
         database_core: &RwLock<Database>,
         pointer: &str,
@@ -1589,6 +1633,25 @@ fn file_size_or_zero(path: &Path) -> Result<u64> {
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error),
     }
+}
+
+fn directory_size(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child_path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_size(&child_path)?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 fn check_entry(label: &str, path: &Path) -> Result<CheckEntry> {
@@ -2402,6 +2465,15 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
         WardrobeEngine::delete_by_id_in_database(database, locator, context)
+    }
+
+    fn delete_by_filter_in_database(
+        database: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<usize> {
+        WardrobeEngine::delete_by_filter_in_database(database, drawer_name, filter, context)
     }
 
     fn manage_schema_in_database(
