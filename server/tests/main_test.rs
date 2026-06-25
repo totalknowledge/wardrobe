@@ -473,6 +473,7 @@ fn run_returns_error_when_no_listeners_enabled() {
         tcp_bind: None,
         unix_socket: None,
         connection_pool_limit: None,
+        profile_commands: false,
     };
     let res = wardrobe_server::run(cfg);
     assert!(res.is_err());
@@ -538,6 +539,7 @@ fn run_execution_with_check_only_flag() {
         tcp_bind: None,
         unix_socket: None,
         connection_pool_limit: None,
+        profile_commands: false,
     };
     assert!(wardrobe_server::run(cfg).is_ok());
     let _ = std::fs::remove_dir_all(storage_directory);
@@ -552,6 +554,7 @@ fn run_execution_unsupported_unix_platform_guard() {
         tcp_bind: None,
         unix_socket: Some(std::path::PathBuf::from("unsupported.sock")),
         connection_pool_limit: None,
+        profile_commands: false,
     };
     assert!(wardrobe_server::run(cfg).is_err());
 }

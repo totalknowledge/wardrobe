@@ -122,6 +122,20 @@ struct StructuralBackupTarget {
     storage_path: PathBuf,
 }
 
+#[derive(Default)]
+struct RequestHydrationCache {
+    records: hydration::HydrationCache,
+    virtual_children: HashMap<VirtualRelationshipCacheKey, Vec<Value>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct VirtualRelationshipCacheKey {
+    target_drawer: String,
+    mapped_by: String,
+    parent_pointer: String,
+    include_ids: bool,
+}
+
 impl WardrobeEngine {
     pub fn open(directory: &str) -> Result<Self> {
         Self::open_with_optional_limits(directory, None, None)
@@ -1065,15 +1079,22 @@ impl WardrobeEngine {
             Vec::new()
         };
 
-        hydration::hydrate_records(&mut records, true, |drawer_name, record_key| {
-            Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
-        })?;
+        let mut hydration_cache = RequestHydrationCache::default();
+        hydration::hydrate_records_with_cache(
+            &mut records,
+            true,
+            &mut hydration_cache.records,
+            |drawer_name, record_key| {
+                Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+            },
+        )?;
         Self::attach_virtual_relationships(
             database_core,
             &physical_drawer_name,
             &mut records,
             true,
             context,
+            &mut hydration_cache,
         )?;
 
         Ok(records)
@@ -1110,15 +1131,22 @@ impl WardrobeEngine {
             query::record_matches_filter(record, filter_map, context.drawer_namespace)
         });
         query::apply_query_modifiers(&mut records, modifiers.as_ref());
-        hydration::hydrate_records(&mut records, true, |drawer_name, record_key| {
-            Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
-        })?;
+        let mut hydration_cache = RequestHydrationCache::default();
+        hydration::hydrate_records_with_cache(
+            &mut records,
+            true,
+            &mut hydration_cache.records,
+            |drawer_name, record_key| {
+                Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+            },
+        )?;
         Self::attach_virtual_relationships(
             database_core,
             &physical_drawer_name,
             &mut records,
             true,
             context,
+            &mut hydration_cache,
         )?;
 
         Ok(records)
@@ -1237,10 +1265,12 @@ impl WardrobeEngine {
                 Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?;
             if let Some(mut record) = found_record {
                 let mut active_pointer_path = HashSet::from([physical_pointer]);
-                hydration::hydrate_value(
+                let mut hydration_cache = RequestHydrationCache::default();
+                hydration::hydrate_value_with_cache(
                     &mut record,
                     false,
                     &mut active_pointer_path,
+                    &mut hydration_cache.records,
                     &mut |drawer_name, record_key| {
                         Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
                     },
@@ -1251,6 +1281,7 @@ impl WardrobeEngine {
                     std::slice::from_mut(&mut record),
                     false,
                     context,
+                    &mut hydration_cache,
                 )?;
                 if let Value::Object(ref mut map) = record {
                     map.remove("_id");
@@ -1543,6 +1574,7 @@ impl WardrobeEngine {
         records: &mut [Value],
         include_ids: bool,
         context: ExecutionContext<'_>,
+        hydration_cache: &mut RequestHydrationCache,
     ) -> Result<()> {
         let virtual_relationships = {
             let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
@@ -1573,6 +1605,7 @@ impl WardrobeEngine {
                     parent_pointer,
                     include_ids,
                     context,
+                    hydration_cache,
                 )
             },
         )
@@ -1585,16 +1618,38 @@ impl WardrobeEngine {
         parent_pointer: &str,
         include_ids: bool,
         context: ExecutionContext<'_>,
+        hydration_cache: &mut RequestHydrationCache,
     ) -> Result<Vec<Value>> {
         let physical_target_drawer =
             routing::scoped_drawer_name(target_drawer, context.drawer_namespace);
+        let cache_key = VirtualRelationshipCacheKey {
+            target_drawer: physical_target_drawer.clone(),
+            mapped_by: mapped_by.to_string(),
+            parent_pointer: parent_pointer.to_string(),
+            include_ids,
+        };
+
+        if let Some(child_records) = hydration_cache.virtual_children.get(&cache_key) {
+            return Ok(child_records.clone());
+        }
+
         let mut child_records = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_target_drawer,
             "_id",
             Vec::new(),
         )? {
-            Self::write_lock(&drawer)?.find_all_records_with_migration()?
+            let mut drawer = Self::write_lock(&drawer)?;
+            let mut filter_map = serde_json::Map::new();
+            filter_map.insert(
+                mapped_by.to_string(),
+                Value::String(parent_pointer.to_string()),
+            );
+            if let Some(offsets) = drawer.indexed_candidate_offsets(&filter_map) {
+                drawer.records_at_offsets_with_migration(offsets)?
+            } else {
+                drawer.find_all_records_with_migration()?
+            }
         } else {
             Vec::new()
         };
@@ -1602,13 +1657,18 @@ impl WardrobeEngine {
         child_records.retain(|record| {
             record.get(mapped_by).and_then(|value| value.as_str()) == Some(parent_pointer)
         });
-        hydration::hydrate_records(
+        hydration::hydrate_records_with_cache(
             &mut child_records,
             include_ids,
+            &mut hydration_cache.records,
             |drawer_name, record_key| {
                 Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
             },
         )?;
+
+        hydration_cache
+            .virtual_children
+            .insert(cache_key, child_records.clone());
 
         Ok(child_records)
     }

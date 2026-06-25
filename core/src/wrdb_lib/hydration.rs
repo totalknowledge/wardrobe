@@ -1,12 +1,31 @@
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::relationship::VirtualRelationship;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Result;
 
+#[derive(Default)]
+pub(crate) struct HydrationCache {
+    records: HashMap<String, Option<Value>>,
+}
+
+#[cfg(test)]
 pub(crate) fn hydrate_records<F>(
     records: &mut [Value],
     include_ids: bool,
+    fetch_record: F,
+) -> Result<()>
+where
+    F: FnMut(&str, &str) -> Result<Option<Value>>,
+{
+    let mut cache = HydrationCache::default();
+    hydrate_records_with_cache(records, include_ids, &mut cache, fetch_record)
+}
+
+pub(crate) fn hydrate_records_with_cache<F>(
+    records: &mut [Value],
+    include_ids: bool,
+    cache: &mut HydrationCache,
     mut fetch_record: F,
 ) -> Result<()>
 where
@@ -19,10 +38,11 @@ where
                 active_pointer_path.insert(pointer.to_string());
             }
         }
-        hydrate_value(
+        hydrate_value_with_cache(
             record,
             include_ids,
             &mut active_pointer_path,
+            cache,
             &mut fetch_record,
         )?;
     }
@@ -30,10 +50,31 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn hydrate_value<F>(
     current_value: &mut Value,
     include_ids: bool,
     active_pointer_path: &mut HashSet<String>,
+    fetch_record: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&str, &str) -> Result<Option<Value>>,
+{
+    let mut cache = HydrationCache::default();
+    hydrate_value_with_cache(
+        current_value,
+        include_ids,
+        active_pointer_path,
+        &mut cache,
+        fetch_record,
+    )
+}
+
+pub(crate) fn hydrate_value_with_cache<F>(
+    current_value: &mut Value,
+    include_ids: bool,
+    active_pointer_path: &mut HashSet<String>,
+    cache: &mut HydrationCache,
     fetch_record: &mut F,
 ) -> Result<()>
 where
@@ -56,9 +97,13 @@ where
                 .collect::<Vec<_>>();
 
             for (field_name, pointer) in pointer_updates {
-                if let Some(resolved_value) =
-                    resolve_pointer(&pointer, include_ids, active_pointer_path, fetch_record)?
-                {
+                if let Some(resolved_value) = resolve_pointer(
+                    &pointer,
+                    include_ids,
+                    active_pointer_path,
+                    cache,
+                    fetch_record,
+                )? {
                     if let Some(value_ref) = map.get_mut(&field_name) {
                         *value_ref = resolved_value;
                     }
@@ -67,7 +112,13 @@ where
 
             for (field_name, field_value) in map.iter_mut() {
                 if field_name != "_id" {
-                    hydrate_value(field_value, include_ids, active_pointer_path, fetch_record)?;
+                    hydrate_value_with_cache(
+                        field_value,
+                        include_ids,
+                        active_pointer_path,
+                        cache,
+                        fetch_record,
+                    )?;
                 }
             }
         }
@@ -78,15 +129,25 @@ where
                     .filter(|pointer| pointer::is_pointer(pointer))
                     .map(|pointer| pointer.to_string())
                 {
-                    if let Some(resolved_value) =
-                        resolve_pointer(&pointer, include_ids, active_pointer_path, fetch_record)?
-                    {
+                    if let Some(resolved_value) = resolve_pointer(
+                        &pointer,
+                        include_ids,
+                        active_pointer_path,
+                        cache,
+                        fetch_record,
+                    )? {
                         *value = resolved_value;
                         continue;
                     }
                 }
 
-                hydrate_value(value, include_ids, active_pointer_path, fetch_record)?;
+                hydrate_value_with_cache(
+                    value,
+                    include_ids,
+                    active_pointer_path,
+                    cache,
+                    fetch_record,
+                )?;
             }
         }
         _ => {}
@@ -134,6 +195,7 @@ fn resolve_pointer<F>(
     pointer: &str,
     include_ids: bool,
     active_pointer_path: &mut HashSet<String>,
+    cache: &mut HydrationCache,
     fetch_record: &mut F,
 ) -> Result<Option<Value>>
 where
@@ -146,11 +208,25 @@ where
         return Ok(None);
     }
 
-    let mut record = fetch_record(&drawer_name, &record_key)?;
+    let mut record = if let Some(cached_record) = cache.records.get(&canonical_pointer) {
+        cached_record.clone()
+    } else {
+        let fetched_record = fetch_record(&drawer_name, &record_key)?;
+        cache
+            .records
+            .insert(canonical_pointer.clone(), fetched_record.clone());
+        fetched_record
+    };
 
     if let Some(ref mut record_value) = record {
         active_pointer_path.insert(canonical_pointer.clone());
-        hydrate_value(record_value, include_ids, active_pointer_path, fetch_record)?;
+        hydrate_value_with_cache(
+            record_value,
+            include_ids,
+            active_pointer_path,
+            cache,
+            fetch_record,
+        )?;
         active_pointer_path.remove(&canonical_pointer);
 
         if !include_ids {
@@ -210,6 +286,30 @@ mod tests {
 
         assert_eq!(records[0]["gem"]["element"], "Fire");
         assert_eq!(records[0]["gem"]["_id"], "@gem:fire");
+    }
+
+    #[test]
+    fn hydrate_records_reuses_repeated_pointer_fetches() {
+        let store = test_store();
+        let mut fetch_count = 0usize;
+        let mut records = vec![
+            json!({"_id": "@weapon:blade", "gem": "@gem:fire"}),
+            json!({"_id": "@weapon:axe", "gem": "@gem:fire"}),
+        ];
+
+        hydrate_records(&mut records, true, |drawer_name, record_key| {
+            if drawer_name == "gem" && record_key == "fire" {
+                fetch_count += 1;
+            }
+            Ok(store
+                .get(&(drawer_name.to_string(), record_key.to_string()))
+                .cloned())
+        })
+        .expect("hydration should succeed");
+
+        assert_eq!(fetch_count, 1);
+        assert_eq!(records[0]["gem"]["element"], "Fire");
+        assert_eq!(records[1]["gem"]["element"], "Fire");
     }
 
     #[test]

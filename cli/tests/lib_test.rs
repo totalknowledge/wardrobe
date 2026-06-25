@@ -1143,6 +1143,12 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
             serde_json::to_vec(&CommandResult::Diagnosis(wardrobe_core::StorageDiagnosis {
                 storage_directory: "/srv/wardrobe".to_string(),
                 storage_bytes: 4096,
+                data_bytes: 2048,
+                index_bytes: 1024,
+                metadata_bytes: 256,
+                logical_wal_bytes: 512,
+                transaction_wal_bytes: 128,
+                other_bytes: 128,
                 drawer_count: 1,
                 status: "ok".to_string(),
                 drawers: vec!["armory/public/gem".to_string()],
