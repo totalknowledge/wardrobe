@@ -2023,17 +2023,55 @@ impl Drawer {
         Ok((starting_offset, serialized_index.len()))
     }
 
-    pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {
-        let mut live_records = Vec::new();
-        let mut raw_slots = Vec::new();
+    fn sorted_live_primary_offsets(&self) -> Vec<u64> {
+        let mut live_offsets = self
+            .primary_memory_index
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        live_offsets.sort_unstable();
+        live_offsets.dedup();
+        live_offsets
+    }
 
+    fn should_read_by_primary_offsets(&self) -> std::io::Result<bool> {
+        if self.primary_memory_index.is_empty() || self.data_block_index.is_empty() {
+            return Ok(false);
+        }
+
+        let live_bytes = self
+            .data_block_index
+            .values()
+            .map(|block| block.size_class as u64)
+            .sum::<u64>();
+        if live_bytes == 0 {
+            return Ok(false);
+        }
+
+        let total_bytes = self.data_writer.current_length()?;
+        let dead_bytes = total_bytes.saturating_sub(live_bytes);
+        Ok(dead_bytes > 65_536 && dead_bytes > live_bytes / 2)
+    }
+
+    fn find_all_records_by_streaming_live_offsets(&self) -> std::io::Result<Vec<Value>> {
+        if self.primary_memory_index.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let live_offsets = self
+            .primary_memory_index
+            .values()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut raw_slots = Vec::with_capacity(live_offsets.len());
         self.data_reader
-            .stream_with_offsets(|_offset, line_content| {
-                if !line_content.is_empty() && !BsonBinaryFormat::is_tombstone(line_content) {
+            .stream_with_offsets(|offset, line_content| {
+                if live_offsets.contains(&offset) {
                     raw_slots.push(line_content.to_vec());
                 }
             })?;
 
+        let mut live_records = Vec::with_capacity(raw_slots.len());
         for slot in raw_slots {
             if let Some(record_value) = BsonBinaryFormat::deserialize_record(&slot)? {
                 live_records.push(record_value);
@@ -2043,21 +2081,23 @@ impl Drawer {
         Ok(live_records)
     }
 
+    pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {
+        if self.should_read_by_primary_offsets()? {
+            return self
+                .data_reader
+                .read_records_at_offsets(self.sorted_live_primary_offsets());
+        }
+
+        self.find_all_records_by_streaming_live_offsets()
+    }
+
     pub fn find_all_records_with_migration(&mut self) -> std::io::Result<Vec<Value>> {
         if !self.needs_format_migration() {
             return self.find_all_records();
         }
 
-        let mut live_offsets = self
-            .primary_memory_index
-            .values()
-            .copied()
-            .collect::<Vec<_>>();
-        live_offsets.sort_unstable();
-        live_offsets.dedup();
-
         let mut live_records = Vec::new();
-        for offset in live_offsets {
+        for offset in self.sorted_live_primary_offsets() {
             if let Some(record) = self.read_record_at_offset_with_lazy_migration(offset)? {
                 live_records.push(record);
             }

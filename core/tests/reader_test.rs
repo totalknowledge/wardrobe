@@ -85,6 +85,41 @@ fn us_071_reader_reuses_handle_for_successive_reads_and_closes_cleanly() {
 }
 
 #[test]
+fn read_records_at_offsets_batches_ordered_live_reads() {
+    let file_path = temp_file_path("reader_batch_offsets");
+    let mut file = fs::File::create(&file_path).expect("file should create");
+    let first_payload =
+        BsonBinaryFormat::serialize_record(&json!({"_id":"@gem:fire","element":"Fire"}))
+            .expect("first record should serialize");
+    let mut tombstone_payload =
+        BsonBinaryFormat::tombstone_frame(BsonBinaryFormat::frame_header_len() * 2)
+            .expect("tombstone should serialize");
+    tombstone_payload.resize(BsonBinaryFormat::frame_header_len() * 2, 0);
+    let second_payload =
+        BsonBinaryFormat::serialize_record(&json!({"_id":"@gem:water","element":"Water"}))
+            .expect("second record should serialize");
+    let tombstone_offset = first_payload.len() as u64;
+    let second_offset = tombstone_offset + tombstone_payload.len() as u64;
+
+    file.write_all(&first_payload)
+        .expect("first write should succeed");
+    file.write_all(&tombstone_payload)
+        .expect("tombstone write should succeed");
+    file.write_all(&second_payload)
+        .expect("second write should succeed");
+    file.sync_all().expect("sync should succeed");
+
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let records = reader
+        .read_records_at_offsets(vec![0, tombstone_offset, second_offset])
+        .expect("batch read should succeed");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["element"], "Fire");
+    assert_eq!(records[1]["element"], "Water");
+}
+
+#[test]
 fn stream_with_offsets_reports_each_line_offset() {
     let file_path = temp_file_path("reader_stream_with_offsets");
     let mut file = fs::File::create(&file_path).expect("file should create");

@@ -294,6 +294,66 @@ fn find_all_records_skips_tombstoned_lines() {
 }
 
 #[test]
+fn us_106_find_all_uses_primary_index_offsets_for_live_storage_order() {
+    let database_directory = TempDatabase::new("us_106_find_all_primary_offsets");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+    let data_path = database_directory.path.join("weapon.drw");
+
+    {
+        let mut drawer = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
+            .expect("drawer should open");
+        drawer
+            .upsert_record(json!({
+                "_id": "@weapon:lnk_first",
+                "name": "First Original"
+            }))
+            .expect("first upsert should succeed")
+            .expect("first record should validate");
+        drawer
+            .upsert_record(json!({
+                "_id": "@weapon:lnk_second",
+                "name": "Second"
+            }))
+            .expect("second upsert should succeed")
+            .expect("second record should validate");
+        drawer
+            .upsert_record(json!({
+                "_id": "@weapon:lnk_first",
+                "name": "First Updated"
+            }))
+            .expect("replacement should succeed")
+            .expect("replacement should validate");
+    }
+
+    let orphan_record = BsonBinaryFormat::serialize_record(&json!({
+        "_id": "@weapon:lnk_orphan",
+        "name": "Unindexed Orphan"
+    }))
+    .expect("orphan should serialize");
+    let orphan_size = Recycler::new().calculate_aligned_size(orphan_record.len());
+    let mut writer = DatabaseWriter::open_drawer(&data_path).expect("data writer should open");
+    writer
+        .append_record(&orphan_record, orphan_size)
+        .expect("orphan should append");
+    writer.sync_all().expect("orphan should sync");
+
+    let drawer = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
+        .expect("drawer should reopen");
+    let records = drawer.find_all_records().expect("find all should succeed");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["_id"], "@weapon:lnk_second");
+    assert_eq!(records[0]["name"], "Second");
+    assert_eq!(records[1]["_id"], "@weapon:lnk_first");
+    assert_eq!(records[1]["name"], "First Updated");
+    assert!(
+        !records
+            .iter()
+            .any(|record| record["_id"] == "@weapon:lnk_orphan")
+    );
+}
+
+#[test]
 fn us_017_open_creates_metadata_sidecar_file_for_drawer() {
     let database_directory = TempDatabase::new("drawer_metadata_sidecar_creation");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");

@@ -34,11 +34,42 @@ impl DatabaseReader {
         Ok(None)
     }
 
+    pub fn read_records_at_offsets<I>(&self, offsets: I) -> std::io::Result<Vec<Value>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut reader = self.reader.lock().map_err(|_| {
+            std::io::Error::other("DatabaseReader lock was poisoned during batch read")
+        })?;
+        let file_len = reader.get_ref().metadata()?.len();
+        let mut records = Vec::new();
+
+        for offset in offsets {
+            if let Some(record_bytes) =
+                Self::read_raw_bytes_at_offset_locked(&mut reader, file_len, offset)?
+            {
+                if let Some(record) = BsonBinaryFormat::deserialize_record(&record_bytes)? {
+                    records.push(record);
+                }
+            }
+        }
+
+        Ok(records)
+    }
+
     pub fn read_raw_bytes_at_offset(&self, byte_offset: u64) -> std::io::Result<Option<Vec<u8>>> {
         let mut reader = self.reader.lock().map_err(|_| {
             std::io::Error::other("DatabaseReader lock was poisoned during raw read")
         })?;
         let file_len = reader.get_ref().metadata()?.len();
+        Self::read_raw_bytes_at_offset_locked(&mut reader, file_len, byte_offset)
+    }
+
+    fn read_raw_bytes_at_offset_locked(
+        reader: &mut BufReader<File>,
+        file_len: u64,
+        byte_offset: u64,
+    ) -> std::io::Result<Option<Vec<u8>>> {
         if byte_offset >= file_len {
             return Ok(None);
         }
@@ -80,9 +111,9 @@ impl DatabaseReader {
             ));
         }
 
-        reader.seek(SeekFrom::Start(byte_offset))?;
         let mut slot = vec![0u8; slot_size];
-        reader.read_exact(&mut slot)?;
+        slot[..header_len].copy_from_slice(&header);
+        reader.read_exact(&mut slot[header_len..])?;
         Ok(Some(slot))
     }
 
