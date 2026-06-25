@@ -1215,6 +1215,20 @@ impl BenchmarkTarget for WardrobeTarget {
                 drawer_name: drawer.to_string(),
             })?)?;
         }
+        for field_name in ["author_id", "editor_id", "purge_bucket"] {
+            progress.log(format!(
+                "{}: creating book index '{}'",
+                self.name(),
+                field_name
+            ));
+            expect_admin(self.execute_scoped(Command::ManageSchema {
+                action: "add".to_string(),
+                kind: "index".to_string(),
+                drawer_name: BOOK_DRAWER.to_string(),
+                field_name: field_name.to_string(),
+                payload: json!({ "kind": "index" }),
+            })?)?;
+        }
         self.flush()
     }
 
@@ -1269,7 +1283,7 @@ impl BenchmarkTarget for WardrobeTarget {
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64> {
-        for (index, (action, kind)) in [("add", "key"), ("remove", "key"), ("add", "key")]
+        for (index, (action, kind)) in [("add", "index"), ("remove", "index"), ("add", "index")]
             .into_iter()
             .enumerate()
         {
@@ -1286,7 +1300,7 @@ impl BenchmarkTarget for WardrobeTarget {
                     kind: kind.to_string(),
                     drawer_name: BOOK_DRAWER.to_string(),
                     field_name: "isbn".to_string(),
-                    payload: json!({ "kind": kind, "unique": true }),
+                    payload: json!({ "kind": kind }),
                 })?)
             })?;
         }

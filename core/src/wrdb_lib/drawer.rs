@@ -223,7 +223,7 @@ impl Drawer {
             .unwrap_or(DRAWER_METADATA_FORMAT_VERSION);
         let drawer_needs_format_migration =
             existing_metadata.is_some() && metadata_format_version < DRAWER_METADATA_FORMAT_VERSION;
-        let mut inferred_unique_constraints = if unique_constraints.is_empty() {
+        let inferred_unique_constraints = if unique_constraints.is_empty() {
             existing_metadata
                 .as_ref()
                 .map(|metadata| metadata.unique_constraints.clone())
@@ -232,7 +232,7 @@ impl Drawer {
             unique_constraints
         };
 
-        for field in &inferred_unique_constraints {
+        for field in Self::indexed_fields_from(&inferred_unique_constraints, schema.as_ref()) {
             secondary_memory_index.insert(field.clone(), HashMap::new());
         }
 
@@ -306,15 +306,7 @@ impl Drawer {
                             primary_memory_index.remove(key);
                             primary_memory_index.remove(&Self::clean_legacy_identifier(key));
                         }
-                    } else {
-                        if !inferred_unique_constraints.contains(&field.to_string()) {
-                            inferred_unique_constraints.push(field.to_string());
-                        }
-
-                        let field_map = secondary_memory_index
-                            .entry(field.to_string())
-                            .or_insert_with(HashMap::new);
-
+                    } else if let Some(field_map) = secondary_memory_index.get_mut(field) {
                         if let Some(data_offset) = data_offset_val.as_u64() {
                             field_map.insert(key.to_string(), vec![data_offset]);
                         } else if let Some(offset_array) = data_offset_val.as_array() {
@@ -465,45 +457,60 @@ impl Drawer {
             .insert(primary_key_value.clone(), data_offset);
         self.data_block_index.insert(data_offset, live_block);
 
-        let fields_to_index = self.unique_constraints.clone();
-        for unique_field in fields_to_index {
+        let fields_to_index = self.indexed_fields();
+        for indexed_field in fields_to_index {
             let old_field_value = old_record
                 .as_ref()
-                .and_then(|value| value.get(&unique_field))
-                .and_then(|value| value.as_str());
+                .and_then(|value| value.get(&indexed_field))
+                .and_then(Self::secondary_index_key);
+            let new_field_value = record
+                .get(&indexed_field)
+                .and_then(Self::secondary_index_key);
+            let mut keys_to_write = Vec::new();
 
-            if let (Some(previous_value), Some(previous_offset)) =
-                (old_field_value, old_data_offset)
             {
-                if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
+                let field_map = self
+                    .secondary_memory_index
+                    .entry(indexed_field.clone())
+                    .or_insert_with(HashMap::new);
+
+                if let (Some(previous_value), Some(previous_offset)) =
+                    (old_field_value.as_deref(), old_data_offset)
+                {
                     if let Some(offsets) = field_map.get_mut(previous_value) {
                         offsets.retain(|offset| *offset != previous_offset);
                         if offsets.is_empty() {
                             field_map.remove(previous_value);
                         }
                     }
+                    keys_to_write.push(previous_value.to_string());
                 }
 
-                if record.get(&unique_field).and_then(|value| value.as_str())
-                    != Some(previous_value)
-                {
-                    self.write_index_log(
-                        &unique_field,
-                        previous_value,
-                        Value::Array(Vec::new()),
-                        None,
-                    )?;
-                }
-            }
-
-            if let Some(field_value) = record.get(&unique_field).and_then(|v| v.as_str()) {
-                self.write_index_log(&unique_field, field_value, Value::from(data_offset), None)?;
-                if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
+                if let Some(field_value) = new_field_value.as_deref() {
                     let offsets = field_map.entry(field_value.to_string()).or_default();
                     if !offsets.contains(&data_offset) {
                         offsets.push(data_offset);
                     }
+                    keys_to_write.push(field_value.to_string());
                 }
+            }
+
+            keys_to_write.sort();
+            keys_to_write.dedup();
+
+            for field_value in keys_to_write {
+                let offsets = self
+                    .secondary_memory_index
+                    .get(&indexed_field)
+                    .and_then(|field_map| field_map.get(&field_value))
+                    .cloned()
+                    .unwrap_or_default();
+                self.write_index_log(
+                    &indexed_field,
+                    &field_value,
+                    Self::offsets_index_value(&offsets),
+                    None,
+                )?;
             }
         }
 
@@ -617,6 +624,47 @@ impl Drawer {
         Ok(matching_records)
     }
 
+    pub(crate) fn indexed_candidate_offsets(
+        &self,
+        filter_map: &Map<String, Value>,
+    ) -> Option<Vec<u64>> {
+        if filter_map.is_empty() {
+            return None;
+        }
+
+        let mut candidate_offsets: Option<Vec<u64>> = None;
+        for (field_name, expected_value) in filter_map {
+            let field_map = self.secondary_memory_index.get(field_name)?;
+            let index_key = Self::equality_filter_index_key(expected_value)?;
+            let mut offsets = field_map.get(&index_key).cloned().unwrap_or_default();
+            offsets.sort_unstable();
+            offsets.dedup();
+
+            candidate_offsets = Some(match candidate_offsets {
+                Some(existing_offsets) => Self::intersect_sorted_offsets(existing_offsets, offsets),
+                None => offsets,
+            });
+        }
+
+        candidate_offsets
+    }
+
+    pub(crate) fn records_at_offsets_with_migration<I>(
+        &mut self,
+        offsets: I,
+    ) -> std::io::Result<Vec<Value>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut records = Vec::new();
+        for offset in offsets {
+            if let Some(record) = self.read_record_at_offset_with_lazy_migration(offset)? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
     pub fn delete_by_primary_key(&mut self, key: &str) -> std::io::Result<Option<Value>> {
         let Some(stale_offset) = self.primary_memory_index.get(key).copied() else {
             return Ok(None);
@@ -646,22 +694,33 @@ impl Drawer {
         self.record_count = self.record_count.saturating_sub(1);
         self.mark_metadata_dirty();
 
-        let fields_to_clear = self.unique_constraints.clone();
-        for unique_field in fields_to_clear {
+        let fields_to_clear = self.indexed_fields();
+        for indexed_field in fields_to_clear {
             if let Some(field_value) = deleted_record
-                .get(&unique_field)
-                .and_then(|value| value.as_str())
+                .get(&indexed_field)
+                .and_then(Self::secondary_index_key)
             {
-                if let Some(field_map) = self.secondary_memory_index.get_mut(&unique_field) {
-                    if let Some(offsets) = field_map.get_mut(field_value) {
+                if let Some(field_map) = self.secondary_memory_index.get_mut(&indexed_field) {
+                    if let Some(offsets) = field_map.get_mut(&field_value) {
                         offsets.retain(|offset| *offset != stale_offset);
                         if offsets.is_empty() {
-                            field_map.remove(field_value);
+                            field_map.remove(&field_value);
                         }
                     }
                 }
 
-                self.write_index_log(&unique_field, field_value, Value::Array(Vec::new()), None)?;
+                let offsets = self
+                    .secondary_memory_index
+                    .get(&indexed_field)
+                    .and_then(|field_map| field_map.get(&field_value))
+                    .cloned()
+                    .unwrap_or_default();
+                self.write_index_log(
+                    &indexed_field,
+                    &field_value,
+                    Self::offsets_index_value(&offsets),
+                    None,
+                )?;
             }
         }
 
@@ -692,7 +751,8 @@ impl Drawer {
         let mut index_file_offsets = HashMap::new();
         let mut data_block_index = HashMap::new();
 
-        for field in &self.unique_constraints {
+        let indexed_fields = self.indexed_fields();
+        for field in &indexed_fields {
             secondary_memory_index.insert(field.clone(), HashMap::new());
         }
 
@@ -727,32 +787,46 @@ impl Drawer {
             );
             data_block_index.insert(data_offset, block_entry);
 
-            for unique_field in &self.unique_constraints {
-                if let Some(field_value) = record.get(unique_field).and_then(|value| value.as_str())
+            for indexed_field in &indexed_fields {
+                if let Some(field_value) = record
+                    .get(indexed_field)
+                    .and_then(Self::secondary_index_key)
                 {
-                    let secondary_index_entry = Self::index_entry_value(
-                        unique_field,
-                        field_value,
-                        Value::from(data_offset),
-                        None,
-                    );
-                    let (index_offset, index_slot_size) = Self::append_compact_index_entry(
-                        &mut compact_index,
-                        &secondary_index_entry,
-                    )?;
-
-                    index_file_offsets.insert(
-                        format!("{}:{}", unique_field, field_value),
-                        (index_offset, index_slot_size),
-                    );
                     secondary_memory_index
-                        .entry(unique_field.clone())
+                        .entry(indexed_field.clone())
                         .or_insert_with(HashMap::new)
-                        .entry(field_value.to_string())
+                        .entry(field_value)
                         .or_insert_with(Vec::new)
                         .push(data_offset);
                 }
             }
+        }
+
+        let mut compact_secondary_entries = secondary_memory_index
+            .iter()
+            .flat_map(|(field, field_map)| {
+                field_map.iter().map(move |(field_value, offsets)| {
+                    (field.clone(), field_value.clone(), offsets.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        compact_secondary_entries
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        for (field, field_value, offsets) in compact_secondary_entries {
+            let secondary_index_entry = Self::index_entry_value(
+                &field,
+                &field_value,
+                Self::offsets_index_value(&offsets),
+                None,
+            );
+            let (index_offset, index_slot_size) =
+                Self::append_compact_index_entry(&mut compact_index, &secondary_index_entry)?;
+
+            index_file_offsets.insert(
+                format!("{}:{}", field, field_value),
+                (index_offset, index_slot_size),
+            );
         }
 
         self.data_writer.rewrite_all(&compact_data)?;
@@ -884,6 +958,7 @@ impl Drawer {
     ) -> std::io::Result<()> {
         match kind {
             "index" => {
+                self.add_secondary_index(field_name)?;
                 self.record_schema_extension("indexes", field_name, payload);
                 Ok(())
             }
@@ -954,6 +1029,7 @@ impl Drawer {
         match kind {
             "index" => {
                 self.remove_schema_extension("indexes", field_name);
+                self.remove_query_index(field_name)?;
                 Ok(())
             }
             "key" => {
@@ -963,7 +1039,7 @@ impl Drawer {
                     .unwrap_or("secondary")
                     .to_ascii_lowercase();
                 if key_type != "primary" {
-                    self.clear_secondary_index(field_name)?;
+                    self.clear_unique_constraint(field_name)?;
                 }
                 self.remove_schema_extension("keys", field_name);
                 Ok(())
@@ -971,13 +1047,13 @@ impl Drawer {
             "constraint" => {
                 if let Ok(constraint) = Self::constraint_type(payload) {
                     if Self::is_unique_constraint(constraint) {
-                        self.clear_secondary_index(field_name)?;
+                        self.clear_unique_constraint(field_name)?;
                     }
                     if Self::is_required_constraint(constraint) {
                         self.remove_required_field(field_name);
                     }
                 } else {
-                    self.clear_secondary_index(field_name)?;
+                    self.clear_unique_constraint(field_name)?;
                     self.remove_required_field(field_name);
                 }
                 self.remove_schema_extension("constraints", field_name);
@@ -1012,16 +1088,43 @@ impl Drawer {
             return Ok(());
         }
 
+        let field_index = self.build_secondary_index(field_name, true)?;
+        self.write_secondary_index_snapshot(field_name, &field_index)?;
+
+        self.unique_constraints.push(field_name.to_string());
+        self.secondary_memory_index
+            .insert(field_name.to_string(), field_index);
+        Ok(())
+    }
+
+    fn add_secondary_index(&mut self, field_name: &str) -> std::io::Result<()> {
+        if self.secondary_memory_index.contains_key(field_name) {
+            return Ok(());
+        }
+
+        let field_index = self.build_secondary_index(field_name, false)?;
+        self.write_secondary_index_snapshot(field_name, &field_index)?;
+        self.secondary_memory_index
+            .insert(field_name.to_string(), field_index);
+        Ok(())
+    }
+
+    fn build_secondary_index(
+        &self,
+        field_name: &str,
+        enforce_unique: bool,
+    ) -> std::io::Result<HashMap<String, Vec<u64>>> {
         let mut field_index: HashMap<String, Vec<u64>> = HashMap::new();
         for (primary_key, offset) in &self.primary_memory_index {
             let Some(record) = self.data_reader.read_record_at_offset(*offset)? else {
                 continue;
             };
-            let Some(field_value) = record.get(field_name).and_then(Value::as_str) else {
+            let Some(field_value) = record.get(field_name).and_then(Self::secondary_index_key)
+            else {
                 continue;
             };
 
-            if field_index.contains_key(field_value) {
+            if enforce_unique && field_index.contains_key(&field_value) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -1035,25 +1138,53 @@ impl Drawer {
                 continue;
             }
 
-            field_index.insert(field_value.to_string(), vec![*offset]);
+            field_index.entry(field_value).or_default().push(*offset);
         }
 
-        for (field_value, offsets) in &field_index {
-            if let Some(offset) = offsets.first() {
-                self.write_index_log(field_name, field_value, Value::from(*offset), None)?;
-            }
+        Ok(field_index)
+    }
+
+    fn write_secondary_index_snapshot(
+        &mut self,
+        field_name: &str,
+        field_index: &HashMap<String, Vec<u64>>,
+    ) -> std::io::Result<()> {
+        for (field_value, offsets) in field_index {
+            self.write_index_log(
+                field_name,
+                field_value,
+                Self::offsets_index_value(offsets),
+                None,
+            )?;
         }
 
-        self.unique_constraints.push(field_name.to_string());
-        self.secondary_memory_index
-            .insert(field_name.to_string(), field_index);
         Ok(())
     }
 
-    fn clear_secondary_index(&mut self, field_name: &str) -> std::io::Result<()> {
+    fn clear_unique_constraint(&mut self, field_name: &str) -> std::io::Result<()> {
         self.unique_constraints
             .retain(|constraint| constraint != field_name);
 
+        if self.schema_has_index(field_name) {
+            return Ok(());
+        }
+
+        self.clear_secondary_index_entries(field_name)
+    }
+
+    fn remove_query_index(&mut self, field_name: &str) -> std::io::Result<()> {
+        if self
+            .unique_constraints
+            .iter()
+            .any(|constraint| constraint == field_name)
+        {
+            return Ok(());
+        }
+
+        self.clear_secondary_index_entries(field_name)
+    }
+
+    fn clear_secondary_index_entries(&mut self, field_name: &str) -> std::io::Result<()> {
         if let Some(field_map) = self.secondary_memory_index.remove(field_name) {
             for field_value in field_map.keys() {
                 self.tombstone_index_slot(field_name, field_value)?;
@@ -1133,6 +1264,37 @@ impl Drawer {
         };
 
         bucket_map.remove(field_name);
+    }
+
+    fn schema_has_index(&self, field_name: &str) -> bool {
+        Self::schema_extension_fields(self.schema.as_ref(), "indexes")
+            .iter()
+            .any(|field| field == field_name)
+    }
+
+    fn indexed_fields(&self) -> Vec<String> {
+        Self::indexed_fields_from(&self.unique_constraints, self.schema.as_ref())
+    }
+
+    fn indexed_fields_from(unique_constraints: &[String], schema: Option<&Value>) -> Vec<String> {
+        let mut fields = unique_constraints.to_vec();
+        for field in Self::schema_extension_fields(schema, "indexes") {
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+        fields
+    }
+
+    fn schema_extension_fields(schema: Option<&Value>, bucket: &str) -> Vec<String> {
+        schema
+            .and_then(Value::as_object)
+            .and_then(|schema_map| schema_map.get("x-wardrobe-cli"))
+            .and_then(Value::as_object)
+            .and_then(|extension_map| extension_map.get(bucket))
+            .and_then(Value::as_object)
+            .map(|bucket_map| bucket_map.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn ensure_schema_object(&mut self) -> &mut Map<String, Value> {
@@ -1982,6 +2144,52 @@ impl Drawer {
 
         self.data_recycler_cache_initialized = true;
         Ok(())
+    }
+
+    fn secondary_index_key(value: &Value) -> Option<String> {
+        match value {
+            Value::String(value) => Some(value.clone()),
+            Value::Number(number) if number.as_i64().is_some() || number.as_u64().is_some() => {
+                Some(number.to_string())
+            }
+            Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn equality_filter_index_key(value: &Value) -> Option<String> {
+        match value {
+            Value::String(value) if !value.contains('%') => Some(value.clone()),
+            Value::Number(number) if number.as_i64().is_some() || number.as_u64().is_some() => {
+                Some(number.to_string())
+            }
+            Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn offsets_index_value(offsets: &[u64]) -> Value {
+        Value::Array(offsets.iter().copied().map(Value::from).collect())
+    }
+
+    fn intersect_sorted_offsets(left: Vec<u64>, right: Vec<u64>) -> Vec<u64> {
+        let mut intersection = Vec::new();
+        let mut left_index = 0usize;
+        let mut right_index = 0usize;
+
+        while left_index < left.len() && right_index < right.len() {
+            match left[left_index].cmp(&right[right_index]) {
+                std::cmp::Ordering::Equal => {
+                    intersection.push(left[left_index]);
+                    left_index += 1;
+                    right_index += 1;
+                }
+                std::cmp::Ordering::Less => left_index += 1,
+                std::cmp::Ordering::Greater => right_index += 1,
+            }
+        }
+
+        intersection
     }
 
     fn index_entry_value(

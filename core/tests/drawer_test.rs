@@ -153,6 +153,78 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
 }
 
 #[test]
+fn non_unique_schema_indexes_track_duplicate_string_and_integer_values() {
+    let database_directory = TempDatabase::new("drawer_non_unique_schema_indexes");
+    fs::create_dir_all(&database_directory.path).expect("temp dir should create");
+
+    {
+        let mut drawer = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
+            .expect("drawer should open");
+        drawer
+            .manage_schema_rule("add", "index", "author_id", json!({ "kind": "index" }))
+            .expect("author index should be registered");
+        drawer
+            .manage_schema_rule("add", "index", "purge_bucket", json!({ "kind": "index" }))
+            .expect("purge index should be registered");
+
+        for payload in [
+            json!({"_id": "book_a", "author_id": "entity_a", "purge_bucket": 0}),
+            json!({"_id": "book_b", "author_id": "entity_a", "purge_bucket": 0}),
+            json!({"_id": "book_c", "author_id": "entity_b", "purge_bucket": 1}),
+        ] {
+            drawer
+                .upsert_record(payload)
+                .expect("upsert should succeed")
+                .expect("record should validate");
+        }
+
+        assert_eq!(
+            drawer
+                .find_by_secondary_key("author_id", "entity_a")
+                .expect("author lookup should succeed")
+                .len(),
+            2
+        );
+        assert_eq!(
+            drawer
+                .find_by_secondary_key("purge_bucket", "0")
+                .expect("purge lookup should succeed")
+                .len(),
+            2
+        );
+        drawer.checkpoint().expect("drawer should checkpoint");
+    }
+
+    let reopened = Drawer::open(&database_directory.path, "book", "_id", Vec::new())
+        .expect("drawer should reopen");
+
+    assert_eq!(
+        reopened
+            .find_by_secondary_key("author_id", "entity_a")
+            .expect("reopened author lookup should succeed")
+            .len(),
+        2
+    );
+    assert_eq!(
+        reopened
+            .find_by_secondary_key("purge_bucket", "0")
+            .expect("reopened purge lookup should succeed")
+            .len(),
+        2
+    );
+    assert!(
+        !reopened
+            .unique_constraints
+            .contains(&"author_id".to_string())
+    );
+    assert!(
+        !reopened
+            .unique_constraints
+            .contains(&"purge_bucket".to_string())
+    );
+}
+
+#[test]
 fn unique_constraints_are_enforced_and_tombstones_are_recycled() {
     let database_directory = TempDatabase::new("drawer_unique_constraints");
     fs::create_dir_all(&database_directory.path).expect("temp dir should create");

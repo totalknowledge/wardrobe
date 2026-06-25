@@ -1487,6 +1487,104 @@ fn us_031_find_by_filter_rejects_non_object_filters() {
 }
 
 #[test]
+fn us_104_find_by_filter_intersects_declared_secondary_indexes() {
+    let database = TempDatabase::new("us_104_indexed_filter_intersection");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .bulk_upsert(
+            "book",
+            vec![
+                json!({
+                    "_id": "book_a",
+                    "title": "Indexed Alpha",
+                    "author_id": "entity_a",
+                    "editor_id": "entity_a",
+                    "purge_bucket": 0
+                }),
+                json!({
+                    "_id": "book_b",
+                    "title": "Indexed Beta",
+                    "author_id": "entity_a",
+                    "editor_id": "entity_b",
+                    "purge_bucket": 0
+                }),
+                json!({
+                    "_id": "book_c",
+                    "title": "Indexed Gamma",
+                    "author_id": "entity_a",
+                    "editor_id": "entity_a",
+                    "purge_bucket": 1
+                }),
+                json!({
+                    "_id": "book_d",
+                    "title": "Other Delta",
+                    "author_id": "entity_b",
+                    "editor_id": "entity_a",
+                    "purge_bucket": 0
+                }),
+            ],
+            true,
+        )
+        .expect("book batch should upsert");
+
+    for field_name in ["author_id", "editor_id", "purge_bucket"] {
+        engine
+            .manage_schema(
+                "book",
+                "add",
+                "index",
+                field_name,
+                json!({ "kind": "index" }),
+            )
+            .expect("index should be registered");
+    }
+
+    let mut record_ids = engine
+        .find_by_filter(
+            "book",
+            json!({
+                "author_id": "entity_a",
+                "editor_id": "entity_a",
+                "purge_bucket": 0
+            }),
+            None,
+        )
+        .expect("indexed filter should succeed")
+        .into_iter()
+        .map(|record| {
+            record["_id"]
+                .as_str()
+                .expect("record id should be a string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    record_ids.sort();
+
+    assert_eq!(record_ids, vec!["book_a".to_string()]);
+    assert_eq!(
+        engine
+            .count(
+                "book",
+                Some(json!({
+                    "author_id": "entity_a",
+                    "editor_id": "entity_a",
+                    "purge_bucket": 0
+                })),
+                None
+            )
+            .expect("indexed count should succeed"),
+        1
+    );
+
+    let wildcard_records = engine
+        .find_by_filter("book", json!({ "title": "Indexed %" }), None)
+        .expect("unsupported wildcard filter should fall back");
+    assert_eq!(wildcard_records.len(), 3);
+}
+
+#[test]
 fn us_032_count_uses_metadata_fast_path_when_no_filter_is_provided() {
     let database = TempDatabase::new("us_032_count_no_filter");
     let database_directory = database.path.to_string_lossy().into_owned();
