@@ -3,14 +3,14 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
     BsonBinaryFormat, Command, CommandResult, DatabaseReader, OrderDirection, QueryModifiers,
-    StorageCoordinate, StorageFormat, StorageLocator, StorageScope, WardrobeEngine,
+    StorageCoordinate, StorageFormat, StorageLocator, StorageScope, WAL_FILE_NAME, WalJournal,
+    WalOperation, WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -96,22 +96,34 @@ fn write_legacy_drawer_record(
 
 fn write_wal_record(database: &TempDatabase, record: serde_json::Value) {
     fs::create_dir_all(&database.path).expect("temp dir should create");
-    let mut wal_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(database.path.join("wardrobe.wal"))
-        .expect("wal should open");
-    writeln!(wal_file, "{}", record).expect("wal record should write");
-    wal_file.sync_all().expect("wal should sync");
+    let payload = serde_json::to_vec(&record).expect("wal record should serialize");
+    WalJournal::at_database_path(&database.path)
+        .append(wal_record_operation(&record), "transaction", &payload)
+        .expect("wal record should append");
 }
 
 fn wal_records(database: &TempDatabase) -> Vec<serde_json::Value> {
-    fs::read_to_string(database.path.join("wardrobe.wal"))
+    WalJournal::at_database_path(&database.path)
+        .read_entries()
         .expect("wal should read")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("wal line should parse"))
+        .into_iter()
+        .filter(|entry| entry.scope == "transaction")
+        .filter_map(|entry| serde_json::from_slice(&entry.payload).ok())
         .collect()
+}
+
+fn wal_record_operation(record: &serde_json::Value) -> WalOperation {
+    match record.get("event").and_then(serde_json::Value::as_str) {
+        Some("begin") => match record
+            .get("operation")
+            .and_then(|operation| operation.get("type"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("delete_by_id") => WalOperation::Delete,
+            _ => WalOperation::Upsert,
+        },
+        _ => WalOperation::Maintenance,
+    }
 }
 
 fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
@@ -3380,8 +3392,8 @@ fn us_041_mutations_append_durable_wal_begin_and_commit_records() {
 }
 
 #[test]
-fn us_041_open_replays_incomplete_upsert_intention_from_wal() {
-    let database = TempDatabase::new("us_041_replay_upsert");
+fn us_103_open_ignores_uncommitted_upsert_transaction_from_wal() {
+    let database = TempDatabase::new("us_103_ignore_uncommitted_upsert");
     write_wal_record(
         &database,
         json!({
@@ -3403,23 +3415,56 @@ fn us_041_open_replays_incomplete_upsert_intention_from_wal() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should recover");
     let found = engine
         .find_by_id("@gem:lnk_us_041_replayed")
+        .expect("lookup should succeed");
+
+    assert!(found.is_none());
+
+    let records = wal_records(&database);
+    assert_eq!(records.len(), 1);
+}
+
+#[test]
+fn us_103_open_replays_committed_upsert_transaction_from_wal() {
+    let database = TempDatabase::new("us_103_replay_committed_upsert");
+    write_wal_record(
+        &database,
+        json!({
+            "event": "begin",
+            "tx_id": "manual-upsert",
+            "operation": {
+                "type": "upsert",
+                "drawer_name": "gem",
+                "payload": {
+                    "_id": "@gem:lnk_us_103_replayed",
+                    "element": "Replay",
+                    "potency": 4100
+                }
+            }
+        }),
+    );
+    write_wal_record(
+        &database,
+        json!({
+            "event": "commit",
+            "tx_id": "manual-upsert"
+        }),
+    );
+
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should recover");
+    let found = engine
+        .find_by_id("@gem:lnk_us_103_replayed")
         .expect("lookup should succeed")
         .expect("replayed record should exist");
 
     assert_eq!(found["element"], "Replay");
     assert_eq!(found["potency"], 4100);
-
-    let records = wal_records(&database);
-    assert!(
-        records
-            .iter()
-            .any(|record| record["event"] == "commit" && record["tx_id"] == "manual-upsert")
-    );
+    assert!(wal_records(&database).is_empty());
 }
 
 #[test]
-fn us_041_open_replays_incomplete_cascading_delete_intention_from_wal() {
-    let database = TempDatabase::new("us_041_replay_cascade_delete");
+fn us_103_open_replays_committed_cascading_delete_transaction_from_wal() {
+    let database = TempDatabase::new("us_103_replay_cascade_delete");
     fs::create_dir_all(&database.path).expect("temp dir should create");
     write_drawer_metadata(
         &database,
@@ -3480,6 +3525,13 @@ fn us_041_open_replays_incomplete_cascading_delete_intention_from_wal() {
             }
         }),
     );
+    write_wal_record(
+        &database,
+        json!({
+            "event": "commit",
+            "tx_id": "manual-cascade-delete"
+        }),
+    );
 
     let recovered_engine =
         WardrobeEngine::open(&database_directory).expect("engine should recover delete");
@@ -3497,10 +3549,7 @@ fn us_041_open_replays_incomplete_cascading_delete_intention_from_wal() {
         0
     );
 
-    let records = wal_records(&database);
-    assert!(records.iter().any(
-        |record| record["event"] == "commit" && record["tx_id"] == "manual-cascade-delete"
-    ));
+    assert!(wal_records(&database).is_empty());
 }
 
 #[test]
@@ -3897,7 +3946,7 @@ fn engine_appends_to_wal_on_write() -> std::io::Result<()> {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine opens");
     let _ = engine.upsert("character", json!({"name":"hero"}))?;
-    let wal_path = database.path.join("wardrobe.wal");
+    let wal_path = database.path.join(WAL_FILE_NAME);
     assert!(wal_path.exists());
     let metadata = fs::metadata(&wal_path)?;
     assert!(metadata.len() > 0);
@@ -3915,8 +3964,8 @@ fn us_060_ops_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Resu
     let pointer = engine.upsert("gem", json!({"_id": "fire", "element": "Fire"}))?;
     assert_eq!(pointer, "@gem:fire");
 
-    let wal_path = database.path.join("wardrobe.wal");
-    let wal_meta_path = database.path.join("wardrobe.wal.meta");
+    let wal_path = database.path.join(WAL_FILE_NAME);
+    let wal_meta_path = database.path.join(".wal.meta");
     assert!(wal_path.exists());
     assert!(wal_meta_path.exists());
     assert_eq!(fs::metadata(&wal_path)?.len(), 0);
@@ -3940,8 +3989,8 @@ fn us_060_byte_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Res
 
     engine.upsert("gem", json!({"_id": "water", "element": "Water"}))?;
 
-    let wal_path = database.path.join("wardrobe.wal");
-    let wal_meta_path = database.path.join("wardrobe.wal.meta");
+    let wal_path = database.path.join(WAL_FILE_NAME);
+    let wal_meta_path = database.path.join(".wal.meta");
     assert!(wal_path.exists());
     assert!(wal_meta_path.exists());
     assert_eq!(fs::metadata(&wal_path)?.len(), 0);
@@ -4170,12 +4219,12 @@ fn us_066_binary_wal_logs_mutating_commands() {
         .expect("upsert command should succeed");
     assert!(matches!(result, CommandResult::Pointer(pointer) if pointer == "@gem:wal_fire"));
 
-    let root_wal = database.path.join(".wal");
+    let root_wal = database.path.join(WAL_FILE_NAME);
     assert!(root_wal.exists());
 
     let verification = engine.verify_wal(None).expect("wal should verify");
-    assert_eq!(verification.entry_count, 1);
-    assert_eq!(verification.last_sequence, Some(1));
+    assert_eq!(verification.entry_count, 3);
+    assert_eq!(verification.last_sequence, Some(3));
 
     let command_result = engine
         .execute_command(Command::VerifyWal {
@@ -4202,14 +4251,14 @@ fn us_066_binary_wal_logs_mutating_commands() {
         .join("tenant_wal")
         .join("production")
         .join("core")
-        .join(".wal");
+        .join(WAL_FILE_NAME);
     assert!(routed_wal.exists());
 
     let routed_verification = engine
         .verify_wal(Some("tenant_wal/production/core"))
         .expect("routed wal should verify");
-    assert_eq!(routed_verification.entry_count, 1);
-    assert_eq!(routed_verification.last_sequence, Some(1));
+    assert_eq!(routed_verification.entry_count, 3);
+    assert_eq!(routed_verification.last_sequence, Some(3));
 }
 
 #[test]

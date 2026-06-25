@@ -4,7 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use wardrobe_core::{Command, DEFAULT_NETWORK_PORT, ProtocolFrame, ProtocolOpcode, WardrobeEngine};
+use wardrobe_core::{
+    Command, DEFAULT_NETWORK_PORT, DurabilityPolicy, ProtocolFrame, ProtocolOpcode, WardrobeEngine,
+};
+
+const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 5;
+const DEFAULT_GROUP_COMMIT_MAX_BATCH: usize = 128;
 
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
@@ -16,6 +21,7 @@ pub struct ServerConfig {
     pub tcp_bind: Option<String>,
     pub unix_socket: Option<PathBuf>,
     pub connection_pool_limit: Option<usize>,
+    pub durability_policy: DurabilityPolicy,
     pub profile_commands: bool,
 }
 
@@ -34,6 +40,7 @@ impl ServerConfig {
         let mut tcp_bind = Some(format!("127.0.0.1:{DEFAULT_NETWORK_PORT}"));
         let mut unix_socket = None;
         let mut connection_pool_limit = None;
+        let mut durability_policy = DurabilityPolicy::Strict;
         let mut profile_commands = false;
         let mut args = args.into_iter();
 
@@ -67,6 +74,19 @@ impl ServerConfig {
                 "--connection-pool-limit" => {
                     connection_pool_limit = Some(parse_connection_pool_limit(&mut args, &arg)?);
                 }
+                "--durability" => {
+                    durability_policy = parse_durability_policy(&mut args, &arg)?;
+                }
+                "--group-commit-window-ms" => {
+                    let commit_window_ms = parse_positive_u64(&mut args, &arg)?;
+                    durability_policy =
+                        update_group_commit_window(durability_policy, commit_window_ms);
+                }
+                "--group-commit-max-batch" => {
+                    let max_batch_size = parse_positive_usize(&mut args, &arg)?;
+                    durability_policy =
+                        update_group_commit_max_batch(durability_policy, max_batch_size);
+                }
                 "--profile-commands" => profile_commands = true,
                 "--check" => check_only = true,
                 "--help" | "-h" => {
@@ -88,6 +108,7 @@ impl ServerConfig {
             tcp_bind,
             unix_socket,
             connection_pool_limit,
+            durability_policy,
             profile_commands,
         })
     }
@@ -100,12 +121,22 @@ pub fn print_help() {
     println!("  --no-tcp                   Disable TCP listener");
     println!("  --unix-socket <path>       Bind Unix domain socket listener on Unix");
     println!("  --connection-pool-limit <count>  Maximum active worker connections");
+    println!("  --durability <mode>        WAL durability mode: strict or grouped");
+    println!(
+        "  --group-commit-window-ms <ms>  Grouped WAL commit window, default {DEFAULT_GROUP_COMMIT_WINDOW_MS}"
+    );
+    println!(
+        "  --group-commit-max-batch <count>  Grouped WAL max batch, default {DEFAULT_GROUP_COMMIT_MAX_BATCH}"
+    );
     println!("  --profile-commands         Print per-command protocol and engine timings");
     println!("  --check                    Initialize the daemon and exit without blocking");
 }
 
 pub fn run(config: ServerConfig) -> io::Result<()> {
-    let engine = Arc::new(WardrobeEngine::open(&config.data_dir)?);
+    let engine = Arc::new(WardrobeEngine::open_with_durability_policy(
+        &config.data_dir,
+        config.durability_policy.clone(),
+    )?);
 
     println!(
         "Wardrobe daemon initialized with storage directory: {}",
@@ -477,6 +508,10 @@ fn parse_connection_pool_limit(
     args: &mut impl Iterator<Item = String>,
     flag: &str,
 ) -> io::Result<usize> {
+    parse_positive_usize(args, flag)
+}
+
+fn parse_positive_usize(args: &mut impl Iterator<Item = String>, flag: &str) -> io::Result<usize> {
     let raw = args.next().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -496,6 +531,86 @@ fn parse_connection_pool_limit(
         ));
     }
     Ok(parsed)
+}
+
+fn parse_positive_u64(args: &mut impl Iterator<Item = String>, flag: &str) -> io::Result<u64> {
+    let raw = args.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} requires a positive integer"),
+        )
+    })?;
+    let parsed = raw.parse::<u64>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid {flag} value '{raw}': {error}"),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} must be greater than zero"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_durability_policy(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> io::Result<DurabilityPolicy> {
+    let raw = args.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} requires strict or grouped"),
+        )
+    })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "strict" => Ok(DurabilityPolicy::Strict),
+        "grouped" | "group" | "group-commit" => Ok(default_grouped_durability_policy()),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported {flag} value: {other}"),
+        )),
+    }
+}
+
+fn default_grouped_durability_policy() -> DurabilityPolicy {
+    DurabilityPolicy::Grouped {
+        commit_window_ms: DEFAULT_GROUP_COMMIT_WINDOW_MS,
+        max_batch_size: DEFAULT_GROUP_COMMIT_MAX_BATCH,
+    }
+}
+
+fn update_group_commit_window(policy: DurabilityPolicy, commit_window_ms: u64) -> DurabilityPolicy {
+    match policy {
+        DurabilityPolicy::Grouped { max_batch_size, .. } => DurabilityPolicy::Grouped {
+            commit_window_ms,
+            max_batch_size,
+        },
+        DurabilityPolicy::Strict => DurabilityPolicy::Grouped {
+            commit_window_ms,
+            max_batch_size: DEFAULT_GROUP_COMMIT_MAX_BATCH,
+        },
+    }
+}
+
+fn update_group_commit_max_batch(
+    policy: DurabilityPolicy,
+    max_batch_size: usize,
+) -> DurabilityPolicy {
+    match policy {
+        DurabilityPolicy::Grouped {
+            commit_window_ms, ..
+        } => DurabilityPolicy::Grouped {
+            commit_window_ms,
+            max_batch_size,
+        },
+        DurabilityPolicy::Strict => DurabilityPolicy::Grouped {
+            commit_window_ms: DEFAULT_GROUP_COMMIT_WINDOW_MS,
+            max_batch_size,
+        },
+    }
 }
 
 fn spawn_connection_handler<S>(
@@ -614,6 +729,7 @@ mod tests {
         assert_eq!(cfg.tcp_bind.unwrap().starts_with("127.0.0.1"), true);
         assert!(!cfg.check_only);
         assert!(!cfg.profile_commands);
+        assert_eq!(cfg.durability_policy, DurabilityPolicy::Strict);
     }
 
     #[test]
@@ -621,6 +737,27 @@ mod tests {
         let cfg = ServerConfig::from_args(vec!["--profile-commands".to_string()])
             .expect("profile flag should parse");
         assert!(cfg.profile_commands);
+    }
+
+    #[test]
+    fn server_config_parses_grouped_durability_flags() {
+        let cfg = ServerConfig::from_args(vec![
+            "--durability".to_string(),
+            "grouped".to_string(),
+            "--group-commit-window-ms".to_string(),
+            "9".to_string(),
+            "--group-commit-max-batch".to_string(),
+            "33".to_string(),
+        ])
+        .expect("durability flags should parse");
+
+        assert_eq!(
+            cfg.durability_policy,
+            DurabilityPolicy::Grouped {
+                commit_window_ms: 9,
+                max_batch_size: 33
+            }
+        );
     }
 
     #[test]

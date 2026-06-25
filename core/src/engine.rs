@@ -5,7 +5,6 @@ use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::delete_rules;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
-use crate::wrdb_lib::engine_wal;
 use crate::wrdb_lib::hydration;
 use crate::wrdb_lib::nested_decomposition;
 use crate::wrdb_lib::pointer;
@@ -13,7 +12,7 @@ use crate::wrdb_lib::query;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::relationship;
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
-use crate::wrdb_lib::wal::WalVerification;
+use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalVerification};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -39,6 +38,7 @@ pub struct WardrobeEngine {
     max_cached_drawers: Option<usize>,
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
+    durability_policy: DurabilityPolicy,
 }
 
 const BACKUP_ARCHIVE_FORMAT: &str = "wardrobe-cli-backup-v1";
@@ -178,20 +178,42 @@ impl WardrobeEngine {
         max_cached_drawers: Option<usize>,
         wal_thresholds: Option<(u64, u64)>,
     ) -> Result<Self> {
+        Self::open_with_optional_limits_and_durability(
+            directory,
+            max_cached_drawers,
+            wal_thresholds,
+            DurabilityPolicy::Strict,
+        )
+    }
+
+    pub fn open_with_durability_policy(
+        directory: &str,
+        durability_policy: DurabilityPolicy,
+    ) -> Result<Self> {
+        Self::open_with_optional_limits_and_durability(directory, None, None, durability_policy)
+    }
+
+    fn open_with_optional_limits_and_durability(
+        directory: &str,
+        max_cached_drawers: Option<usize>,
+        wal_thresholds: Option<(u64, u64)>,
+        durability_policy: DurabilityPolicy,
+    ) -> Result<Self> {
         let root_directory = PathBuf::from(directory);
         let registry = CatalogRegistry::open_or_initialize(&root_directory)?;
         let (default_wal_size_threshold, default_wal_ops_threshold) =
             Database::default_wal_thresholds();
         let (wal_size_threshold_bytes, wal_ops_threshold_count) =
             wal_thresholds.unwrap_or((default_wal_size_threshold, default_wal_ops_threshold));
-        let database_core = Database::initialize_with_cache_limit_and_wal_thresholds(
+        let database_core = Database::initialize_with_cache_limit_wal_thresholds_and_durability(
             &root_directory,
             max_cached_drawers,
             wal_size_threshold_bytes,
             wal_ops_threshold_count,
+            durability_policy.clone(),
         )?;
         let database_core = RwLock::new(database_core);
-        engine_wal::recover_database::<Self>(&database_core)?;
+        wal::recover_database::<Self>(&database_core)?;
         Ok(Self {
             root_directory,
             registry: RwLock::new(registry),
@@ -200,6 +222,7 @@ impl WardrobeEngine {
             max_cached_drawers,
             wal_size_threshold_bytes,
             wal_ops_threshold_count,
+            durability_policy,
         })
     }
 
@@ -599,7 +622,7 @@ impl WardrobeEngine {
     }
 
     pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
-        engine_wal::verify(&self.root_directory, database_name)
+        wal::verify(&self.root_directory, database_name)
     }
 
     pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
@@ -641,7 +664,12 @@ impl WardrobeEngine {
             &command,
         )?;
         let database_path = routing::coordinate_database_path(&self.root_directory, &coordinate)?;
-        engine_wal::append_command(&database_path, Some(coordinate.schema()), &command)?;
+        wal::append_command(
+            &database_path,
+            Some(coordinate.schema()),
+            &command,
+            self.durability_policy.clone(),
+        )?;
         let database = self.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
         command_dispatch::execute_in_database::<Self>(&database, command, None)
     }
@@ -663,20 +691,35 @@ impl WardrobeEngine {
             } => self.execute_for_tenant(&tenant_id, &database, &schema, command),
             StorageScope::Database { database } => {
                 let database_path = routing::database_scope_path(&self.root_directory, &database)?;
-                engine_wal::append_command(&database_path, None, &command)?;
+                wal::append_command(
+                    &database_path,
+                    None,
+                    &command,
+                    self.durability_policy.clone(),
+                )?;
                 let database = self.database_for_route(DatabaseRoute::Database(database))?;
                 command_dispatch::execute_in_database::<Self>(&database, command, None)
             }
             StorageScope::Schema { database, schema } => {
                 let database_path =
                     routing::schema_scope_path(&self.root_directory, &database, &schema)?;
-                engine_wal::append_command(&database_path, Some(&schema), &command)?;
+                wal::append_command(
+                    &database_path,
+                    Some(&schema),
+                    &command,
+                    self.durability_policy.clone(),
+                )?;
                 let database =
                     self.database_for_route(DatabaseRoute::Schema { database, schema })?;
                 command_dispatch::execute_in_database::<Self>(&database, command, None)
             }
             StorageScope::Drawer { namespace } => {
-                engine_wal::append_command(&self.root_directory, Some(&namespace), &command)?;
+                wal::append_command(
+                    &self.root_directory,
+                    Some(&namespace),
+                    &command,
+                    self.durability_policy.clone(),
+                )?;
                 command_dispatch::execute_in_database::<Self>(
                     &self.database_core,
                     command,
@@ -691,7 +734,14 @@ impl WardrobeEngine {
             &self.root_directory,
             &self.registry,
             database_name,
-            |command| engine_wal::append_command(&self.root_directory, None, command),
+            |command| {
+                wal::append_command(
+                    &self.root_directory,
+                    None,
+                    command,
+                    self.durability_policy.clone(),
+                )
+            },
         )
     }
 
@@ -705,7 +755,14 @@ impl WardrobeEngine {
             &self.registry,
             database_name,
             schema_name,
-            |command| engine_wal::append_command(&self.root_directory, None, command),
+            |command| {
+                wal::append_command(
+                    &self.root_directory,
+                    None,
+                    command,
+                    self.durability_policy.clone(),
+                )
+            },
         )
     }
 
@@ -721,7 +778,14 @@ impl WardrobeEngine {
             database_name,
             schema_name,
             drawer_name,
-            |command| engine_wal::append_command(&self.root_directory, None, command),
+            |command| {
+                wal::append_command(
+                    &self.root_directory,
+                    None,
+                    command,
+                    self.durability_policy.clone(),
+                )
+            },
         )
     }
 
@@ -737,7 +801,14 @@ impl WardrobeEngine {
             tenant_id,
             database_name,
             location,
-            |command| engine_wal::append_command(&self.root_directory, None, command),
+            |command| {
+                wal::append_command(
+                    &self.root_directory,
+                    None,
+                    command,
+                    self.durability_policy.clone(),
+                )
+            },
         )
     }
 
@@ -780,15 +851,22 @@ impl WardrobeEngine {
         let route_path =
             catalog_validation::catalog_location_path(&self.root_directory, &tenant_route.location);
         let schema_path = routing::tenant_schema_path(&route_path, schema_name);
-        engine_wal::append_command(&schema_path, Some(schema_name), &command)?;
-        let routed_database =
-            RwLock::new(Database::initialize_with_cache_limit_and_wal_thresholds(
+        wal::append_command(
+            &schema_path,
+            Some(schema_name),
+            &command,
+            self.durability_policy.clone(),
+        )?;
+        let routed_database = RwLock::new(
+            Database::initialize_with_cache_limit_wal_thresholds_and_durability(
                 &schema_path,
                 self.max_cached_drawers,
                 self.wal_size_threshold_bytes,
                 self.wal_ops_threshold_count,
-            )?);
-        engine_wal::recover_database::<Self>(&routed_database)?;
+                self.durability_policy.clone(),
+            )?,
+        );
+        wal::recover_database::<Self>(&routed_database)?;
         command_dispatch::execute_in_database::<Self>(&routed_database, command, None)
     }
 
@@ -808,14 +886,15 @@ impl WardrobeEngine {
 
         let mut routed_databases = Self::write_lock(&self.routed_databases)?;
         if !routed_databases.contains_key(&route) {
-            let database = Database::initialize_with_cache_limit_and_wal_thresholds(
+            let database = Database::initialize_with_cache_limit_wal_thresholds_and_durability(
                 storage_path,
                 self.max_cached_drawers,
                 self.wal_size_threshold_bytes,
                 self.wal_ops_threshold_count,
+                self.durability_policy.clone(),
             )?;
             let database = Arc::new(RwLock::new(database));
-            engine_wal::recover_database::<Self>(&database)?;
+            wal::recover_database::<Self>(&database)?;
             routed_databases.insert(route.clone(), database);
         }
 
@@ -874,13 +953,9 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<String> {
         let wal_payload = payload.clone();
-        engine_wal::run_upsert_transaction(
-            database_core,
-            drawer_name,
-            &wal_payload,
-            context,
-            || Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context),
-        )
+        wal::run_upsert_transaction(database_core, drawer_name, &wal_payload, context, || {
+            Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context)
+        })
     }
 
     fn bulk_upsert_in_database(
@@ -904,13 +979,9 @@ impl WardrobeEngine {
         }
 
         let wal_records = records.clone();
-        engine_wal::run_bulk_upsert_transaction(
-            database_core,
-            drawer_name,
-            &wal_records,
-            context,
-            || Self::bulk_upsert_in_database_unlogged(database_core, drawer_name, records, context),
-        )
+        wal::run_bulk_upsert_transaction(database_core, drawer_name, &wal_records, context, || {
+            Self::bulk_upsert_in_database_unlogged(database_core, drawer_name, records, context)
+        })
     }
 
     fn bulk_upsert_in_database_unlogged(
@@ -1298,7 +1369,7 @@ impl WardrobeEngine {
         context: ExecutionContext<'_>,
     ) -> Result<bool> {
         let pointer = pointer::locator_to_pointer(locator);
-        engine_wal::run_delete_transaction(database_core, &pointer, context, || {
+        wal::run_delete_transaction(database_core, &pointer, context, || {
             Self::delete_by_id_in_database_unlogged(database_core, &pointer, context)
         })
     }
@@ -2441,7 +2512,12 @@ fn parse_permission_scope(raw: &str) -> Result<String> {
 
 impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
     fn append_boundary_wal(&self, command: &Command) -> Result<()> {
-        engine_wal::append_command(&self.root_directory, None, command)
+        wal::append_command(
+            &self.root_directory,
+            None,
+            command,
+            self.durability_policy.clone(),
+        )
     }
 
     fn show_tenants(&self) -> Result<Vec<String>> {
@@ -2665,7 +2741,7 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
     }
 }
 
-impl engine_wal::WalReplayExecutor for WardrobeEngine {
+impl wal::WalReplayExecutor for WardrobeEngine {
     fn replay_upsert(
         database_core: &RwLock<Database>,
         drawer_name: &str,

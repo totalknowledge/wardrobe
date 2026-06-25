@@ -7,7 +7,6 @@ pub mod database;
 pub(crate) mod delete_rules;
 pub(crate) mod discovery;
 pub mod drawer;
-pub(crate) mod engine_wal;
 pub(crate) mod hydration;
 pub(crate) mod nested_decomposition;
 pub(crate) mod pointer;

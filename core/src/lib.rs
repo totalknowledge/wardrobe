@@ -22,5 +22,7 @@ pub use wrdb_lib::registry::{
     CATALOG_FILE_NAME, CatalogEntry, CatalogRegistry, CatalogTenantRoute,
 };
 pub use wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
-pub use wrdb_lib::wal::{WAL_FILE_NAME, WalEntry, WalJournal, WalOperation, WalVerification};
+pub use wrdb_lib::wal::{
+    DurabilityPolicy, WAL_FILE_NAME, WalEntry, WalJournal, WalOperation, WalVerification,
+};
 pub use wrdb_lib::writer::DatabaseWriter;

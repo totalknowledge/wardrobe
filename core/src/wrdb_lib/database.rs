@@ -1,4 +1,5 @@
 use crate::wrdb_lib::drawer::Drawer;
+use crate::wrdb_lib::wal::DurabilityPolicy;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ pub struct Database {
     wal_ops_since_checkpoint: AtomicU64,
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
+    durability_policy: DurabilityPolicy,
 }
 
 impl Database {
@@ -63,6 +65,10 @@ impl Database {
 
     pub fn wal_thresholds(&self) -> (u64, u64) {
         (self.wal_size_threshold_bytes, self.wal_ops_threshold_count)
+    }
+
+    pub fn durability_policy(&self) -> DurabilityPolicy {
+        self.durability_policy.clone()
     }
 
     pub fn default_wal_thresholds() -> (u64, u64) {
@@ -104,6 +110,22 @@ impl Database {
         wal_size_threshold_bytes: u64,
         wal_ops_threshold_count: u64,
     ) -> std::io::Result<Self> {
+        Self::initialize_with_cache_limit_wal_thresholds_and_durability(
+            directory_path,
+            max_cached_drawers,
+            wal_size_threshold_bytes,
+            wal_ops_threshold_count,
+            DurabilityPolicy::Strict,
+        )
+    }
+
+    pub fn initialize_with_cache_limit_wal_thresholds_and_durability<P: AsRef<Path>>(
+        directory_path: P,
+        max_cached_drawers: Option<usize>,
+        wal_size_threshold_bytes: u64,
+        wal_ops_threshold_count: u64,
+        durability_policy: DurabilityPolicy,
+    ) -> std::io::Result<Self> {
         if max_cached_drawers == Some(0) {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -137,6 +159,7 @@ impl Database {
             wal_ops_since_checkpoint: AtomicU64::new(0),
             wal_size_threshold_bytes,
             wal_ops_threshold_count,
+            durability_policy,
         })
     }
 

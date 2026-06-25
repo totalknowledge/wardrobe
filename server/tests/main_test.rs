@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
-    Command, CommandResult, ProtocolFrame, ProtocolOpcode, StorageCoordinate, WardrobeClient,
-    WardrobeEngine,
+    Command, CommandResult, DurabilityPolicy, ProtocolFrame, ProtocolOpcode, StorageCoordinate,
+    WardrobeClient, WardrobeEngine,
 };
 use wardrobe_server::{ServerConfig, serve_tcp_listener};
 
@@ -473,6 +473,7 @@ fn run_returns_error_when_no_listeners_enabled() {
         tcp_bind: None,
         unix_socket: None,
         connection_pool_limit: None,
+        durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
     };
     let res = wardrobe_server::run(cfg);
@@ -539,6 +540,7 @@ fn run_execution_with_check_only_flag() {
         tcp_bind: None,
         unix_socket: None,
         connection_pool_limit: None,
+        durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
     };
     assert!(wardrobe_server::run(cfg).is_ok());
@@ -554,6 +556,7 @@ fn run_execution_unsupported_unix_platform_guard() {
         tcp_bind: None,
         unix_socket: Some(std::path::PathBuf::from("unsupported.sock")),
         connection_pool_limit: None,
+        durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
     };
     assert!(wardrobe_server::run(cfg).is_err());

@@ -18,8 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use wardrobe_core::{
-    Command, CommandResult, ConnectionTarget, ProtocolFrame, ProtocolOpcode, StorageDiagnosis,
-    StorageInventory, StorageScope, WardrobeEngine,
+    Command, CommandResult, ConnectionTarget, DurabilityPolicy, ProtocolFrame, ProtocolOpcode,
+    StorageDiagnosis, StorageInventory, StorageScope, WardrobeEngine,
 };
 
 const DEFAULT_WARDROBE_DATABASE_PREFIX: &str = "wardrobe_benchmark";
@@ -40,6 +40,8 @@ const DEFAULT_NEO4J_USER: &str = "neo4j";
 const DEFAULT_NEO4J_USER_ENV: &str = "WARDROBE_BENCH_NEO4J_USER";
 const DEFAULT_NEO4J_PASSWORD_ENV: &str = "WARDROBE_BENCH_NEO4J_PASSWORD";
 const DEFAULT_NEO4J_CREDENTIALS_FILE: &str = "target/wardrobe-benchmark/neo4j-credentials.env";
+const DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS: u64 = 5;
+const DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH: usize = 128;
 const SQLITE_MATERIALIZED_BOOK_QUERY: &str = r#"
 SELECT
     b.id,
@@ -79,6 +81,7 @@ pub struct BenchmarkConfig {
     pub progress_enabled: bool,
     pub wardrobe_embedded_path: Option<PathBuf>,
     pub wardrobe_remote_uri: Option<String>,
+    pub wardrobe_durability_policy: DurabilityPolicy,
     pub wardrobe_database: Option<String>,
     pub wardrobe_schema: Option<String>,
     pub sqlite_db: Option<PathBuf>,
@@ -105,6 +108,7 @@ impl Default for BenchmarkConfig {
             progress_enabled: true,
             wardrobe_embedded_path: None,
             wardrobe_remote_uri: None,
+            wardrobe_durability_policy: DurabilityPolicy::Strict,
             wardrobe_database: None,
             wardrobe_schema: None,
             sqlite_db: None,
@@ -166,6 +170,26 @@ impl BenchmarkConfig {
                 }
                 "--wardrobe-remote-uri" => {
                     config.wardrobe_remote_uri = Some(required_value(&mut args, &arg)?);
+                }
+                "--wardrobe-durability" => {
+                    config.wardrobe_durability_policy =
+                        parse_wardrobe_durability_policy(&required_value(&mut args, &arg)?)?;
+                }
+                "--wardrobe-group-commit-window-ms" => {
+                    let commit_window_ms =
+                        parse_positive_u64(&arg, &required_value(&mut args, &arg)?)?;
+                    config.wardrobe_durability_policy = update_group_commit_window(
+                        config.wardrobe_durability_policy.clone(),
+                        commit_window_ms,
+                    );
+                }
+                "--wardrobe-group-commit-max-batch" => {
+                    let max_batch_size =
+                        parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
+                    config.wardrobe_durability_policy = update_group_commit_max_batch(
+                        config.wardrobe_durability_policy.clone(),
+                        max_batch_size,
+                    );
                 }
                 "--wardrobe-database" => {
                     config.wardrobe_database = Some(required_value(&mut args, &arg)?);
@@ -733,6 +757,13 @@ pub fn print_help() {
     println!(
         "  --wardrobe-remote-uri <uri>     Use an existing Wardrobe TCP server instead of auto-spawning one"
     );
+    println!("  --wardrobe-durability <mode>    Wardrobe WAL durability: strict or grouped");
+    println!(
+        "  --wardrobe-group-commit-window-ms <ms>  Grouped Wardrobe WAL commit window, default {DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS}"
+    );
+    println!(
+        "  --wardrobe-group-commit-max-batch <count>  Grouped Wardrobe WAL max batch, default {DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH}"
+    );
     println!(
         "  --wardrobe-database <name>      Optional Wardrobe database override; default is run-isolated"
     );
@@ -895,6 +926,7 @@ fn build_target(
             Ok(Box::new(WardrobeTarget::embedded(
                 path,
                 wardrobe_namespace.clone(),
+                config.wardrobe_durability_policy.clone(),
             )?))
         }
         TargetSpec::WardrobeRemote => {
@@ -913,6 +945,7 @@ fn build_target(
                 Ok(Box::new(WardrobeTarget::remote_auto(
                     run_dir.join("wardrobe-remote"),
                     wardrobe_namespace.clone(),
+                    config.wardrobe_durability_policy.clone(),
                 )?))
             }
         }
@@ -1147,9 +1180,16 @@ fn diagnosis_drawer_is_in_scope(drawer: &str, namespace: &WardrobeNamespace) -> 
 }
 
 impl WardrobeTarget {
-    fn embedded(path: PathBuf, namespace: WardrobeNamespace) -> io::Result<Self> {
+    fn embedded(
+        path: PathBuf,
+        namespace: WardrobeNamespace,
+        durability_policy: DurabilityPolicy,
+    ) -> io::Result<Self> {
         fs::create_dir_all(&path)?;
-        let engine = WardrobeEngine::open(path.to_string_lossy().as_ref())?;
+        let engine = WardrobeEngine::open_with_durability_policy(
+            path.to_string_lossy().as_ref(),
+            durability_policy,
+        )?;
         Ok(Self {
             name: "Wardrobe (Embedded Flat-File Mode)".to_string(),
             runner: Some(Box::new(EmbeddedWardrobeRunner {
@@ -1164,9 +1204,16 @@ impl WardrobeTarget {
         })
     }
 
-    fn remote_auto(path: PathBuf, namespace: WardrobeNamespace) -> io::Result<Self> {
+    fn remote_auto(
+        path: PathBuf,
+        namespace: WardrobeNamespace,
+        durability_policy: DurabilityPolicy,
+    ) -> io::Result<Self> {
         fs::create_dir_all(&path)?;
-        let engine = Arc::new(WardrobeEngine::open(path.to_string_lossy().as_ref())?);
+        let engine = Arc::new(WardrobeEngine::open_with_durability_policy(
+            path.to_string_lossy().as_ref(),
+            durability_policy,
+        )?);
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
@@ -2723,6 +2770,71 @@ fn parse_positive_usize(flag: &str, raw: &str) -> io::Result<usize> {
     Ok(parsed)
 }
 
+fn parse_positive_u64(flag: &str, raw: &str) -> io::Result<u64> {
+    let parsed = raw.parse::<u64>().map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("Invalid {flag} value '{raw}': {error}"),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{flag} must be greater than zero"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_wardrobe_durability_policy(raw: &str) -> io::Result<DurabilityPolicy> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "strict" => Ok(DurabilityPolicy::Strict),
+        "grouped" | "group" | "group-commit" => Ok(default_grouped_durability_policy()),
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unsupported --wardrobe-durability value: {other}"),
+        )),
+    }
+}
+
+fn default_grouped_durability_policy() -> DurabilityPolicy {
+    DurabilityPolicy::Grouped {
+        commit_window_ms: DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS,
+        max_batch_size: DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH,
+    }
+}
+
+fn update_group_commit_window(policy: DurabilityPolicy, commit_window_ms: u64) -> DurabilityPolicy {
+    match policy {
+        DurabilityPolicy::Grouped { max_batch_size, .. } => DurabilityPolicy::Grouped {
+            commit_window_ms,
+            max_batch_size,
+        },
+        DurabilityPolicy::Strict => DurabilityPolicy::Grouped {
+            commit_window_ms,
+            max_batch_size: DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH,
+        },
+    }
+}
+
+fn update_group_commit_max_batch(
+    policy: DurabilityPolicy,
+    max_batch_size: usize,
+) -> DurabilityPolicy {
+    match policy {
+        DurabilityPolicy::Grouped {
+            commit_window_ms, ..
+        } => DurabilityPolicy::Grouped {
+            commit_window_ms,
+            max_batch_size,
+        },
+        DurabilityPolicy::Strict => DurabilityPolicy::Grouped {
+            commit_window_ms: DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS,
+            max_batch_size,
+        },
+    }
+}
+
 fn validate_wardrobe_namespace_component(flag: &str, value: &str) -> io::Result<()> {
     let trimmed = value.trim();
     if trimmed.is_empty()
@@ -3404,6 +3516,12 @@ mod tests {
             "target/custom-bench/embedded".to_string(),
             "--wardrobe-remote-uri".to_string(),
             "wardrobe://127.0.0.1:24842".to_string(),
+            "--wardrobe-durability".to_string(),
+            "grouped".to_string(),
+            "--wardrobe-group-commit-window-ms".to_string(),
+            "11".to_string(),
+            "--wardrobe-group-commit-max-batch".to_string(),
+            "17".to_string(),
             "--wardrobe-database".to_string(),
             "bench_db".to_string(),
             "--wardrobe-schema".to_string(),
@@ -3456,6 +3574,13 @@ mod tests {
         assert_eq!(
             config.wardrobe_remote_uri,
             Some("wardrobe://127.0.0.1:24842".to_string())
+        );
+        assert_eq!(
+            config.wardrobe_durability_policy,
+            DurabilityPolicy::Grouped {
+                commit_window_ms: 11,
+                max_batch_size: 17
+            }
         );
         assert_eq!(config.wardrobe_database, Some("bench_db".to_string()));
         assert_eq!(config.wardrobe_schema, Some("bench_schema".to_string()));
