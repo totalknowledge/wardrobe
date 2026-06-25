@@ -5,5 +5,6 @@ members = [
     "samples/armoire/src-tauri",
     "samples/basic-usage",
     "server",
+    "utilities/benchmark",
 ]
 resolver = "3"

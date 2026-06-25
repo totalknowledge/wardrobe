@@ -1,0 +1,16 @@
+[package]
+name = "wardrobe-benchmark"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "wardrobe-benchmark"
+path = "src/main.rs"
+
+[dependencies]
+mongodb = { version = "2.8.2", default-features = false, features = ["sync"] }
+mysql = "25.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0"
+wardrobe-core = { path = "../../core" }
+wardrobe-server = { path = "../../server" }
