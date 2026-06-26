@@ -173,6 +173,25 @@ mod tests {
     fn rejects_shallow_structural_pointer_reference() {
         assert!(parse_pointer("user/user-02").is_err());
     }
+
+    #[test]
+    fn clean_primary_key_token_handles_pointer_variants() {
+        assert_eq!(clean_primary_key_token("@gem:lnk_hero"), "hero");
+        assert_eq!(clean_primary_key_token("@gem:hero"), "hero");
+        assert_eq!(clean_primary_key_token("plain"), "plain");
+    }
+
+    #[test]
+    fn locator_to_pointer_handles_explicit_and_inline() {
+        let inline = StorageLocator::Inline("@gem:abc".to_string());
+        assert_eq!(locator_to_pointer(inline), "@gem:abc".to_string());
+
+        let explicit = StorageLocator::Explicit {
+            drawer: "gem".to_string(),
+            id: "lnk_abc".to_string(),
+        };
+        assert_eq!(locator_to_pointer(explicit), "@gem:abc".to_string());
+    }
 }
 
 pub(crate) fn inline_pointer_drawer_names(value: &Value) -> Vec<String> {
