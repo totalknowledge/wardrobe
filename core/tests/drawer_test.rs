@@ -526,7 +526,6 @@ fn us_106_find_all_uses_primary_index_offsets_for_live_storage_order() {
     writer
         .append_record(&orphan_record, orphan_size)
         .expect("orphan should append");
-    writer.sync_all().expect("orphan should sync");
 
     let drawer = Drawer::open(&database_directory.path, "weapon", "_id", Vec::new())
         .expect("drawer should reopen");

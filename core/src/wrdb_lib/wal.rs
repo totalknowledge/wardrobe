@@ -1,6 +1,7 @@
 use crate::wrdb_lib::command::Command;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::routing::ExecutionContext;
+use crate::wrdb_lib::writer::DatabaseWriter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -180,6 +181,61 @@ pub(crate) trait WalReplayExecutor {
         filter: Value,
         context: ExecutionContext<'_>,
     ) -> Result<()>;
+}
+
+pub(crate) struct TransactionCoordinator<'a> {
+    database_core: &'a RwLock<Database>,
+}
+
+impl<'a> TransactionCoordinator<'a> {
+    pub(crate) fn new(database_core: &'a RwLock<Database>) -> Self {
+        Self { database_core }
+    }
+
+    fn commit<T, F>(&self, operation: TransactionWalOperation, apply: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        let tx_id = Uuid::new_v4().simple().to_string();
+        append_transaction_record(
+            self.database_core,
+            &TransactionWalRecord::Begin {
+                tx_id: tx_id.clone(),
+                operation,
+                ts: now_secs(),
+            },
+        )?;
+
+        let result = apply().and_then(|value| {
+            self.harden_mutations()?;
+            Ok(value)
+        });
+
+        if result.is_ok() {
+            let commit_entry = append_transaction_record(
+                self.database_core,
+                &TransactionWalRecord::Commit { tx_id },
+            )?;
+            record_applied_checkpoint(self.database_core, commit_entry.sequence)?;
+        } else {
+            let _ = append_transaction_record(
+                self.database_core,
+                &TransactionWalRecord::Abort { tx_id },
+            );
+        }
+
+        result
+    }
+
+    fn harden_mutations(&self) -> Result<()> {
+        harden_database(self.database_core)
+    }
+
+    pub(crate) fn harden_writer(writer: &mut DatabaseWriter) -> Result<()> {
+        let file = writer.file_handle_mut();
+        file.flush()?;
+        file.sync_all()
+    }
 }
 
 impl WalJournal {
@@ -646,29 +702,7 @@ fn run_transaction<T, F>(
 where
     F: FnOnce() -> Result<T>,
 {
-    let tx_id = Uuid::new_v4().simple().to_string();
-    append_transaction_record(
-        database_core,
-        &TransactionWalRecord::Begin {
-            tx_id: tx_id.clone(),
-            operation,
-            ts: now_secs(),
-        },
-    )?;
-
-    let result = apply().and_then(|value| {
-        flush_dirty_metadata(database_core)?;
-        Ok(value)
-    });
-    if result.is_ok() {
-        let commit_entry =
-            append_transaction_record(database_core, &TransactionWalRecord::Commit { tx_id })?;
-        record_applied_checkpoint(database_core, commit_entry.sequence)?;
-    } else {
-        let _ = append_transaction_record(database_core, &TransactionWalRecord::Abort { tx_id });
-    }
-
-    result
+    TransactionCoordinator::new(database_core).commit(operation, apply)
 }
 
 fn replay_wal_operation<E>(
@@ -763,11 +797,11 @@ fn check_wal_thresholds(database_core: &RwLock<Database>) -> Result<()> {
     Ok(())
 }
 
-fn flush_dirty_metadata(database_core: &RwLock<Database>) -> Result<()> {
+fn harden_database(database_core: &RwLock<Database>) -> Result<()> {
     let drawers = read_lock(database_core)?.get_all_drawers();
     for (_name, drawer) in drawers {
         let mut guard = write_lock(&drawer)?;
-        guard.flush_metadata_if_dirty()?;
+        guard.commit()?;
     }
     Ok(())
 }

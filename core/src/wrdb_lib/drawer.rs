@@ -2,10 +2,13 @@ use crate::wrdb_lib::query;
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::recycler::Recycler;
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
+use crate::wrdb_lib::wal::TransactionCoordinator;
 use crate::wrdb_lib::writer::DatabaseWriter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
@@ -96,7 +99,10 @@ impl DrawerMetadata {
     fn persist(&self, path: &Path) -> std::io::Result<()> {
         let serialized = serde_json::to_vec_pretty(self)?;
         let temporary_path = path.with_extension("drw.tmp");
-        std::fs::write(&temporary_path, serialized)?;
+        let mut temporary_file = File::create(&temporary_path)?;
+        temporary_file.write_all(&serialized)?;
+        temporary_file.flush()?;
+        temporary_file.sync_all()?;
 
         if path.exists() {
             std::fs::remove_file(path)?;
@@ -2652,8 +2658,12 @@ impl Drawer {
     }
 
     pub fn checkpoint(&mut self) -> std::io::Result<()> {
-        self.data_writer.sync_all()?;
-        self.index_writer.sync_all()?;
+        self.commit()
+    }
+
+    pub(crate) fn commit(&mut self) -> std::io::Result<()> {
+        TransactionCoordinator::harden_writer(&mut self.data_writer)?;
+        TransactionCoordinator::harden_writer(&mut self.index_writer)?;
         self.flush_metadata_if_dirty()?;
         Ok(())
     }

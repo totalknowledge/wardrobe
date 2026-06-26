@@ -3771,6 +3771,40 @@ fn us_041_mutations_append_durable_wal_begin_and_commit_records() {
 }
 
 #[test]
+fn us_074_transaction_coordinator_commits_wal_and_hardens_drawer_state() {
+    let database = TempDatabase::new("us_074_transaction_coordinator_commit");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    let pointer = engine
+        .upsert("gem", json!({"_id": "coordinated_fire", "element": "Fire"}))
+        .expect("coordinated upsert should succeed");
+
+    assert_eq!(pointer, "@gem:coordinated_fire");
+    let records = wal_records(&database);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["event"], "begin");
+    assert_eq!(records[1]["event"], "commit");
+
+    let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
+        .expect("metadata should be readable after commit");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_contents).expect("metadata should parse after commit");
+    assert_eq!(metadata["record_count"], 1);
+
+    let data_records = drawer_records_from_disk(&database.path.join("gem.drw"));
+    assert_eq!(data_records.len(), 1);
+    assert_eq!(data_records[0]["_id"], "coordinated_fire");
+
+    let index_records = drawer_records_from_disk(&database.path.join("gem_index.drw"));
+    assert!(
+        index_records
+            .iter()
+            .any(|record| record["f"] == "_id" && record["k"] == "coordinated_fire")
+    );
+}
+
+#[test]
 fn us_103_open_ignores_uncommitted_upsert_transaction_from_wal() {
     let database = TempDatabase::new("us_103_ignore_uncommitted_upsert");
     write_wal_record(

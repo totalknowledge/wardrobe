@@ -29,15 +29,12 @@ impl DatabaseWriter {
         self.file_handle.set_len(0)?;
         self.file_handle.seek(SeekFrom::Start(0))?;
         self.file_handle.write_all(contents)?;
-        self.file_handle.flush()?;
-        self.file_handle.sync_all()?;
 
         Ok(())
     }
 
-    pub fn sync_all(&mut self) -> std::io::Result<()> {
-        self.file_handle.sync_all()?;
-        Ok(())
+    pub(crate) fn file_handle_mut(&mut self) -> &mut File {
+        &mut self.file_handle
     }
 
     pub fn append_record(
@@ -93,7 +90,6 @@ impl DatabaseWriter {
         let remaining_padding = alignment_chunk_size - tombstone_frame.len();
         self.file_handle.write_all(&tombstone_frame)?;
         self.write_padding(remaining_padding)?;
-        self.file_handle.flush()?;
 
         Ok(())
     }
@@ -132,7 +128,6 @@ impl DatabaseWriter {
         let padding_needed = slot_size - payload.len();
         self.file_handle.write_all(&payload)?;
         self.write_padding(padding_needed)?;
-        self.file_handle.flush()?;
         Ok(())
     }
 
