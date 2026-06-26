@@ -1,3 +1,4 @@
+use crate::wrdb_lib::query;
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::recycler::Recycler;
 use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
@@ -748,6 +749,81 @@ impl Drawer {
     }
 
     pub fn delete_by_primary_key(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+        let deleted_record = self.delete_primary_key_without_lifecycle_side_effects(key)?;
+        if deleted_record.is_some() {
+            self.invalidate_materialized_query_indexes()?;
+        }
+
+        Ok(deleted_record)
+    }
+
+    pub fn delete_by_primary_keys_set_based<I>(&mut self, keys: I) -> std::io::Result<usize>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut deleted_count = 0usize;
+        let mut seen_keys = HashSet::new();
+
+        for key in keys {
+            if !seen_keys.insert(key.clone()) {
+                continue;
+            }
+
+            if self
+                .delete_primary_key_without_lifecycle_side_effects(&key)?
+                .is_some()
+            {
+                deleted_count += 1;
+            }
+        }
+
+        if deleted_count > 0 {
+            self.invalidate_materialized_query_indexes()?;
+        }
+
+        Ok(deleted_count)
+    }
+
+    pub fn delete_by_filter_set_based(
+        &mut self,
+        filter_map: &Map<String, Value>,
+        drawer_namespace: Option<&str>,
+    ) -> std::io::Result<usize> {
+        let keys = self.primary_keys_matching_filter(filter_map, drawer_namespace)?;
+        self.delete_by_primary_keys_set_based(keys)
+    }
+
+    pub(crate) fn primary_keys_matching_filter(
+        &mut self,
+        filter_map: &Map<String, Value>,
+        drawer_namespace: Option<&str>,
+    ) -> std::io::Result<Vec<String>> {
+        let records = self.records_matching_filter_candidates(filter_map, drawer_namespace)?;
+        records
+            .iter()
+            .map(|record| self.primary_key_for_record(record))
+            .collect()
+    }
+
+    pub(crate) fn records_matching_filter_candidates(
+        &mut self,
+        filter_map: &Map<String, Value>,
+        drawer_namespace: Option<&str>,
+    ) -> std::io::Result<Vec<Value>> {
+        let mut records = if let Some(offsets) = self.indexed_candidate_offsets(filter_map)? {
+            self.records_at_offsets_with_migration(offsets)?
+        } else {
+            self.find_all_records_with_migration()?
+        };
+
+        records.retain(|record| query::record_matches_filter(record, filter_map, drawer_namespace));
+        Ok(records)
+    }
+
+    fn delete_primary_key_without_lifecycle_side_effects(
+        &mut self,
+        key: &str,
+    ) -> std::io::Result<Option<Value>> {
         let Some(stale_offset) = self.primary_memory_index.get(key).copied() else {
             return Ok(None);
         };
@@ -805,8 +881,6 @@ impl Drawer {
                 )?;
             }
         }
-        self.invalidate_materialized_query_indexes()?;
-
         Ok(Some(deleted_record))
     }
 
@@ -2374,6 +2448,22 @@ impl Drawer {
             Value::Bool(value) => Some(value.to_string()),
             _ => None,
         }
+    }
+
+    fn primary_key_for_record(&self, record: &Value) -> std::io::Result<String> {
+        record
+            .get(&self.primary_key)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "record is missing a string {} for set-based delete",
+                        self.primary_key
+                    ),
+                )
+            })
     }
 
     fn equality_filter_index_key(value: &Value) -> Option<String> {

@@ -128,6 +128,12 @@ enum TransactionWalOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         drawer_namespace: Option<String>,
     },
+    DeleteByFilter {
+        drawer_name: String,
+        filter: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawer_namespace: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -165,6 +171,13 @@ pub(crate) trait WalReplayExecutor {
     fn replay_delete(
         database_core: &RwLock<Database>,
         pointer: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<()>;
+
+    fn replay_delete_by_filter(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
         context: ExecutionContext<'_>,
     ) -> Result<()>;
 }
@@ -593,6 +606,24 @@ where
     run_transaction(database_core, operation, apply)
 }
 
+pub(crate) fn run_delete_by_filter_transaction<T, F>(
+    database_core: &RwLock<Database>,
+    drawer_name: &str,
+    filter: &Value,
+    context: ExecutionContext<'_>,
+    apply: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let operation = TransactionWalOperation::DeleteByFilter {
+        drawer_name: drawer_name.to_string(),
+        filter: filter.clone(),
+        drawer_namespace: context.drawer_namespace.map(str::to_string),
+    };
+    run_transaction(database_core, operation, apply)
+}
+
 fn command_operation(command: &Command) -> Option<WalOperation> {
     match command {
         Command::Upsert { .. } | Command::BulkUpsert { .. } => Some(WalOperation::Upsert),
@@ -677,6 +708,16 @@ where
             };
             E::replay_delete(database_core, pointer, context)?;
         }
+        TransactionWalOperation::DeleteByFilter {
+            drawer_name,
+            filter,
+            drawer_namespace,
+        } => {
+            let context = ExecutionContext {
+                drawer_namespace: drawer_namespace.as_deref(),
+            };
+            E::replay_delete_by_filter(database_core, drawer_name, filter.clone(), context)?;
+        }
     }
 
     Ok(())
@@ -704,7 +745,8 @@ fn transaction_record_kind(record: &TransactionWalRecord) -> WalOperation {
             TransactionWalOperation::Upsert { .. } | TransactionWalOperation::BulkUpsert { .. } => {
                 WalOperation::Upsert
             }
-            TransactionWalOperation::DeleteById { .. } => WalOperation::Delete,
+            TransactionWalOperation::DeleteById { .. }
+            | TransactionWalOperation::DeleteByFilter { .. } => WalOperation::Delete,
         },
         TransactionWalRecord::Commit { .. } | TransactionWalRecord::Abort { .. } => {
             WalOperation::Maintenance

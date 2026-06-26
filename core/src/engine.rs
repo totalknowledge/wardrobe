@@ -1395,32 +1395,108 @@ impl WardrobeEngine {
         filter: Value,
         context: ExecutionContext<'_>,
     ) -> Result<usize> {
-        let records =
-            Self::find_by_filter_in_database(database_core, drawer_name, filter, None, context)?;
-
-        let mut deleted_count = 0_usize;
-        for record in records {
-            let id = record.get("_id").and_then(Value::as_str).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    "record is missing a string _id for delete-by-filter",
+        let wal_filter = filter.clone();
+        wal::run_delete_by_filter_transaction(
+            database_core,
+            drawer_name,
+            &wal_filter,
+            context,
+            || {
+                Self::delete_by_filter_in_database_unlogged(
+                    database_core,
+                    drawer_name,
+                    filter,
+                    context,
                 )
-            })?;
-            let pointer = if id.starts_with('@') {
-                id.to_string()
-            } else {
-                format!("@{drawer_name}:{id}")
-            };
-            if Self::delete_by_id_in_database(
-                database_core,
-                StorageLocator::Inline(pointer),
-                context,
-            )? {
-                deleted_count += 1;
-            }
+            },
+        )
+    }
+
+    fn delete_by_filter_in_database_unlogged(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<usize> {
+        let filter_map = query::filter_map(&filter)?;
+        let physical_drawer_name =
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Ok(0);
+        };
+
+        let (records, cascade_fields, inverse_delete_rules) = {
+            let mut drawer = Self::write_lock(&drawer)?;
+            (
+                drawer.records_matching_filter_candidates(filter_map, context.drawer_namespace)?,
+                drawer.cascade_delete_fields(),
+                delete_rules::inverse_delete_rules(
+                    drawer.delete_rules(),
+                    drawer.relationship_constraints(),
+                ),
+            )
+        };
+
+        if records.is_empty() {
+            return Ok(0);
         }
 
-        Ok(deleted_count)
+        let mut target_keys = Vec::with_capacity(records.len());
+        let mut target_pointers = Vec::with_capacity(records.len());
+        for record in &records {
+            let record_key = Self::primary_key_from_record_for_delete(record)?;
+            target_pointers.push(pointer::format_pointer(&physical_drawer_name, &record_key));
+            target_keys.push(record_key);
+        }
+        let target_pointer_set = target_pointers.iter().cloned().collect::<HashSet<_>>();
+
+        let mut active_delete_path = HashSet::new();
+        for (record, pointer) in records.iter().zip(target_pointers.iter()) {
+            Self::apply_delete_rule_side_effects(
+                database_core,
+                pointer,
+                record,
+                &cascade_fields,
+                &inverse_delete_rules,
+                &mut active_delete_path,
+                &target_pointer_set,
+                context,
+            )?;
+        }
+
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Ok(0);
+        };
+
+        Self::write_lock(&drawer)?.delete_by_primary_keys_set_based(target_keys)
+    }
+
+    fn primary_key_from_record_for_delete(record: &Value) -> Result<String> {
+        let id = record.get("_id").and_then(Value::as_str).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "record is missing a string _id for delete",
+            )
+        })?;
+
+        if id.starts_with('@') {
+            let (_, record_key) = pointer::parse_pointer(id)?;
+            Ok(record_key)
+        } else {
+            Ok(id.to_string())
+        }
     }
 
     fn delete_by_id_inner(
@@ -1462,9 +1538,52 @@ impl WardrobeEngine {
             return Ok(false);
         };
 
+        Self::apply_delete_rule_side_effects(
+            database_core,
+            pointer,
+            &record,
+            &cascade_fields,
+            &inverse_delete_rules,
+            active_delete_path,
+            &HashSet::new(),
+            context,
+        )?;
+
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("Drawer '{}' could not be loaded for delete", drawer_name),
+            ));
+        };
+
+        let deleted_record = Self::write_lock(&drawer)?.delete_by_primary_key(&record_key)?;
+
+        Ok(deleted_record.is_some())
+    }
+
+    fn apply_delete_rule_side_effects(
+        database_core: &RwLock<Database>,
+        pointer: &str,
+        record: &Value,
+        cascade_fields: &[String],
+        inverse_delete_rules: &[delete_rules::InverseDeleteRule],
+        active_delete_path: &mut HashSet<String>,
+        skip_delete_pointers: &HashSet<String>,
+        context: ExecutionContext<'_>,
+    ) -> Result<()> {
+        if active_delete_path.contains(pointer) {
+            return Ok(());
+        }
+
         delete_rules::evaluate_restrict_delete_rules(
             pointer,
-            &inverse_delete_rules,
+            inverse_delete_rules,
             context.drawer_namespace,
             |target_drawer, mapped_by, parent_pointer| {
                 Self::records_matching_parent_pointer(
@@ -1478,88 +1597,86 @@ impl WardrobeEngine {
         )?;
 
         active_delete_path.insert(pointer.to_string());
-
-        let cascade_child_pointers = delete_rules::collect_inverse_delete_rule_pointers(
-            pointer,
-            &inverse_delete_rules,
-            delete_rules::DeleteAction::Cascade,
-            context.drawer_namespace,
-            |target_drawer, mapped_by, parent_pointer| {
-                Self::records_matching_parent_pointer(
-                    database_core,
-                    target_drawer,
-                    mapped_by,
-                    parent_pointer,
-                    context,
-                )
-            },
-        )?;
-        for cascade_pointer in cascade_child_pointers {
-            Self::delete_by_id_inner(database_core, &cascade_pointer, active_delete_path, context)?;
-        }
-
-        let cascade_pointers = delete_rules::collect_cascade_pointers(&record, &cascade_fields);
-        for cascade_pointer in cascade_pointers {
-            Self::delete_by_id_inner(database_core, &cascade_pointer, active_delete_path, context)?;
-        }
-
-        delete_rules::apply_set_null_delete_rules(
-            pointer,
-            &inverse_delete_rules,
-            context.drawer_namespace,
-            |target_drawer, mapped_by, parent_pointer| {
-                Self::records_matching_parent_pointer(
-                    database_core,
-                    target_drawer,
-                    mapped_by,
-                    parent_pointer,
-                    context,
-                )
-            },
-            |physical_target_drawer, field_name, child_record| {
-                let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
-                    database_core,
-                    physical_target_drawer,
-                    "_id",
-                    Vec::new(),
-                )?
-                else {
-                    return Err(Error::new(
-                        ErrorKind::NotFound,
-                        format!(
-                            "Drawer '{}' could not be loaded for SetNull delete rule '{}'",
-                            physical_target_drawer, field_name
-                        ),
-                    ));
-                };
-
-                match Self::write_lock(&drawer)?.upsert_record(child_record)? {
-                    Ok(_) => Ok(()),
-                    Err(validation_error) => {
-                        Err(Error::new(ErrorKind::InvalidData, validation_error))
-                    }
+        let result = (|| {
+            let cascade_child_pointers = delete_rules::collect_inverse_delete_rule_pointers(
+                pointer,
+                inverse_delete_rules,
+                delete_rules::DeleteAction::Cascade,
+                context.drawer_namespace,
+                |target_drawer, mapped_by, parent_pointer| {
+                    Self::records_matching_parent_pointer(
+                        database_core,
+                        target_drawer,
+                        mapped_by,
+                        parent_pointer,
+                        context,
+                    )
+                },
+            )?;
+            for cascade_pointer in cascade_child_pointers {
+                if !skip_delete_pointers.contains(&cascade_pointer) {
+                    Self::delete_by_id_inner(
+                        database_core,
+                        &cascade_pointer,
+                        active_delete_path,
+                        context,
+                    )?;
                 }
-            },
-        )?;
+            }
 
-        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
-            database_core,
-            &drawer_name,
-            "_id",
-            Vec::new(),
-        )?
-        else {
-            active_delete_path.remove(pointer);
-            return Err(Error::new(
-                ErrorKind::NotFound,
-                format!("Drawer '{}' could not be loaded for delete", drawer_name),
-            ));
-        };
+            let cascade_pointers = delete_rules::collect_cascade_pointers(record, cascade_fields);
+            for cascade_pointer in cascade_pointers {
+                if !skip_delete_pointers.contains(&cascade_pointer) {
+                    Self::delete_by_id_inner(
+                        database_core,
+                        &cascade_pointer,
+                        active_delete_path,
+                        context,
+                    )?;
+                }
+            }
 
-        let deleted_record = Self::write_lock(&drawer)?.delete_by_primary_key(&record_key)?;
+            delete_rules::apply_set_null_delete_rules(
+                pointer,
+                inverse_delete_rules,
+                context.drawer_namespace,
+                |target_drawer, mapped_by, parent_pointer| {
+                    Self::records_matching_parent_pointer(
+                        database_core,
+                        target_drawer,
+                        mapped_by,
+                        parent_pointer,
+                        context,
+                    )
+                },
+                |physical_target_drawer, field_name, child_record| {
+                    let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+                        database_core,
+                        physical_target_drawer,
+                        "_id",
+                        Vec::new(),
+                    )?
+                    else {
+                        return Err(Error::new(
+                            ErrorKind::NotFound,
+                            format!(
+                                "Drawer '{}' could not be loaded for SetNull delete rule '{}'",
+                                physical_target_drawer, field_name
+                            ),
+                        ));
+                    };
+
+                    match Self::write_lock(&drawer)?.upsert_record(child_record)? {
+                        Ok(_) => Ok(()),
+                        Err(validation_error) => {
+                            Err(Error::new(ErrorKind::InvalidData, validation_error))
+                        }
+                    }
+                },
+            )
+        })();
         active_delete_path.remove(pointer);
-
-        Ok(deleted_record.is_some())
+        result
     }
 
     fn manage_schema_in_database(
@@ -2774,5 +2891,20 @@ impl wal::WalReplayExecutor for WardrobeEngine {
     ) -> Result<()> {
         WardrobeEngine::delete_by_id_in_database_unlogged(database_core, pointer, context)
             .map(|_| ())
+    }
+
+    fn replay_delete_by_filter(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        filter: Value,
+        context: ExecutionContext<'_>,
+    ) -> Result<()> {
+        WardrobeEngine::delete_by_filter_in_database_unlogged(
+            database_core,
+            drawer_name,
+            filter,
+            context,
+        )
+        .map(|_| ())
     }
 }

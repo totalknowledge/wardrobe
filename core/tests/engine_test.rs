@@ -119,7 +119,7 @@ fn wal_record_operation(record: &serde_json::Value) -> WalOperation {
             .and_then(|operation| operation.get("type"))
             .and_then(serde_json::Value::as_str)
         {
-            Some("delete_by_id") => WalOperation::Delete,
+            Some("delete_by_id") | Some("delete_by_filter") => WalOperation::Delete,
             _ => WalOperation::Upsert,
         },
         _ => WalOperation::Maintenance,
@@ -3239,6 +3239,385 @@ fn us_039_set_null_delete_rule_clears_child_pointer_and_preserves_child_record()
 
     let weapon = engine
         .find_by_id("@weapon:lnk_us_039_set_null_child")
+        .expect("weapon lookup should succeed")
+        .expect("weapon should remain");
+    assert_eq!(weapon["name"], "SetNull Child");
+    assert!(weapon.get("character").is_none());
+}
+
+#[test]
+fn us_112_delete_by_filter_runs_as_single_transaction_and_updates_metadata() {
+    let database = TempDatabase::new("us_112_single_transaction_delete_by_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .bulk_upsert(
+            "gem",
+            vec![
+                json!({"_id": "fire_a", "element": "Fire"}),
+                json!({"_id": "fire_b", "element": "Fire"}),
+                json!({"_id": "water", "element": "Water"}),
+                json!({"_id": "earth", "element": "Earth"}),
+            ],
+            true,
+        )
+        .expect("records should seed");
+
+    let wal_record_count_before_delete = wal_records(&database).len();
+    let deleted = engine
+        .delete_by_filter("gem", json!({"element": "Fire"}))
+        .expect("delete-by-filter should succeed");
+
+    assert_eq!(deleted, 2);
+    assert_eq!(
+        engine
+            .count("gem", None, None)
+            .expect("remaining count should succeed"),
+        2
+    );
+
+    let metadata_contents =
+        fs::read_to_string(database.path.join("gem_meta.drw")).expect("metadata should read");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_contents).expect("metadata should parse");
+    assert_eq!(metadata["record_count"], 2);
+
+    let new_wal_records = wal_records(&database)
+        .into_iter()
+        .skip(wal_record_count_before_delete)
+        .collect::<Vec<_>>();
+    let begin_records = new_wal_records
+        .iter()
+        .filter(|record| record["event"] == "begin")
+        .collect::<Vec<_>>();
+    let commit_records = new_wal_records
+        .iter()
+        .filter(|record| record["event"] == "commit")
+        .collect::<Vec<_>>();
+
+    assert_eq!(begin_records.len(), 1);
+    assert_eq!(commit_records.len(), 1);
+    assert_eq!(begin_records[0]["operation"]["type"], "delete_by_filter");
+    assert_eq!(begin_records[0]["operation"]["drawer_name"], "gem");
+    assert_eq!(
+        engine
+            .delete_by_filter("gem", json!({"element": "Void"}))
+            .expect("no-match delete should succeed"),
+        0
+    );
+}
+
+#[test]
+fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
+    let database = TempDatabase::new("us_112_indexed_delete_by_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .bulk_upsert(
+            "gem",
+            vec![
+                json!({"_id": "fire_a", "element": "Fire"}),
+                json!({"_id": "fire_b", "element": "Fire"}),
+                json!({"_id": "water", "element": "Water"}),
+            ],
+            true,
+        )
+        .expect("records should seed");
+    engine
+        .execute_command(Command::ManageSchema {
+            action: "add".to_string(),
+            kind: "index".to_string(),
+            drawer_name: "gem".to_string(),
+            field_name: "element".to_string(),
+            payload: json!({"kind": "index"}),
+        })
+        .expect("index should be declared");
+
+    assert_eq!(
+        engine
+            .count("gem", Some(json!({"element": "Fire"})), None)
+            .expect("first indexed count should materialize index"),
+        2
+    );
+
+    let metadata_before: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(database.path.join("gem_meta.drw"))
+            .expect("metadata should read before delete"),
+    )
+    .expect("metadata should parse before delete");
+    let generation_before = metadata_before["secondary_index_generation"]
+        .as_u64()
+        .expect("generation should be present");
+    assert_eq!(
+        metadata_before["materialized_secondary_indexes"]["element"].as_u64(),
+        Some(generation_before)
+    );
+
+    assert_eq!(
+        engine
+            .delete_by_filter("gem", json!({"element": "Fire"}))
+            .expect("indexed delete-by-filter should succeed"),
+        2
+    );
+
+    let metadata_after: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(database.path.join("gem_meta.drw"))
+            .expect("metadata should read after delete"),
+    )
+    .expect("metadata should parse after delete");
+    assert_eq!(
+        metadata_after["secondary_index_generation"].as_u64(),
+        Some(generation_before + 1)
+    );
+    assert!(
+        !metadata_after["materialized_secondary_indexes"]
+            .as_object()
+            .expect("materialized indexes should be an object")
+            .contains_key("element")
+    );
+    assert_eq!(
+        engine
+            .count("gem", Some(json!({"element": "Fire"})), None)
+            .expect("post-delete count should succeed"),
+        0
+    );
+}
+
+#[test]
+fn us_112_delete_by_filter_replays_from_transaction_wal() {
+    let database = TempDatabase::new("us_112_delete_by_filter_wal_replay");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+        engine
+            .bulk_upsert(
+                "gem",
+                vec![
+                    json!({"_id": "fire", "element": "Fire"}),
+                    json!({"_id": "water", "element": "Water"}),
+                ],
+                true,
+            )
+            .expect("records should seed");
+    }
+
+    write_wal_record(
+        &database,
+        json!({
+            "event": "begin",
+            "tx_id": "manual-delete-by-filter",
+            "operation": {
+                "type": "delete_by_filter",
+                "drawer_name": "gem",
+                "filter": {
+                    "element": "Fire"
+                }
+            }
+        }),
+    );
+    write_wal_record(
+        &database,
+        json!({
+            "event": "commit",
+            "tx_id": "manual-delete-by-filter"
+        }),
+    );
+
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
+    assert_eq!(
+        reopened
+            .count("gem", Some(json!({"element": "Fire"})), None)
+            .expect("fire count should succeed"),
+        0
+    );
+    assert_eq!(
+        reopened
+            .count("gem", Some(json!({"element": "Water"})), None)
+            .expect("water count should succeed"),
+        1
+    );
+}
+
+#[test]
+fn us_112_delete_by_filter_preserves_cascade_rules() {
+    let database = TempDatabase::new("us_112_delete_by_filter_cascade");
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+        engine
+            .upsert(
+                "character",
+                json!({
+                    "_id": "@character:lnk_us_112_cascade_owner",
+                    "name": "Cascade Target",
+                    "weapons": [
+                        {
+                            "_id": "@weapon:lnk_us_112_cascade_weapon",
+                            "name": "Cascade Weapon"
+                        }
+                    ]
+                }),
+            )
+            .expect("character graph should upsert");
+    }
+
+    write_cascade_delete_rules(&database, "character", &["weapons"]);
+    let restarted_engine =
+        WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
+
+    assert_eq!(
+        restarted_engine
+            .delete_by_filter("character", json!({"name": "Cascade Target"}))
+            .expect("cascade delete-by-filter should succeed"),
+        1
+    );
+    assert!(
+        restarted_engine
+            .find_by_id("@character:lnk_us_112_cascade_owner")
+            .expect("character lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        restarted_engine
+            .find_by_id("@weapon:lnk_us_112_cascade_weapon")
+            .expect("weapon lookup should succeed")
+            .is_none()
+    );
+}
+
+#[test]
+fn us_112_delete_by_filter_preserves_restrict_rules() {
+    let database = TempDatabase::new("us_112_delete_by_filter_restrict");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "critical_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {
+                "critical_weapons": {
+                    "action": "Restrict"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_112_restrict_parent",
+                "name": "Restrict Target"
+            }),
+        )
+        .expect("character should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_112_restrict_child",
+                "name": "Restrict Child",
+                "character": { "_id": "@character:lnk_us_112_restrict_parent" }
+            }),
+        )
+        .expect("weapon should upsert");
+
+    let error = engine
+        .delete_by_filter("character", json!({"name": "Restrict Target"}))
+        .expect_err("restrict rule should block delete-by-filter");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("Delete restricted"));
+    assert_eq!(
+        engine
+            .count("character", None, None)
+            .expect("character count should succeed"),
+        1
+    );
+    assert_eq!(
+        engine
+            .count("weapon", None, None)
+            .expect("weapon count should succeed"),
+        1
+    );
+}
+
+#[test]
+fn us_112_delete_by_filter_preserves_set_null_rules() {
+    let database = TempDatabase::new("us_112_delete_by_filter_set_null");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "assigned_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {
+                "assigned_weapons": {
+                    "action": "SetNull"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            "character",
+            json!({
+                "_id": "@character:lnk_us_112_set_null_parent",
+                "name": "SetNull Target"
+            }),
+        )
+        .expect("character should upsert");
+    engine
+        .upsert(
+            "weapon",
+            json!({
+                "_id": "@weapon:lnk_us_112_set_null_child",
+                "name": "SetNull Child",
+                "character": { "_id": "@character:lnk_us_112_set_null_parent" }
+            }),
+        )
+        .expect("weapon should upsert");
+
+    assert_eq!(
+        engine
+            .delete_by_filter("character", json!({"name": "SetNull Target"}))
+            .expect("set-null delete-by-filter should succeed"),
+        1
+    );
+
+    let weapon = engine
+        .find_by_id("@weapon:lnk_us_112_set_null_child")
         .expect("weapon lookup should succeed")
         .expect("weapon should remain");
     assert_eq!(weapon["name"], "SetNull Child");
