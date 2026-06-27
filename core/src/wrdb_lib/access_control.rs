@@ -1,4 +1,5 @@
 use super::diagnostics::split_structural_path;
+use crate::wrdb_lib::storage_lock;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
@@ -7,6 +8,19 @@ use std::path::Path;
 const ACCESS_CONTROL_FILE_NAME: &str = "_wardrobe_access_control.json";
 
 pub(super) fn manage_user(root_directory: &Path, action: &str, payload: Value) -> Result<Value> {
+    let _local_admin_lock = storage_lock::acquire_local_admin_lock(root_directory)?;
+    manage_user_locked(root_directory, action, payload)
+}
+
+pub(super) fn manage_user_with_server_lock(
+    root_directory: &Path,
+    action: &str,
+    payload: Value,
+) -> Result<Value> {
+    manage_user_locked(root_directory, action, payload)
+}
+
+fn manage_user_locked(root_directory: &Path, action: &str, payload: Value) -> Result<Value> {
     let normalized_action = action.replace('-', "_").to_ascii_lowercase();
     let mut registry = read_access_control_registry(root_directory)?;
 

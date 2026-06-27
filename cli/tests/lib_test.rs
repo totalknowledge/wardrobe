@@ -1259,6 +1259,55 @@ fn test_embedded_manage_user_is_rejected() {
 }
 
 #[test]
+fn test_embedded_user_admin_permission_commands_update_local_ledger() {
+    let storage_directory = temp_storage_directory("embedded_user_admin_ledger");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
+
+    let create_user = vec![
+        "create".to_string(),
+        "user".to_string(),
+        "{\"username\":\"dev_admin\",\"role\":\"operator\"}".to_string(),
+    ];
+    assert!(run_command(&client, &create_user, false).is_ok());
+
+    let grant_permission = vec![
+        "grant".to_string(),
+        "permission".to_string(),
+        "dev_admin".to_string(),
+        "my_wardrobe/my_bay:rud".to_string(),
+    ];
+    assert!(run_command(&client, &grant_permission, false).is_ok());
+
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(storage_directory.join("_wardrobe_access_control.json"))
+            .expect("local access-control ledger should exist"),
+    )
+    .expect("local access-control ledger should parse");
+    assert_eq!(registry["users"]["dev_admin"]["username"], "dev_admin");
+    assert_eq!(
+        registry["users"]["dev_admin"]["permissions"],
+        json!(["my_wardrobe/my_bay:rud"])
+    );
+
+    let revoke_permission = vec![
+        "revoke".to_string(),
+        "permission".to_string(),
+        "dev_admin".to_string(),
+        "my_wardrobe/my_bay:rud".to_string(),
+    ];
+    assert!(run_command(&client, &revoke_permission, false).is_ok());
+
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(storage_directory.join("_wardrobe_access_control.json"))
+            .expect("local access-control ledger should exist"),
+    )
+    .expect("local access-control ledger should parse");
+    assert_eq!(registry["users"]["dev_admin"]["permissions"], json!([]));
+
+    let _ = fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn test_documented_user_admin_validation_errors() {
     let storage_directory = temp_storage_directory("documented_user_admin_validation");
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
@@ -1295,8 +1344,7 @@ fn test_documented_user_admin_validation_errors() {
         "dev_admin".to_string(),
         "my_wardrobe:r".to_string(),
     ];
-    let err = run_command(&client, &valid_embedded_scope, false).expect_err("embedded guard");
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    assert!(run_command(&client, &valid_embedded_scope, false).is_ok());
 
     let _ = fs::remove_dir_all(storage_directory);
 }

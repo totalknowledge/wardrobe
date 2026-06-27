@@ -2,6 +2,7 @@ use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::routing::{DatabaseRoute, ExecutionContext};
+use crate::wrdb_lib::storage_lock::{self, StorageRootLockGuard};
 use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalVerification};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -41,6 +42,7 @@ pub struct WardrobeEngine {
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
     durability_policy: DurabilityPolicy,
+    server_lock: Option<StorageRootLockGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -360,11 +362,46 @@ impl WardrobeEngine {
         Self::open_with_optional_limits_and_durability(directory, None, None, durability_policy)
     }
 
+    pub fn open_for_server(directory: &str) -> Result<Self> {
+        Self::open_for_server_with_durability_policy(directory, DurabilityPolicy::Strict)
+    }
+
+    pub fn open_for_server_with_durability_policy(
+        directory: &str,
+        durability_policy: DurabilityPolicy,
+    ) -> Result<Self> {
+        let root_directory = PathBuf::from(directory);
+        let server_lock = storage_lock::acquire_server_lock(&root_directory)?;
+        Self::open_with_optional_limits_and_durability_and_lock(
+            directory,
+            None,
+            None,
+            durability_policy,
+            Some(server_lock),
+        )
+    }
+
     fn open_with_optional_limits_and_durability(
         directory: &str,
         max_cached_drawers: Option<usize>,
         wal_thresholds: Option<(u64, u64)>,
         durability_policy: DurabilityPolicy,
+    ) -> Result<Self> {
+        Self::open_with_optional_limits_and_durability_and_lock(
+            directory,
+            max_cached_drawers,
+            wal_thresholds,
+            durability_policy,
+            None,
+        )
+    }
+
+    fn open_with_optional_limits_and_durability_and_lock(
+        directory: &str,
+        max_cached_drawers: Option<usize>,
+        wal_thresholds: Option<(u64, u64)>,
+        durability_policy: DurabilityPolicy,
+        server_lock: Option<StorageRootLockGuard>,
     ) -> Result<Self> {
         let root_directory = PathBuf::from(directory);
         let registry = CatalogRegistry::open_or_initialize(&root_directory)?;
@@ -390,6 +427,7 @@ impl WardrobeEngine {
             wal_size_threshold_bytes,
             wal_ops_threshold_count,
             durability_policy,
+            server_lock,
         })
     }
 
@@ -760,10 +798,9 @@ impl WardrobeEngine {
                 &location,
             )
             .map(CreateResult::StorageInventory),
-            CreateRequest::User { payload } => {
-                access_control::manage_user(&self.root_directory, "add_user", payload)
-                    .map(CreateResult::Admin)
-            }
+            CreateRequest::User { payload } => self
+                .manage_user_authorization("add_user", payload)
+                .map(CreateResult::Admin),
         }
     }
 
@@ -798,8 +835,7 @@ impl WardrobeEngine {
                 payload,
                 ExecutionContext::root(),
             ),
-            DropRequest::User { username } => access_control::manage_user(
-                &self.root_directory,
+            DropRequest::User { username } => self.manage_user_authorization(
                 "drop_user",
                 serde_json::json!({ "username": username }),
             ),
@@ -807,19 +843,11 @@ impl WardrobeEngine {
     }
 
     pub fn grant(&self, request: PermissionRequest) -> Result<Value> {
-        access_control::manage_user(
-            &self.root_directory,
-            "grant_permission",
-            request.into_payload(),
-        )
+        self.manage_user_authorization("grant_permission", request.into_payload())
     }
 
     pub fn revoke(&self, request: PermissionRequest) -> Result<Value> {
-        access_control::manage_user(
-            &self.root_directory,
-            "revoke_permission",
-            request.into_payload(),
-        )
+        self.manage_user_authorization("revoke_permission", request.into_payload())
     }
 
     pub fn status<S>(&self, request: S) -> Result<StatusResult>
@@ -889,7 +917,15 @@ impl WardrobeEngine {
     }
 
     pub(crate) fn manage_user(&self, action: &str, payload: Value) -> Result<Value> {
-        access_control::manage_user(&self.root_directory, action, payload)
+        self.manage_user_authorization(action, payload)
+    }
+
+    fn manage_user_authorization(&self, action: &str, payload: Value) -> Result<Value> {
+        if self.server_lock.is_some() {
+            access_control::manage_user_with_server_lock(&self.root_directory, action, payload)
+        } else {
+            access_control::manage_user(&self.root_directory, action, payload)
+        }
     }
 
     pub(crate) fn cached_drawer_count(&self) -> Result<usize> {

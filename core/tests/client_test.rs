@@ -2,6 +2,7 @@ mod common;
 
 use common::TempDatabase;
 use serde_json::json;
+use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
 use std::thread::{self, JoinHandle};
@@ -11,7 +12,7 @@ use wardrobe_core::{
     DeleteResult, DriverKind, DropRequest, InspectResult, OperationFilter, OperationOptions,
     OrderDirection, PermissionRequest, ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult,
     RestoreReport, StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageLocator,
-    UpsertResult, VacuumReport, WalVerification, WardrobeClient,
+    UpsertResult, VacuumReport, WalVerification, WardrobeClient, WardrobeEngine,
 };
 
 #[cfg(unix)]
@@ -279,6 +280,55 @@ fn client_embedded_driver_exhaustive_execution() {
     let drawers = status_drawers(&client, "main", "default");
     assert!(drawers.is_ok());
 
+    assert_eq!(
+        client
+            .create(CreateRequest::user(json!({
+                "username": "local_admin",
+                "role": "operator"
+            })))
+            .expect("embedded create user should update local ledger"),
+        CreateResult::Admin(json!({
+            "ok": true,
+            "action": "add_user",
+            "username": "local_admin"
+        }))
+    );
+    assert_eq!(
+        client
+            .grant(PermissionRequest::new("local_admin", "main:rud"))
+            .expect("embedded grant should update local ledger"),
+        json!({
+            "ok": true,
+            "action": "grant_permission",
+            "username": "local_admin",
+            "permission_scope": "main:rud"
+        })
+    );
+    let ledger: serde_json::Value = serde_json::from_slice(
+        &fs::read(database.path.join("_wardrobe_access_control.json")).unwrap(),
+    )
+    .expect("ledger should parse");
+    assert_eq!(
+        ledger["users"]["local_admin"]["permissions"],
+        json!(["main:rud"])
+    );
+    assert_eq!(
+        client
+            .revoke(PermissionRequest::new("local_admin", "main:rud"))
+            .expect("embedded revoke should update local ledger"),
+        json!({
+            "ok": true,
+            "action": "revoke_permission",
+            "username": "local_admin",
+            "permission_scope": "main:rud"
+        })
+    );
+    let ledger: serde_json::Value = serde_json::from_slice(
+        &fs::read(database.path.join("_wardrobe_access_control.json")).unwrap(),
+    )
+    .expect("ledger should parse");
+    assert_eq!(ledger["users"]["local_admin"]["permissions"], json!([]));
+
     let delete_by_id_res = client
         .delete(
             OperationFilter::pointer("@gem:test_id"),
@@ -309,6 +359,30 @@ fn client_embedded_driver_exhaustive_execution() {
         )
         .expect("delete_by_filter failed");
     assert_eq!(deleted_by_filter, 0);
+}
+
+#[test]
+fn client_embedded_user_admin_rejects_direct_writes_when_server_lock_is_held() {
+    let database = TempDatabase::new("client_embedded_admin_server_lock");
+    let connection = database.path.to_string_lossy().into_owned();
+    let server_engine = WardrobeEngine::open_for_server(&connection)
+        .expect("server engine should acquire storage root lock");
+    let client = WardrobeClient::open(&connection).expect("embedded client should still open");
+
+    let error = client
+        .grant(PermissionRequest::new("alice", "main:r"))
+        .expect_err("local admin write should be rejected while server holds lock");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        error
+            .to_string()
+            .contains("Wardrobe storage root is locked")
+    );
+
+    drop(server_engine);
+    client
+        .grant(PermissionRequest::new("alice", "main:r"))
+        .expect("local admin write should succeed after server lock is released");
 }
 
 #[test]

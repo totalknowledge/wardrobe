@@ -244,15 +244,27 @@ mod tests {
                 .expect("status should work")
                 .eq(&StatusResult::CachedDrawerCount(1))
         );
-        assert!(
+        assert_eq!(
             client
                 .grant(PermissionRequest::new("alice", "armory:r"))
-                .is_err()
+                .expect("embedded grant should work"),
+            json!({
+                "ok": true,
+                "action": "grant_permission",
+                "username": "alice",
+                "permission_scope": "armory:r"
+            })
         );
-        assert!(
+        assert_eq!(
             client
                 .revoke(PermissionRequest::new("alice", "armory:r"))
-                .is_err()
+                .expect("embedded revoke should work"),
+            json!({
+                "ok": true,
+                "action": "revoke_permission",
+                "username": "alice",
+                "permission_scope": "armory:r"
+            })
         );
 
         let _ = std::fs::remove_dir_all(path);

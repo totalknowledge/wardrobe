@@ -133,7 +133,7 @@ pub fn print_help() {
 }
 
 pub fn run(config: ServerConfig) -> io::Result<()> {
-    let engine = Arc::new(WardrobeEngine::open_with_durability_policy(
+    let engine = Arc::new(WardrobeEngine::open_for_server_with_durability_policy(
         &config.data_dir,
         config.durability_policy.clone(),
     )?);

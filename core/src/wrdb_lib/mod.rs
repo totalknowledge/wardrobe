@@ -21,6 +21,7 @@ pub(crate) mod result_expectations;
 pub(crate) mod routing;
 pub(crate) mod storage;
 pub mod storage_format;
+pub(crate) mod storage_lock;
 pub(crate) mod transport;
 pub mod wal;
 pub mod writer;

@@ -153,14 +153,14 @@ impl ClientDriver {
 
     pub(crate) fn grant(&self, request: PermissionRequest) -> Result<Value> {
         match self {
-            Self::Embedded(_) => embedded_admin_error("grant"),
+            Self::Embedded(engine) => engine.grant(request),
             _ => result_expectations::admin(self.execute_transport(Command::Grant(request))?),
         }
     }
 
     pub(crate) fn revoke(&self, request: PermissionRequest) -> Result<Value> {
         match self {
-            Self::Embedded(_) => embedded_admin_error("revoke"),
+            Self::Embedded(engine) => engine.revoke(request),
             _ => result_expectations::admin(self.execute_transport(Command::Revoke(request))?),
         }
     }
@@ -182,11 +182,4 @@ impl ClientDriver {
             Self::UnixSocket(transport) => transport.execute(command),
         }
     }
-}
-
-fn embedded_admin_error<T>(operation: &str) -> Result<T> {
-    Err(Error::new(
-        ErrorKind::Unsupported,
-        format!("{operation} requires a remote Wardrobe server with administrative authorization"),
-    ))
 }
