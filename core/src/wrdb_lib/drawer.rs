@@ -12,6 +12,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
+pub(crate) const INDEX_FIELD_KEY: &str = "f";
+pub(crate) const INDEX_VALUE_KEY: &str = "k";
+pub(crate) const INDEX_OFFSET_KEY: &str = "o";
+pub(crate) const INDEX_LENGTH_KEY: &str = "l";
+pub(crate) const INDEX_SIZE_CLASS_KEY: &str = "c";
+pub(crate) const INDEX_CRC_KEY: &str = "x";
+pub(crate) const INDEX_STATUS_KEY: &str = "s";
 
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
@@ -135,11 +142,21 @@ impl DataBlockIndexEntry {
     }
 
     fn from_index_entry(index_entry: &Value) -> Option<(u64, Self)> {
-        let offset = index_entry.get("o").and_then(|value| value.as_u64())?;
-        let payload_len = index_entry.get("len").and_then(|value| value.as_u64())? as usize;
-        let size_class = index_entry.get("class").and_then(|value| value.as_u64())? as usize;
-        let crc = index_entry.get("crc").and_then(|value| value.as_u64())? as u32;
-        let status = index_entry.get("status").and_then(|value| value.as_u64())? as u8;
+        let offset = index_entry
+            .get(INDEX_OFFSET_KEY)
+            .and_then(|value| value.as_u64())?;
+        let payload_len = index_entry
+            .get(INDEX_LENGTH_KEY)
+            .and_then(|value| value.as_u64())? as usize;
+        let size_class = index_entry
+            .get(INDEX_SIZE_CLASS_KEY)
+            .and_then(|value| value.as_u64())? as usize;
+        let crc = index_entry
+            .get(INDEX_CRC_KEY)
+            .and_then(|value| value.as_u64())? as u32;
+        let status = index_entry
+            .get(INDEX_STATUS_KEY)
+            .and_then(|value| value.as_u64())? as u8;
 
         Some((
             offset,
@@ -294,13 +311,21 @@ impl Drawer {
                     data_block_journal.insert(data_offset, block_entry);
                 }
 
-                if index_entry.get("status").and_then(|value| value.as_u64())
+                if index_entry
+                    .get(INDEX_STATUS_KEY)
+                    .and_then(|value| value.as_u64())
                     == Some(DATA_BLOCK_STATUS_DEAD as u64)
                 {
                     if let (Some(field), Some(key), Some(data_offset)) = (
-                        index_entry.get("f").and_then(|value| value.as_str()),
-                        index_entry.get("k").and_then(|value| value.as_str()),
-                        index_entry.get("o").and_then(|value| value.as_u64()),
+                        index_entry
+                            .get(INDEX_FIELD_KEY)
+                            .and_then(|value| value.as_str()),
+                        index_entry
+                            .get(INDEX_VALUE_KEY)
+                            .and_then(|value| value.as_str()),
+                        index_entry
+                            .get(INDEX_OFFSET_KEY)
+                            .and_then(|value| value.as_u64()),
                     ) {
                         if field == primary_key
                             && primary_memory_index.get(key).copied() == Some(data_offset)
@@ -313,9 +338,9 @@ impl Drawer {
                 }
 
                 if let (Some(field), Some(key), Some(data_offset_val)) = (
-                    index_entry.get("f").and_then(|v| v.as_str()),
-                    index_entry.get("k").and_then(|v| v.as_str()),
-                    index_entry.get("o"),
+                    index_entry.get(INDEX_FIELD_KEY).and_then(|v| v.as_str()),
+                    index_entry.get(INDEX_VALUE_KEY).and_then(|v| v.as_str()),
+                    index_entry.get(INDEX_OFFSET_KEY),
                 ) {
                     let map_key = format!("{}:{}", field, key);
                     if let Some((stale_index_offset, stale_slot_size)) =
@@ -2288,18 +2313,7 @@ impl Drawer {
     ) -> std::io::Result<()> {
         let map_key = format!("{}:{}", field, key);
 
-        let mut index_entry = serde_json::json!({
-            "f": field,
-            "k": key,
-            "o": offset_value
-        });
-
-        if let Some(block_entry) = block_entry {
-            index_entry["len"] = Value::from(block_entry.payload_len as u64);
-            index_entry["class"] = Value::from(block_entry.size_class as u64);
-            index_entry["crc"] = Value::from(block_entry.crc as u64);
-            index_entry["status"] = Value::from(block_entry.status as u64);
-        }
+        let index_entry = Self::index_entry_value(field, key, offset_value, block_entry);
 
         let serialized_index = BsonBinaryFormat::serialize_record(&index_entry)?;
         let entry_raw_len = serialized_index.len();
@@ -2513,20 +2527,34 @@ impl Drawer {
         offset_value: Value,
         block_entry: Option<DataBlockIndexEntry>,
     ) -> Value {
-        let mut index_entry = serde_json::json!({
-            "f": field,
-            "k": key,
-            "o": offset_value
-        });
+        let mut index_entry = Map::new();
+        index_entry.insert(
+            INDEX_FIELD_KEY.to_string(),
+            Value::String(field.to_string()),
+        );
+        index_entry.insert(INDEX_VALUE_KEY.to_string(), Value::String(key.to_string()));
+        index_entry.insert(INDEX_OFFSET_KEY.to_string(), offset_value);
 
         if let Some(block_entry) = block_entry {
-            index_entry["len"] = Value::from(block_entry.payload_len as u64);
-            index_entry["class"] = Value::from(block_entry.size_class as u64);
-            index_entry["crc"] = Value::from(block_entry.crc as u64);
-            index_entry["status"] = Value::from(block_entry.status as u64);
+            index_entry.insert(
+                INDEX_LENGTH_KEY.to_string(),
+                Value::from(block_entry.payload_len as u64),
+            );
+            index_entry.insert(
+                INDEX_SIZE_CLASS_KEY.to_string(),
+                Value::from(block_entry.size_class as u64),
+            );
+            index_entry.insert(
+                INDEX_CRC_KEY.to_string(),
+                Value::from(block_entry.crc as u64),
+            );
+            index_entry.insert(
+                INDEX_STATUS_KEY.to_string(),
+                Value::from(block_entry.status as u64),
+            );
         }
 
-        index_entry
+        Value::Object(index_entry)
     }
 
     fn append_compact_payload(target: &mut Vec<u8>, payload: &[u8]) -> u64 {
@@ -2683,6 +2711,82 @@ mod tests {
         std::env::temp_dir().join(format!("wardrobe_drawer_{name}_{nanos}"))
     }
 
+    fn live_index_records(drawer: &mut Drawer) -> Vec<Value> {
+        drawer.commit().expect("drawer should commit before read");
+
+        let reader =
+            DatabaseReader::open_drawer(&drawer.index_file_path).expect("index reader opens");
+        let mut records = Vec::new();
+        reader
+            .stream_with_offsets(|_, line| {
+                if !BsonBinaryFormat::is_tombstone(line) {
+                    records.push(
+                        BsonBinaryFormat::deserialize_record(line)
+                            .expect("index record should deserialize")
+                            .expect("index record should contain a value"),
+                    );
+                }
+            })
+            .expect("index should stream");
+        records
+    }
+
+    fn assert_record_keys(record: &Value, expected: &[&str]) {
+        let object = record.as_object().expect("index record should be object");
+        let actual = object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = expected
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    fn assert_compact_index_records(records: &[Value]) {
+        let mut primary_count = 0usize;
+        let mut secondary_count = 0usize;
+
+        for record in records {
+            let field = record
+                .get(INDEX_FIELD_KEY)
+                .and_then(Value::as_str)
+                .expect("index record should include compact field key");
+            if field == "_id" {
+                primary_count += 1;
+                assert_record_keys(
+                    record,
+                    &[
+                        INDEX_CRC_KEY,
+                        INDEX_FIELD_KEY,
+                        INDEX_VALUE_KEY,
+                        INDEX_LENGTH_KEY,
+                        INDEX_OFFSET_KEY,
+                        INDEX_STATUS_KEY,
+                        INDEX_SIZE_CLASS_KEY,
+                    ],
+                );
+            } else {
+                secondary_count += 1;
+                assert_record_keys(
+                    record,
+                    &[INDEX_FIELD_KEY, INDEX_VALUE_KEY, INDEX_OFFSET_KEY],
+                );
+                assert_eq!(field, "element");
+            }
+        }
+
+        assert!(
+            primary_count > 0,
+            "expected at least one primary index record"
+        );
+        assert!(
+            secondary_count > 0,
+            "expected at least one secondary index record"
+        );
+    }
+
     #[test]
     fn metadata_crc_and_index_helpers_cover_round_trips() {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
@@ -2729,13 +2833,36 @@ mod tests {
         let block = DataBlockIndexEntry::live(b"payload", 16);
         let index_entry =
             Drawer::index_entry_value("element", "Fire", Value::from(42_u64), Some(block));
+        assert_record_keys(
+            &index_entry,
+            &[
+                INDEX_CRC_KEY,
+                INDEX_FIELD_KEY,
+                INDEX_VALUE_KEY,
+                INDEX_LENGTH_KEY,
+                INDEX_OFFSET_KEY,
+                INDEX_STATUS_KEY,
+                INDEX_SIZE_CLASS_KEY,
+            ],
+        );
         let (offset, parsed_block) =
             DataBlockIndexEntry::from_index_entry(&index_entry).expect("index should parse");
         assert_eq!(offset, 42);
         assert_eq!(parsed_block.payload_len, 7);
         assert_eq!(parsed_block.size_class, 16);
         assert_eq!(parsed_block.status, DATA_BLOCK_STATUS_LIVE);
-        assert!(DataBlockIndexEntry::from_index_entry(&json!({"o": 1})).is_none());
+        let mut incomplete_index_entry = Map::new();
+        incomplete_index_entry.insert(INDEX_OFFSET_KEY.to_string(), Value::from(1_u64));
+        assert!(
+            DataBlockIndexEntry::from_index_entry(&Value::Object(incomplete_index_entry)).is_none()
+        );
+
+        let secondary_entry =
+            Drawer::index_entry_value("element", "Fire", Value::from(42_u64), None);
+        assert_record_keys(
+            &secondary_entry,
+            &[INDEX_FIELD_KEY, INDEX_VALUE_KEY, INDEX_OFFSET_KEY],
+        );
 
         let mut compact_payload = Vec::new();
         assert_eq!(
@@ -2760,6 +2887,88 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(metadata_path.parent().unwrap());
+    }
+
+    #[test]
+    fn primary_and_secondary_index_records_use_compact_field_names() {
+        let path = temp_dir("compact_index_records");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer =
+            Drawer::open(&path, "gem", "_id", vec!["element".to_string()]).expect("drawer opens");
+
+        drawer
+            .upsert_record(json!({"_id": "ruby", "element": "fire"}))
+            .expect("ruby upsert should write")
+            .expect("ruby upsert should validate");
+        drawer
+            .upsert_record(json!({"_id": "sapphire", "element": "water"}))
+            .expect("sapphire upsert should write")
+            .expect("sapphire upsert should validate");
+
+        let records = live_index_records(&mut drawer);
+        assert_compact_index_records(&records);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn compaction_rewrites_index_records_with_compact_field_names() {
+        let path = temp_dir("compact_index_after_vacuum");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer =
+            Drawer::open(&path, "gem", "_id", vec!["element".to_string()]).expect("drawer opens");
+
+        drawer
+            .upsert_record(json!({"_id": "ruby", "element": "fire"}))
+            .expect("ruby upsert should write")
+            .expect("ruby upsert should validate");
+        drawer
+            .upsert_record(json!({"_id": "sapphire", "element": "water"}))
+            .expect("sapphire upsert should write")
+            .expect("sapphire upsert should validate");
+        drawer
+            .delete_by_primary_key("ruby")
+            .expect("delete should write");
+
+        let report = drawer.vacuum().expect("vacuum should compact");
+        assert_eq!(report.records_rewritten, 1);
+
+        let records = live_index_records(&mut drawer);
+        assert_compact_index_records(&records);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn drawer_reopens_from_compact_index_format() {
+        let path = temp_dir("compact_index_reopen");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        {
+            let mut drawer = Drawer::open(&path, "gem", "_id", vec!["element".to_string()])
+                .expect("drawer opens");
+            drawer
+                .upsert_record(json!({"_id": "ruby", "element": "fire"}))
+                .expect("ruby upsert should write")
+                .expect("ruby upsert should validate");
+            drawer.commit().expect("drawer should commit");
+        }
+
+        let mut reopened = Drawer::open(&path, "gem", "_id", vec!["element".to_string()])
+            .expect("drawer should reopen compact index");
+        let record = reopened
+            .find_by_primary_key("ruby")
+            .expect("primary read should work")
+            .expect("record should exist");
+        assert_eq!(record["element"], "fire");
+        let secondary_records = reopened
+            .find_by_secondary_key("element", "fire")
+            .expect("secondary read should work");
+        assert_eq!(secondary_records.len(), 1);
+
+        let records = live_index_records(&mut reopened);
+        assert_compact_index_records(&records);
+
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

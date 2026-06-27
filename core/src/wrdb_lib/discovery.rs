@@ -1,4 +1,7 @@
 use crate::wrdb_lib::catalog_validation;
+use crate::wrdb_lib::drawer::{
+    INDEX_FIELD_KEY, INDEX_OFFSET_KEY, INDEX_STATUS_KEY, INDEX_VALUE_KEY,
+};
 use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::storage::StorageInventory;
@@ -368,27 +371,31 @@ fn drawer_record_count_from_index(index_path: &Path) -> Result<Option<usize>> {
             continue;
         };
 
-        if index_entry.get("f").and_then(Value::as_str) != Some("_id") {
+        if index_entry.get(INDEX_FIELD_KEY).and_then(Value::as_str) != Some("_id") {
             continue;
         }
 
-        let Some(primary_key) = index_entry.get("k").and_then(Value::as_str) else {
+        let Some(primary_key) = index_entry.get(INDEX_VALUE_KEY).and_then(Value::as_str) else {
             continue;
         };
         saw_primary_key_rows = true;
 
         let is_deleted = index_entry
-            .get("status")
+            .get(INDEX_STATUS_KEY)
             .and_then(Value::as_u64)
             .is_some_and(|status| status == 0)
             || index_entry
-                .get("o")
+                .get(INDEX_OFFSET_KEY)
                 .and_then(Value::as_array)
                 .is_some_and(|offsets| offsets.is_empty());
 
         if is_deleted {
             live_primary_keys.remove(primary_key);
-        } else if index_entry.get("o").and_then(Value::as_u64).is_some() {
+        } else if index_entry
+            .get(INDEX_OFFSET_KEY)
+            .and_then(Value::as_u64)
+            .is_some()
+        {
             live_primary_keys.insert(primary_key.to_string());
         }
     }

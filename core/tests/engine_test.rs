@@ -15,6 +15,14 @@ use wardrobe_core::{
     WAL_FILE_NAME, WalJournal, WalOperation, WardrobeEngine,
 };
 
+const INDEX_FIELD_KEY: &str = "f";
+const INDEX_VALUE_KEY: &str = "k";
+const INDEX_OFFSET_KEY: &str = "o";
+const INDEX_LENGTH_KEY: &str = "l";
+const INDEX_SIZE_CLASS_KEY: &str = "c";
+const INDEX_CRC_KEY: &str = "x";
+const INDEX_STATUS_KEY: &str = "s";
+
 fn upsert_command(payload: serde_json::Value, filter: impl Into<OperationFilter>) -> Command {
     Command::Upsert {
         payload,
@@ -102,20 +110,18 @@ fn write_legacy_drawer_record(
         .and_then(|value| value.as_str())
         .expect("legacy record should include string primary key");
     let data_size_class = serialized_record.len() + 1;
-    let index_record = json!({
-        "f": "_id",
-        "k": primary_key,
-        "o": data_offset,
-        "len": serialized_record.len(),
-        "class": data_size_class,
-        "crc": 0,
-        "status": 1
-    });
+    let mut index_record = serde_json::Map::new();
+    index_record.insert(INDEX_FIELD_KEY.to_string(), json!("_id"));
+    index_record.insert(INDEX_VALUE_KEY.to_string(), json!(primary_key));
+    index_record.insert(INDEX_OFFSET_KEY.to_string(), json!(data_offset));
+    index_record.insert(INDEX_LENGTH_KEY.to_string(), json!(serialized_record.len()));
+    index_record.insert(INDEX_SIZE_CLASS_KEY.to_string(), json!(data_size_class));
+    index_record.insert(INDEX_CRC_KEY.to_string(), json!(0));
+    index_record.insert(INDEX_STATUS_KEY.to_string(), json!(1));
     let serialized_index =
-        serde_json::to_vec(&index_record).expect("legacy index should serialize as json");
-    let mut index_contents = serialized_index;
-    index_contents.push(b'\n');
-    fs::write(&index_path, index_contents).expect("legacy index file should write");
+        BsonBinaryFormat::serialize_record(&serde_json::Value::Object(index_record))
+            .expect("legacy fixture index should serialize using compact binary format");
+    fs::write(&index_path, serialized_index).expect("legacy index file should write");
 
     write_drawer_metadata(
         database,

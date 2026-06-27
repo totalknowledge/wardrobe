@@ -7,6 +7,14 @@ use wardrobe_core::{
     BsonBinaryFormat, DatabaseReader, DatabaseWriter, Drawer, Recycler, StorageFormat,
 };
 
+const INDEX_FIELD_KEY: &str = "f";
+const INDEX_VALUE_KEY: &str = "k";
+const INDEX_OFFSET_KEY: &str = "o";
+const INDEX_LENGTH_KEY: &str = "l";
+const INDEX_SIZE_CLASS_KEY: &str = "c";
+const INDEX_CRC_KEY: &str = "x";
+const INDEX_STATUS_KEY: &str = "s";
+
 fn load_metadata(database_directory: &TempDatabase, drawer_name: &str) -> serde_json::Value {
     let metadata_path = database_directory
         .path
@@ -49,6 +57,42 @@ fn load_index_records(
         })
         .expect("index should stream");
     records
+}
+
+fn compact_primary_index_record(
+    key: &str,
+    offset: u64,
+    payload_len: usize,
+    size_class: usize,
+    status: u8,
+) -> serde_json::Value {
+    let mut record = serde_json::Map::new();
+    record.insert(
+        INDEX_FIELD_KEY.to_string(),
+        serde_json::Value::String("_id".to_string()),
+    );
+    record.insert(
+        INDEX_VALUE_KEY.to_string(),
+        serde_json::Value::String(key.to_string()),
+    );
+    record.insert(
+        INDEX_OFFSET_KEY.to_string(),
+        serde_json::Value::from(offset),
+    );
+    record.insert(
+        INDEX_LENGTH_KEY.to_string(),
+        serde_json::Value::from(payload_len as u64),
+    );
+    record.insert(
+        INDEX_SIZE_CLASS_KEY.to_string(),
+        serde_json::Value::from(size_class as u64),
+    );
+    record.insert(INDEX_CRC_KEY.to_string(), serde_json::Value::from(0_u64));
+    record.insert(
+        INDEX_STATUS_KEY.to_string(),
+        serde_json::Value::from(status as u64),
+    );
+    serde_json::Value::Object(record)
 }
 
 fn count_tombstones(path: &std::path::Path) -> usize {
@@ -124,12 +168,18 @@ fn open_rebuilds_array_form_secondary_offsets_from_disk() {
     let data_record =
         BsonBinaryFormat::serialize_record(&json!({"_id": "@weapon:lnk_a", "serial": "SER-1"}))
             .expect("data record should serialize");
-    fs::write(&data_file, data_record).expect("data file should write");
+    fs::write(&data_file, &data_record).expect("data file should write");
 
     let mut index_records = Vec::new();
     index_records.extend(
-        BsonBinaryFormat::serialize_record(&json!({"f": "_id", "k": "@weapon:lnk_a", "o": 0}))
-            .expect("primary index should serialize"),
+        BsonBinaryFormat::serialize_record(&compact_primary_index_record(
+            "@weapon:lnk_a",
+            0,
+            data_record.len(),
+            data_record.len(),
+            1,
+        ))
+        .expect("primary index should serialize"),
     );
     index_records.extend(
         BsonBinaryFormat::serialize_record(&json!({"f": "serial", "k": "SER-1", "o": [0]}))
@@ -734,10 +784,10 @@ fn us_015_index_journal_tracks_blocks_and_reuses_dead_slots_after_reopen() {
 
     let index_records = load_index_records(&database_directory, "socks");
     assert!(index_records.iter().any(|record| {
-        record["status"] == 1
-            && record.get("len").is_some()
-            && record.get("class").is_some()
-            && record.get("crc").is_some()
+        record[INDEX_STATUS_KEY] == 1
+            && record.get(INDEX_LENGTH_KEY).is_some()
+            && record.get(INDEX_SIZE_CLASS_KEY).is_some()
+            && record.get(INDEX_CRC_KEY).is_some()
     }));
     assert_eq!(index_records.len(), 1);
     assert!(count_tombstones(&database_directory.path.join("socks_index.drw")) >= 1);
@@ -795,8 +845,8 @@ fn us_046_upsert_reuses_recycler_slot_before_appending() {
     assert!(len_after_initial_append > 0);
     let deleted_offset = load_index_records(&database_directory, "socks")
         .iter()
-        .find(|record| record["k"] == "@socks:lnk_a" && record["status"] == 1)
-        .and_then(|record| record["o"].as_u64())
+        .find(|record| record[INDEX_VALUE_KEY] == "@socks:lnk_a" && record[INDEX_STATUS_KEY] == 1)
+        .and_then(|record| record[INDEX_OFFSET_KEY].as_u64())
         .expect("live index record should expose reusable offset");
 
     drawer
@@ -823,8 +873,8 @@ fn us_046_upsert_reuses_recycler_slot_before_appending() {
     let reused_offset = load_index_records(&database_directory, "socks")
         .iter()
         .rev()
-        .find(|record| record["k"] == "@socks:lnk_b" && record["status"] == 1)
-        .and_then(|record| record["o"].as_u64())
+        .find(|record| record[INDEX_VALUE_KEY] == "@socks:lnk_b" && record[INDEX_STATUS_KEY] == 1)
+        .and_then(|record| record[INDEX_OFFSET_KEY].as_u64())
         .expect("new live index record should expose storage offset");
     assert_eq!(reused_offset, deleted_offset);
 
@@ -883,15 +933,13 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
         .expect("data metadata should read")
         .len();
 
-    let dead_index_entry = json!({
-        "f": "_id",
-        "k": "@socks:lnk_reclaimed",
-        "o": dead_offset,
-        "len": serialized_record.len(),
-        "class": target_size_class,
-        "crc": 0,
-        "status": 0
-    });
+    let dead_index_entry = compact_primary_index_record(
+        "@socks:lnk_reclaimed",
+        dead_offset,
+        serialized_record.len(),
+        target_size_class,
+        0,
+    );
     let serialized_index =
         BsonBinaryFormat::serialize_record(&dead_index_entry).expect("index should serialize");
     let index_size_class = Recycler::new().calculate_aligned_size(serialized_index.len());
@@ -913,8 +961,10 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
     let reused_offset = load_index_records(&database_directory, "socks")
         .iter()
         .rev()
-        .find(|record| record["k"] == "@socks:lnk_reclaimed" && record["status"] == 1)
-        .and_then(|record| record["o"].as_u64())
+        .find(|record| {
+            record[INDEX_VALUE_KEY] == "@socks:lnk_reclaimed" && record[INDEX_STATUS_KEY] == 1
+        })
+        .and_then(|record| record[INDEX_OFFSET_KEY].as_u64())
         .expect("live record should be written after lazy cache scan");
     assert_eq!(reused_offset, dead_offset);
 }
