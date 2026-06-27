@@ -6,8 +6,10 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::thread::{self, JoinHandle};
 use wardrobe_core::{
-    Command, CommandResult, ConnectionTarget, DriverKind, OrderDirection, ProtocolFrame,
-    ProtocolOpcode, QueryModifiers, StorageInventory, StorageLocator, VacuumReport, WardrobeClient,
+    Command, CommandResult, CompactMode, CompactRequest, ConnectionTarget, CreateRequest,
+    CreateResult, DriverKind, OperationFilter, OperationOptions, OrderDirection, PermissionRequest,
+    ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult, StatusRequest, StatusResult,
+    StorageInventory, StorageLocator, VacuumReport, WardrobeClient,
 };
 
 #[cfg(unix)]
@@ -61,6 +63,100 @@ fn spawn_tcp_protocol_server_with_opcode(
     (format!("wardrobe://{address}"), handle)
 }
 
+struct ReadTarget {
+    filter: OperationFilter,
+    options: OperationOptions,
+}
+
+impl From<OperationFilter> for ReadTarget {
+    fn from(filter: OperationFilter) -> Self {
+        Self {
+            filter,
+            options: OperationOptions::default(),
+        }
+    }
+}
+
+impl From<(OperationFilter, OperationOptions)> for ReadTarget {
+    fn from((filter, options): (OperationFilter, OperationOptions)) -> Self {
+        Self { filter, options }
+    }
+}
+
+fn read_records<T>(client: &WardrobeClient, target: T) -> std::io::Result<Vec<serde_json::Value>>
+where
+    T: Into<ReadTarget>,
+{
+    let target = target.into();
+    match client.read(target.filter, target.options)? {
+        ReadResult::Records(records) => Ok(records),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected records, got {other:?}"),
+        )),
+    }
+}
+
+fn read_record<T>(client: &WardrobeClient, target: T) -> std::io::Result<Option<serde_json::Value>>
+where
+    T: Into<ReadTarget>,
+{
+    let target = target.into();
+    match client.read(target.filter, target.options)? {
+        ReadResult::Record(record) => Ok(record),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected record, got {other:?}"),
+        )),
+    }
+}
+
+fn status_tenants(client: &WardrobeClient) -> std::io::Result<Vec<String>> {
+    match client.status(StatusRequest::tenants())? {
+        StatusResult::Tenants(tenants) => Ok(tenants),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_databases(client: &WardrobeClient) -> std::io::Result<Vec<StorageInventory>> {
+    match client.status(StatusRequest::databases())? {
+        StatusResult::Databases(databases) => Ok(databases),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_schemas(client: &WardrobeClient, database_name: &str) -> std::io::Result<Vec<String>> {
+    match client.status(StatusRequest::schemas(database_name))? {
+        StatusResult::Schemas(schemas) => Ok(schemas),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_drawers(
+    client: &WardrobeClient,
+    database_name: &str,
+    schema_name: &str,
+) -> std::io::Result<Vec<StorageInventory>> {
+    match client.status(StatusRequest::drawers(database_name, schema_name))? {
+        StatusResult::Drawers(drawers) => Ok(drawers),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn create_inventory(result: CreateResult) -> StorageInventory {
+    match result {
+        CreateResult::StorageInventory(inventory) => inventory,
+        other => panic!("expected storage inventory, got {other:?}"),
+    }
+}
+
+fn unexpected_status(result: StatusResult) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("unexpected status result {result:?}"),
+    )
+}
+
 #[test]
 fn client_direct_disk_path_delegates_to_embedded_engine() {
     let database = TempDatabase::new("client_direct_path_embedded");
@@ -73,16 +169,17 @@ fn client_direct_disk_path_delegates_to_embedded_engine() {
 
     let pointer = client
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_client_fire",
                 "element": "Fire"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("upsert failed");
-    assert_eq!(pointer, "@gem:client_fire");
+    assert_eq!(pointer, vec!["@gem:client_fire".to_string()]);
 
-    let records = client.find_all("gem").expect("find failed");
+    let records = read_records(&client, OperationFilter::drawer("gem")).expect("find failed");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["element"], "Fire");
 }
@@ -96,56 +193,79 @@ fn client_embedded_driver_exhaustive_execution() {
     let target = client.connection_target();
     assert!(matches!(target, ConnectionTarget::EmbeddedPath(_)));
 
-    let _ = client.upsert("gem", json!({"_id": "test_id", "element": "Earth"}));
-    let _ = client.upsert("gem", json!({"_id": "other_id", "element": "Air"}));
+    let _ = client.upsert(
+        json!({"_id": "test_id", "element": "Earth"}),
+        OperationFilter::drawer("gem"),
+        None::<OperationOptions>,
+    );
+    let _ = client.upsert(
+        json!({"_id": "other_id", "element": "Air"}),
+        OperationFilter::drawer("gem"),
+        None::<OperationOptions>,
+    );
 
-    let filter_results = client
-        .find_by_filter("gem", json!({}), None)
-        .expect("filter failed");
+    let filter_results =
+        read_records(&client, OperationFilter::query_in("gem", json!({}))).expect("filter failed");
     assert!(filter_results.len() >= 1);
 
-    let count_value = client.count("gem", None, None).expect("count failed");
+    let count_value = client
+        .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+        .expect("count failed");
     assert!(count_value >= 1);
 
-    let single_record = client
-        .find_by_id("@gem:test_id")
-        .expect("find_by_id failed");
+    let single_record =
+        read_record(&client, OperationFilter::pointer("@gem:test_id")).expect("find_by_id failed");
     assert!(single_record.is_some());
 
-    let vacuum_res = client.vacuum_drawer("gem");
+    let vacuum_res = client.compact(CompactRequest::drawer("gem"));
     assert!(vacuum_res.is_ok());
 
-    let migrate_res = client.migrate_drawer("gem");
+    let migrate_res = client.compact(CompactRequest::drawer_with_mode(
+        "gem",
+        CompactMode::Migrate,
+    ));
     assert!(migrate_res.is_ok());
 
-    let tenants = client.show_tenants();
+    let tenants = status_tenants(&client);
     assert!(tenants.is_ok());
 
-    let databases = client.show_databases();
+    let databases = status_databases(&client);
     assert!(databases.is_ok());
 
-    let schemas = client.show_schemas("main");
+    let schemas = status_schemas(&client, "main");
     assert!(schemas.is_ok());
 
-    let drawers = client.show_drawers("main", "default");
+    let drawers = status_drawers(&client, "main", "default");
     assert!(drawers.is_ok());
 
-    let delete_by_id_res = client.delete_by_id("@gem:test_id").expect("delete failed");
-    assert!(delete_by_id_res);
+    let delete_by_id_res = client
+        .delete(
+            OperationFilter::pointer("@gem:test_id"),
+            None::<OperationOptions>,
+        )
+        .expect("delete failed");
+    assert_eq!(delete_by_id_res, 1);
 
     let inline_locator = StorageLocator::Inline("@gem:other_id".to_string());
-    let delete_inline_res = client.delete(inline_locator).expect("delete failed");
-    assert!(delete_inline_res);
+    let delete_inline_res = client
+        .delete(inline_locator, None::<OperationOptions>)
+        .expect("delete failed");
+    assert_eq!(delete_inline_res, 1);
 
     let explicit_locator = StorageLocator::Explicit {
         drawer: "gem".to_string(),
         id: "missing_id".to_string(),
     };
-    let delete_explicit_res = client.delete(explicit_locator).expect("delete failed");
-    assert!(!delete_explicit_res);
+    let delete_explicit_res = client
+        .delete(explicit_locator, None::<OperationOptions>)
+        .expect("delete failed");
+    assert_eq!(delete_explicit_res, 0);
 
     let deleted_by_filter = client
-        .delete_by_filter("gem", json!({ "element": "Unknown" }))
+        .delete(
+            OperationFilter::query_in("gem", json!({ "element": "Unknown" })),
+            OperationOptions::new().multi(true),
+        )
         .expect("delete_by_filter failed");
     assert_eq!(deleted_by_filter, 0);
 }
@@ -173,11 +293,12 @@ fn client_file_uri_delegates_to_embedded_engine() {
 
     client
         .upsert(
-            "gem",
             json!({
                 "_id": "client_file_uri_gem",
                 "element": "Water"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("upsert failed");
 
@@ -199,7 +320,11 @@ fn client_network_driver_does_not_initialize_local_storage() {
 
     assert_eq!(client.driver_kind(), DriverKind::Network);
     assert!(!accidental_path.exists());
-    assert!(client.find_all("gem").expect("find failed").is_empty());
+    assert!(
+        read_records(&client, OperationFilter::drawer("gem"))
+            .expect("find failed")
+            .is_empty()
+    );
     handle.join().expect("join failed");
 }
 
@@ -213,12 +338,12 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
         index_bytes_after: 24,
         bytes_reclaimed: 62,
     };
-    let modifiers = Some(QueryModifiers {
+    let modifiers = QueryModifiers {
         order_by: Some("element".to_string()),
         order_direction: Some(OrderDirection::Ascending),
         limit: Some(10),
         offset: Some(0),
-    });
+    };
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (
             Command::Upsert {
@@ -251,7 +376,7 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             Command::FindByFilter {
                 drawer_name: "gem".to_string(),
                 filter: json!({"element": "F%"}),
-                modifiers: modifiers.clone(),
+                modifiers: None,
             },
             CommandResult::Records(vec![json!({"element": "Fire"})]),
         ),
@@ -340,19 +465,23 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
 
     assert_eq!(
         client
-            .upsert("gem", json!({"_id": "network_fire", "element": "Fire"}))
+            .upsert(
+                json!({"_id": "network_fire", "element": "Fire"}),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>
+            )
             .expect("upsert failed"),
-        "@gem:network_fire"
+        vec!["@gem:network_fire".to_string()]
     );
     assert_eq!(
         client
-            .bulk_upsert(
-                "gem",
-                vec![
+            .upsert(
+                json!([
                     json!({"_id": "network_water", "element": "Water"}),
                     json!({"_id": "network_earth", "element": "Earth"}),
-                ],
-                true
+                ]),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>
             )
             .expect("bulk upsert failed"),
         vec![
@@ -361,52 +490,78 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
         ]
     );
     assert_eq!(
-        client.find_all("gem").expect("find failed"),
+        read_records(&client, OperationFilter::drawer("gem")).expect("find failed"),
+        vec![json!({"element": "Fire"})]
+    );
+    assert_eq!(
+        read_records(
+            &client,
+            (
+                OperationFilter::query_in("gem", json!({"element": "F%"})),
+                OperationOptions::from(modifiers.clone()),
+            )
+        )
+        .expect("filter failed"),
         vec![json!({"element": "Fire"})]
     );
     assert_eq!(
         client
-            .find_by_filter("gem", json!({"element": "F%"}), modifiers)
-            .expect("filter failed"),
-        vec![json!({"element": "Fire"})]
-    );
-    assert_eq!(
-        client
-            .count("gem", Some(json!({"element": "F%"})), None)
+            .count(
+                OperationFilter::query_in("gem", json!({"element": "F%"})),
+                None::<OperationOptions>
+            )
             .expect("count failed"),
         1
     );
     assert_eq!(
-        client.find_by_id("@gem:network_fire").expect("find failed"),
+        read_record(&client, OperationFilter::pointer("@gem:network_fire")).expect("find failed"),
         Some(json!({"element": "Fire"}))
-    );
-    assert!(
-        client
-            .delete_by_id("@gem:network_fire")
-            .expect("delete failed")
-    );
-    assert!(
-        client
-            .delete(("gem", "lnk_explicit_delete"))
-            .expect("delete failed")
     );
     assert_eq!(
         client
-            .delete_by_filter("gem", json!({"element": "Water"}))
+            .delete(
+                OperationFilter::pointer("@gem:network_fire"),
+                None::<OperationOptions>
+            )
+            .expect("delete failed"),
+        1
+    );
+    assert_eq!(
+        client
+            .delete(("gem", "lnk_explicit_delete"), None::<OperationOptions>)
+            .expect("delete failed"),
+        1
+    );
+    assert_eq!(
+        client
+            .delete(
+                OperationFilter::query_in("gem", json!({"element": "Water"})),
+                OperationOptions::new().multi(true)
+            )
             .expect("delete_by_filter failed"),
         1
     );
-    assert_eq!(client.vacuum_drawer("gem").expect("vacuum failed"), report);
     assert_eq!(
-        client.migrate_drawer("gem").expect("migrate failed"),
+        client
+            .compact(CompactRequest::drawer("gem"))
+            .expect("vacuum failed"),
         report
     );
     assert_eq!(
-        client.show_tenants().expect("tenants failed"),
+        client
+            .compact(CompactRequest::drawer_with_mode(
+                "gem",
+                CompactMode::Migrate
+            ))
+            .expect("migrate failed"),
+        report
+    );
+    assert_eq!(
+        status_tenants(&client).expect("tenants failed"),
         vec!["tenant_alpha".to_string()]
     );
     assert_eq!(
-        client.show_databases().expect("databases failed"),
+        status_databases(&client).expect("databases failed"),
         vec![StorageInventory {
             name: "main_db".to_string(),
             record_count: 3,
@@ -415,13 +570,11 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
         }]
     );
     assert_eq!(
-        client.show_schemas("main_db").expect("schemas failed"),
+        status_schemas(&client, "main_db").expect("schemas failed"),
         vec!["tenant_schema".to_string()]
     );
     assert_eq!(
-        client
-            .show_drawers("main_db", "tenant_schema")
-            .expect("drawers failed"),
+        status_drawers(&client, "main_db", "tenant_schema").expect("drawers failed"),
         vec![StorageInventory {
             name: "gem".to_string(),
             record_count: 2,
@@ -478,7 +631,12 @@ fn client_unix_socket_driver_sends_command_frames() {
     assert_eq!(client.driver_kind(), DriverKind::UnixSocket);
     assert!(!client.requires_embedded_engine());
     assert!(client.uses_socket_transport());
-    assert_eq!(client.count("gem", None, None).expect("count failed"), 7);
+    assert_eq!(
+        client
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+            .expect("count failed"),
+        7
+    );
     handle.join().expect("join failed");
 }
 
@@ -494,7 +652,7 @@ fn client_unexpected_result_paths_return_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.count("gem", None, None) {
+    match client.count(OperationFilter::drawer("gem"), None::<OperationOptions>) {
         Ok(_) => panic!("expected failure"),
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
     }
@@ -515,7 +673,7 @@ fn client_show_databases_unexpected_result_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.show_databases() {
+    match status_databases(&client) {
         Ok(_) => panic!("expected failure"),
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
     }
@@ -533,7 +691,7 @@ fn client_show_drawers_unexpected_result_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.show_drawers("db", "schema") {
+    match status_drawers(&client, "db", "schema") {
         Ok(_) => panic!("expected failure"),
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
     }
@@ -593,8 +751,8 @@ fn client_admin_setup_commands_route_over_network() {
         ),
         (
             Command::ManageUser {
-                action: "grant".to_string(),
-                payload: json!({"user": "alice"}),
+                action: "grant_permission".to_string(),
+                payload: json!({"username": "alice", "permission_scope": "global:rud"}),
             },
             CommandResult::Admin(json!({"ok": true})),
         ),
@@ -603,30 +761,44 @@ fn client_admin_setup_commands_route_over_network() {
     let client = WardrobeClient::open(connection).expect("open failed");
 
     assert_eq!(
-        client.create_database("admin_db").expect("create database"),
+        create_inventory(
+            client
+                .create(CreateRequest::database("admin_db"))
+                .expect("create database")
+        ),
         database_inventory
     );
     assert_eq!(
-        client
-            .create_schema("admin_db", "public")
-            .expect("create schema"),
+        create_inventory(
+            client
+                .create(CreateRequest::schema("admin_db", "public"))
+                .expect("create schema")
+        ),
         schema_inventory
     );
     assert_eq!(
-        client
-            .create_drawer("admin_db", "public", "gem")
-            .expect("create drawer"),
+        create_inventory(
+            client
+                .create(CreateRequest::drawer("admin_db", "public", "gem"))
+                .expect("create drawer")
+        ),
         drawer_inventory
     );
     assert_eq!(
-        client
-            .register_tenant_route("tenant_a", "admin_db", "tenant_a/admin_db/public")
-            .expect("register route"),
+        create_inventory(
+            client
+                .create(CreateRequest::tenant_route(
+                    "tenant_a",
+                    "admin_db",
+                    "tenant_a/admin_db/public"
+                ))
+                .expect("register route")
+        ),
         database_inventory
     );
     assert_eq!(
         client
-            .manage_user("grant", json!({"user": "alice"}))
+            .grant(PermissionRequest::new("alice", "global:rud"))
             .expect("manage user"),
         json!({"ok": true})
     );
@@ -645,7 +817,11 @@ fn client_unexpected_result_on_upsert_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.upsert("gem", json!({"_id": "x"})) {
+    match client.upsert(
+        json!({"_id": "x"}),
+        OperationFilter::drawer("gem"),
+        None::<OperationOptions>,
+    ) {
         Ok(_) => panic!("expected failure"),
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
     }
@@ -660,11 +836,15 @@ fn client_unexpected_result_on_bulk_upsert_returns_invaliddata() {
             records: vec![json!({"_id": "x"})],
             atomic: true,
         },
-        CommandResult::Pointer("@gem:wrong".to_string()),
+        CommandResult::Records(vec![json!({"_id": "x"})]),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.bulk_upsert("gem", vec![json!({"_id": "x"})], true);
+    let result = client.upsert(
+        json!([json!({"_id": "x"})]),
+        OperationFilter::drawer("gem"),
+        None::<OperationOptions>,
+    );
 
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
@@ -681,7 +861,7 @@ fn client_unexpected_result_on_find_all_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.find_all("gem") {
+    match read_records(&client, OperationFilter::drawer("gem")) {
         Ok(_) => panic!("expected failure"),
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
     }
@@ -700,7 +880,7 @@ fn client_handles_server_closing_connection_gracefully() {
 
     let connection = format!("wardrobe://{}", addr);
     let client = WardrobeClient::open(connection).expect("open failed");
-    let res = client.find_all("gem");
+    let res = read_records(&client, OperationFilter::drawer("gem"));
     assert!(res.is_err());
     handle.join().expect("join failed");
 }
@@ -719,7 +899,7 @@ fn client_handles_malformed_json_response_as_invaliddata() {
     });
 
     let client = WardrobeClient::open(format!("wardrobe://{}", addr)).expect("open failed");
-    match client.find_all("gem") {
+    match read_records(&client, OperationFilter::drawer("gem")) {
         Ok(_) => panic!("expected failure"),
         Err(e) => {
             let k = e.kind();
@@ -739,7 +919,7 @@ fn client_handles_server_explicit_protocol_error_opcode() {
     );
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.find_all("gem") {
+    match read_records(&client, OperationFilter::drawer("gem")) {
         Ok(_) => panic!("expected failure"),
         Err(e) => {
             assert_eq!(e.kind(), std::io::ErrorKind::Other);
@@ -755,7 +935,7 @@ fn client_handles_server_misbehaving_with_command_opcode() {
         spawn_tcp_protocol_server_with_opcode(ProtocolOpcode::Command, b"{}".to_vec());
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    match client.find_all("gem") {
+    match read_records(&client, OperationFilter::drawer("gem")) {
         Ok(_) => panic!("expected failure"),
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
     }
@@ -787,16 +967,16 @@ fn client_alias_methods_execute_successfully() {
 
     let client = WardrobeClient::open(connection).expect("open failed");
 
-    let tenants = client.list_tenants().expect("alias failed");
+    let tenants = status_tenants(&client).expect("status failed");
     assert_eq!(tenants, vec!["tenant_beta".to_string()]);
 
-    let dbs = client.list_databases().expect("alias failed");
+    let dbs = status_databases(&client).expect("status failed");
     assert!(dbs.is_empty());
 
-    let schemas = client.list_schemas("db").expect("alias failed");
+    let schemas = status_schemas(&client, "db").expect("status failed");
     assert!(schemas.is_empty());
 
-    let drawers = client.list_drawers("db", "schema").expect("alias failed");
+    let drawers = status_drawers(&client, "db", "schema").expect("status failed");
     assert!(drawers.is_empty());
 
     handle.join().expect("join failed");
@@ -807,14 +987,17 @@ fn client_unexpected_result_on_find_by_filter_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
         Command::FindByFilter {
             drawer_name: "gem".to_string(),
-            filter: json!({}),
+            filter: json!({"element": "Fire"}),
             modifiers: None,
         },
         CommandResult::Count(0),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.find_by_filter("gem", json!({}), None);
+    let result = read_records(
+        &client,
+        OperationFilter::query_in("gem", json!({"element": "Fire"})),
+    );
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");
@@ -830,7 +1013,7 @@ fn client_unexpected_result_on_find_by_id_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.find_by_id("@gem:target_identifier");
+    let result = read_record(&client, OperationFilter::pointer("@gem:target_identifier"));
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");
@@ -846,7 +1029,10 @@ fn client_unexpected_result_on_delete_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.delete_by_id("@gem:target_identifier");
+    let result = client.delete(
+        OperationFilter::pointer("@gem:target_identifier"),
+        None::<OperationOptions>,
+    );
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");
@@ -863,7 +1049,10 @@ fn client_unexpected_result_on_delete_by_filter_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.delete_by_filter("gem", json!({"element": "Fire"}));
+    let result = client.delete(
+        OperationFilter::query_in("gem", json!({"element": "Fire"})),
+        OperationOptions::new().multi(true),
+    );
 
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
@@ -880,7 +1069,7 @@ fn client_unexpected_result_on_vacuum_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.vacuum_drawer("gem");
+    let result = client.compact(CompactRequest::drawer("gem"));
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");
@@ -896,7 +1085,10 @@ fn client_unexpected_result_on_migrate_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.migrate_drawer("gem");
+    let result = client.compact(CompactRequest::drawer_with_mode(
+        "gem",
+        CompactMode::Migrate,
+    ));
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");
@@ -912,7 +1104,7 @@ fn client_unexpected_result_on_show_schemas_returns_invaliddata() {
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
-    let result = client.show_schemas("main_database");
+    let result = status_schemas(&client, "main_database");
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     handle.join().expect("join failed");

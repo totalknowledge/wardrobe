@@ -8,17 +8,11 @@ use super::wal::WalVerification;
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
 
-pub(crate) fn pointer(result: CommandResult) -> Result<String> {
+pub(crate) fn upsert_pointers(result: CommandResult) -> Result<Vec<String>> {
     match result {
-        CommandResult::Pointer(pointer) => Ok(pointer),
-        other => unexpected_result("pointer", other),
-    }
-}
-
-pub(crate) fn pointers(result: CommandResult) -> Result<Vec<String>> {
-    match result {
+        CommandResult::Pointer(pointer) => Ok(vec![pointer]),
         CommandResult::Pointers(pointers) => Ok(pointers),
-        other => unexpected_result("pointers", other),
+        other => unexpected_result("upsert pointer list", other),
     }
 }
 

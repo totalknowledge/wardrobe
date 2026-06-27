@@ -3,7 +3,44 @@ use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe_core::WardrobeClient;
+use wardrobe_core::{
+    OperationFilter, OperationOptions, ReadResult, StatusRequest, StatusResult, StorageInventory,
+    WardrobeClient,
+};
+
+fn read_records(client: &WardrobeClient, filter: OperationFilter) -> Vec<serde_json::Value> {
+    match client
+        .read(filter, None::<OperationOptions>)
+        .expect("read should succeed")
+    {
+        ReadResult::Records(records) => records,
+        other => panic!("expected records, got {other:?}"),
+    }
+}
+
+fn read_record(client: &WardrobeClient, filter: OperationFilter) -> Option<serde_json::Value> {
+    match client
+        .read(filter, None::<OperationOptions>)
+        .expect("read should succeed")
+    {
+        ReadResult::Record(record) => record,
+        other => panic!("expected record, got {other:?}"),
+    }
+}
+
+fn status_drawers(
+    client: &WardrobeClient,
+    database_name: &str,
+    schema_name: &str,
+) -> Vec<StorageInventory> {
+    match client
+        .status(StatusRequest::drawers(database_name, schema_name))
+        .expect("status should succeed")
+    {
+        StatusResult::Drawers(drawers) => drawers,
+        other => panic!("expected drawers, got {other:?}"),
+    }
+}
 
 fn cwd_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -67,9 +104,7 @@ fn sample_runs_extended_lifecycle_and_cleans_related_records() {
             .expect("unicode path"),
     )
     .expect("root client should initialize");
-    let drawers = root_client
-        .show_drawers("basic-usage", "public")
-        .expect("drawer metadata should be readable");
+    let drawers = status_drawers(&root_client, "basic-usage", "public");
     assert!(drawers.iter().any(|drawer| drawer.name == "user"));
     assert!(drawers.iter().any(|drawer| drawer.name == "gem"));
 
@@ -81,20 +116,18 @@ fn sample_runs_extended_lifecycle_and_cleans_related_records() {
     )
     .expect("scoped client should initialize");
 
-    let gems = scoped_client
-        .find_by_filter(
+    let gems = read_records(
+        &scoped_client,
+        OperationFilter::query_in(
             "gem",
             serde_json::json!({
                 "user_id": "@user:user_001"
             }),
-            None,
-        )
-        .expect("filtered gem lookup should succeed");
+        ),
+    );
     assert!(gems.is_empty());
 
-    let user = scoped_client
-        .find_by_id("@user:user_001")
-        .expect("user lookup should succeed");
+    let user = read_record(&scoped_client, OperationFilter::pointer("@user:user_001"));
     assert!(user.is_none());
 }
 

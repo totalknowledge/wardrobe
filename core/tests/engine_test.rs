@@ -8,9 +8,11 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
-    BsonBinaryFormat, Command, CommandResult, DatabaseReader, OrderDirection, QueryModifiers,
-    StorageCoordinate, StorageFormat, StorageLocator, StorageScope, WAL_FILE_NAME, WalJournal,
-    WalOperation, WardrobeEngine,
+    AlterRequest, BsonBinaryFormat, Command, CommandResult, CompactMode, CompactRequest,
+    CreateRequest, CreateResult, DatabaseReader, OperationFilter, OperationOptions, OrderDirection,
+    QueryModifiers, ReadResult, StatusRequest, StatusResult, StorageCoordinate, StorageFormat,
+    StorageInventory, StorageLocator, StorageScope, WAL_FILE_NAME, WalJournal, WalOperation,
+    WardrobeEngine,
 };
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
@@ -160,6 +162,157 @@ fn drawer_tombstone_count(path: &Path) -> usize {
     count
 }
 
+struct ReadTarget {
+    filter: OperationFilter,
+    options: OperationOptions,
+}
+
+impl From<OperationFilter> for ReadTarget {
+    fn from(filter: OperationFilter) -> Self {
+        Self {
+            filter,
+            options: OperationOptions::default(),
+        }
+    }
+}
+
+impl From<(OperationFilter, OperationOptions)> for ReadTarget {
+    fn from((filter, options): (OperationFilter, OperationOptions)) -> Self {
+        Self { filter, options }
+    }
+}
+
+fn read_records<T>(engine: &WardrobeEngine, target: T) -> std::io::Result<Vec<serde_json::Value>>
+where
+    T: Into<ReadTarget>,
+{
+    let target = target.into();
+    match engine.read(target.filter, target.options)? {
+        ReadResult::Records(records) => Ok(records),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected records, got {other:?}"),
+        )),
+    }
+}
+
+fn read_record<T>(engine: &WardrobeEngine, target: T) -> std::io::Result<Option<serde_json::Value>>
+where
+    T: Into<ReadTarget>,
+{
+    let target = target.into();
+    match engine.read(target.filter, target.options)? {
+        ReadResult::Record(record) => Ok(record),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected record, got {other:?}"),
+        )),
+    }
+}
+
+fn upsert_one(
+    engine: &WardrobeEngine,
+    drawer_name: &str,
+    payload: serde_json::Value,
+) -> std::io::Result<String> {
+    engine
+        .upsert(
+            payload,
+            OperationFilter::drawer(drawer_name),
+            None::<OperationOptions>,
+        )
+        .map(|result| {
+            result
+                .into_pointers()
+                .pop()
+                .expect("single-object upsert should return one pointer")
+        })
+}
+
+fn upsert_batch(
+    engine: &WardrobeEngine,
+    drawer_name: &str,
+    records: Vec<serde_json::Value>,
+) -> std::io::Result<Vec<String>> {
+    engine
+        .upsert(
+            serde_json::Value::Array(records),
+            OperationFilter::drawer(drawer_name),
+            None::<OperationOptions>,
+        )
+        .map(|result| result.into_pointers())
+}
+
+fn create_inventory(result: CreateResult) -> StorageInventory {
+    match result {
+        CreateResult::StorageInventory(inventory) => inventory,
+        other => panic!("expected storage inventory, got {other:?}"),
+    }
+}
+
+fn status_tenants(engine: &WardrobeEngine) -> std::io::Result<Vec<String>> {
+    match engine.status(StatusRequest::tenants())? {
+        StatusResult::Tenants(tenants) => Ok(tenants),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_databases(engine: &WardrobeEngine) -> std::io::Result<Vec<StorageInventory>> {
+    match engine.status(StatusRequest::databases())? {
+        StatusResult::Databases(databases) => Ok(databases),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_schemas(engine: &WardrobeEngine, database_name: &str) -> std::io::Result<Vec<String>> {
+    match engine.status(StatusRequest::schemas(database_name))? {
+        StatusResult::Schemas(schemas) => Ok(schemas),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_drawers(
+    engine: &WardrobeEngine,
+    database_name: &str,
+    schema_name: &str,
+) -> std::io::Result<Vec<StorageInventory>> {
+    match engine.status(StatusRequest::drawers(database_name, schema_name))? {
+        StatusResult::Drawers(drawers) => Ok(drawers),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_storage(engine: &WardrobeEngine) -> std::io::Result<wardrobe_core::StorageDiagnosis> {
+    match engine.status(StatusRequest::storage())? {
+        StatusResult::Storage(diagnosis) => Ok(diagnosis),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_wal(
+    engine: &WardrobeEngine,
+    database_name: Option<&str>,
+) -> std::io::Result<wardrobe_core::WalVerification> {
+    match engine.status(StatusRequest::wal(database_name))? {
+        StatusResult::Wal(verification) => Ok(verification),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn status_cached_drawer_count(engine: &WardrobeEngine) -> std::io::Result<usize> {
+    match engine.status(StatusRequest::cached_drawer_count())? {
+        StatusResult::CachedDrawerCount(count) => Ok(count),
+        other => Err(unexpected_status(other)),
+    }
+}
+
+fn unexpected_status(result: StatusResult) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("unexpected status result {result:?}"),
+    )
+}
+
 #[test]
 fn embedded_engine_opens_direct_storage_path_and_writes_records() {
     let database = TempDatabase::new("embedded_engine_direct_storage_path");
@@ -168,19 +321,20 @@ fn embedded_engine_opens_direct_storage_path_and_writes_records() {
 
     let pointer = engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_embedded_target",
                 "element": "Fire"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("embedded engine should write directly");
 
-    assert_eq!(pointer, "@gem:embedded_target");
+    assert_eq!(pointer, vec!["@gem:embedded_target".to_string()]);
     assert!(database.path.join("gem.drw").is_file());
     assert_eq!(
         engine
-            .count("gem", None, None)
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("count should succeed"),
         1
     );
@@ -198,17 +352,16 @@ fn diagnose_storage_reports_recursive_storage_bytes() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "diagnose_fire",
                 "element": "Fire"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("record should upsert");
 
-    let diagnosis = engine
-        .diagnose_storage()
-        .expect("diagnosis should be available");
+    let diagnosis = status_storage(&engine).expect("diagnosis should be available");
 
     assert_eq!(diagnosis.storage_directory, database_directory);
     assert!(diagnosis.storage_bytes >= 4);
@@ -225,7 +378,6 @@ fn find_all_loads_existing_drawer_files_after_restart() {
         let engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": "@weapon:lnk_test_weapon",
                     "name": "Test Sword",
@@ -235,14 +387,15 @@ fn find_all_loads_existing_drawer_files_after_restart() {
                         "potency": 9001
                     }
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon should upsert");
     }
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("database should reinitialize");
-    let weapons = restarted_engine
-        .find_all("weapon")
+    let weapons = read_records(&restarted_engine, OperationFilter::drawer("weapon"))
         .expect("weapons should load");
 
     assert_eq!(weapons.len(), 1);
@@ -257,7 +410,11 @@ fn upsert_rejects_non_object_payload() {
     let engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
 
     let error = engine
-        .upsert("gem", json!(["not", "an", "object"]))
+        .upsert(
+            json!(["not", "an", "object"]),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
+        )
         .expect_err("non-object payload should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -269,8 +426,7 @@ fn find_by_id_returns_none_for_missing_drawer_and_does_not_create_files() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
 
-    let result = engine
-        .find_by_id("@missing:lnk_any")
+    let result = read_record(&engine, OperationFilter::pointer("@missing:lnk_any"))
         .expect("missing drawer lookup should not fail");
 
     assert!(result.is_none());
@@ -288,11 +444,10 @@ fn find_by_id_rejects_malformed_pointer() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
 
-    let error = engine
-        .find_by_id("not-a-pointer")
+    let error = read_record(&engine, OperationFilter::pointer("not-a-pointer"))
         .expect_err("malformed pointer should fail");
 
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]
@@ -302,24 +457,23 @@ fn find_by_id_hydrates_without_id_fields() {
 
     let weapon_pointer = {
         let engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
-        engine
-            .upsert(
-                "weapon",
-                json!({
-                    "name": "Edge",
-                    "gem": {
-                        "element": "Arc",
-                        "potency": 1234
-                    }
-                }),
-            )
-            .expect("weapon should upsert")
+        upsert_one(
+            &engine,
+            "weapon",
+            json!({
+                "name": "Edge",
+                "gem": {
+                    "element": "Arc",
+                    "potency": 1234
+                }
+            }),
+        )
+        .expect("weapon should upsert")
     };
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("database should reinitialize");
-    let found = restarted_engine
-        .find_by_id(&weapon_pointer)
+    let found = read_record(&restarted_engine, OperationFilter::pointer(&weapon_pointer))
         .expect("lookup should succeed")
         .expect("record should exist");
 
@@ -337,20 +491,20 @@ fn find_all_keeps_pointer_when_target_record_is_missing() {
         let engine = WardrobeEngine::open(&database_directory).expect("database should initialize");
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": "@weapon:lnk_has_missing_target",
                     "name": "Fragment",
                     "gem": "@gem:lnk_does_not_exist"
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon should upsert");
     }
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("database should reinitialize");
-    let weapons = restarted_engine
-        .find_all("weapon")
+    let weapons = read_records(&restarted_engine, OperationFilter::drawer("weapon"))
         .expect("find_all should succeed");
 
     assert_eq!(weapons.len(), 1);
@@ -366,7 +520,6 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": "@weapon:lnk_lazy_weapon",
                     "name": "Moonblade",
@@ -377,14 +530,15 @@ fn us_013_find_all_auto_loads_drawers_and_hydrates_linked_drawers_on_demand() {
                         "potency": 4242
                     }
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon with nested gem should upsert");
     }
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
-    let weapons = restarted_engine
-        .find_all("weapon")
+    let weapons = read_records(&restarted_engine, OperationFilter::drawer("weapon"))
         .expect("find_all should auto-load weapon drawer from disk");
 
     assert_eq!(weapons.len(), 1);
@@ -399,13 +553,11 @@ fn us_013_reads_do_not_auto_create_missing_drawers() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    let records = engine
-        .find_all("missing")
+    let records = read_records(&engine, OperationFilter::drawer("missing"))
         .expect("find_all should succeed for missing drawers");
     assert!(records.is_empty());
 
-    let by_id = engine
-        .find_by_id("@missing:lnk_example")
+    let by_id = read_record(&engine, OperationFilter::pointer("@missing:lnk_example"))
         .expect("find_by_id should succeed for missing drawers");
     assert!(by_id.is_none());
 
@@ -422,7 +574,6 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
-                "character",
                 json!({
                     "_id": "@character:lnk_safe_character",
                     "name": "Grace",
@@ -437,14 +588,15 @@ fn us_014_safe_engine_hydration_resolves_nested_records_after_restart() {
                         }
                     }
                 }),
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>,
             )
             .expect("complex character should upsert");
     }
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
-    let characters = restarted_engine
-        .find_all("character")
+    let characters = read_records(&restarted_engine, OperationFilter::drawer("character"))
         .expect("characters should hydrate after restart");
 
     assert_eq!(characters.len(), 1);
@@ -469,18 +621,18 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": wardrobe_gem_id,
                 "element": "Solar",
                 "potency": 777
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_uses_existing_gem",
                 "name": "Sun Pike",
@@ -488,6 +640,8 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
                     "_id": application_gem_id
                 }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert with raw id-only gem reference");
 
@@ -506,15 +660,13 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
             .any(|record| record["gem"] == "@gem:existing_gem")
     );
 
-    let found_gem = engine
-        .find_by_id(wardrobe_gem_id)
+    let found_gem = read_record(&engine, OperationFilter::pointer(wardrobe_gem_id))
         .expect("gem lookup should succeed")
         .expect("gem should still exist");
     assert_eq!(found_gem["element"], "Solar");
     assert_eq!(found_gem["potency"], 777);
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapon lookup should succeed");
     assert_eq!(weapons.len(), 1);
     assert_eq!(weapons[0]["gem"]["element"], "Solar");
@@ -529,18 +681,18 @@ fn us_018_id_only_subobject_accepts_preformatted_pointers() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": gem_id,
                 "element": "Nebula",
                 "potency": 313
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_preformatted_reference",
                 "name": "Star Lance",
@@ -548,6 +700,8 @@ fn us_018_id_only_subobject_accepts_preformatted_pointers() {
                     "_id": gem_id
                 }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert with preformatted reference");
 
@@ -558,8 +712,7 @@ fn us_018_id_only_subobject_accepts_preformatted_pointers() {
             .any(|record| record["gem"] == "@gem:existing_gem")
     );
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapon lookup should succeed");
     assert_eq!(weapons.len(), 1);
     assert_eq!(weapons[0]["gem"]["element"], "Nebula");
@@ -573,7 +726,6 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_full_child",
                 "name": "Moon Staff",
@@ -583,6 +735,8 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
                     "potency": 123
                 }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert with full child object");
 
@@ -593,14 +747,12 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
             .any(|record| record["gem"] == "@gem:full_child_gem")
     );
 
-    let found_gem = engine
-        .find_by_id("@gem:lnk_full_child_gem")
+    let found_gem = read_record(&engine, OperationFilter::pointer("@gem:lnk_full_child_gem"))
         .expect("gem lookup should succeed")
         .expect("gem should exist");
     assert_eq!(found_gem["element"], "Lunar");
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapon lookup should succeed");
     assert_eq!(weapons[0]["gem"]["potency"], 123);
 }
@@ -611,27 +763,27 @@ fn us_052_primary_ids_are_stored_clean_while_references_keep_drawer_routing() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    let character_pointer = engine
-        .upsert(
-            "character",
-            json!({
-                "_id": "@character:lnk_us_052_owner",
-                "name": "Clean Owner"
-            }),
-        )
-        .expect("character should upsert");
+    let character_pointer = upsert_one(
+        &engine,
+        "character",
+        json!({
+            "_id": "@character:lnk_us_052_owner",
+            "name": "Clean Owner"
+        }),
+    )
+    .expect("character should upsert");
     assert_eq!(character_pointer, "@character:us_052_owner");
 
-    let weapon_pointer = engine
-        .upsert(
-            "weapon",
-            json!({
-                "_id": "lnk_us_052_weapon",
-                "name": "Clean Blade",
-                "character": { "_id": "@character:lnk_us_052_owner" }
-            }),
-        )
-        .expect("weapon should upsert");
+    let weapon_pointer = upsert_one(
+        &engine,
+        "weapon",
+        json!({
+            "_id": "lnk_us_052_weapon",
+            "name": "Clean Blade",
+            "character": { "_id": "@character:lnk_us_052_owner" }
+        }),
+    )
+    .expect("weapon should upsert");
     assert_eq!(weapon_pointer, "@weapon:us_052_weapon");
 
     let character_records = drawer_records_from_disk(&database.path.join("character.drw"));
@@ -653,14 +805,15 @@ fn us_052_primary_ids_are_stored_clean_while_references_keep_drawer_routing() {
             .any(|record| record["character"] == "@character:us_052_owner")
     );
 
-    let legacy_lookup = engine
-        .find_by_id("@weapon:lnk_us_052_weapon")
-        .expect("legacy lookup should succeed")
-        .expect("weapon should exist");
+    let legacy_lookup = read_record(
+        &engine,
+        OperationFilter::pointer("@weapon:lnk_us_052_weapon"),
+    )
+    .expect("legacy lookup should succeed")
+    .expect("weapon should exist");
     assert_eq!(legacy_lookup["name"], "Clean Blade");
 
-    let clean_lookup = engine
-        .find_by_id("@weapon:us_052_weapon")
+    let clean_lookup = read_record(&engine, OperationFilter::pointer("@weapon:us_052_weapon"))
         .expect("clean lookup should succeed")
         .expect("weapon should exist");
     assert_eq!(clean_lookup["character"]["name"], "Clean Owner");
@@ -674,25 +827,26 @@ fn us_053_inline_routing_registers_polymorphic_alias_and_hydrates_targets() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_053_fire",
                 "element": "Fire"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
     engine
         .upsert(
-            "rune",
             json!({
                 "_id": "@rune:lnk_us_053_guard",
                 "school": "Guard"
             }),
+            OperationFilter::drawer("rune"),
+            None::<OperationOptions>,
         )
         .expect("rune should upsert");
     engine
         .upsert(
-            "artifact",
             json!({
                 "_id": "@artifact:lnk_us_053_satchel",
                 "name": "Satchel",
@@ -701,6 +855,8 @@ fn us_053_inline_routing_registers_polymorphic_alias_and_hydrates_targets() {
                     "@rune:lnk_us_053_guard"
                 ]
             }),
+            OperationFilter::drawer("artifact"),
+            None::<OperationOptions>,
         )
         .expect("artifact should upsert");
 
@@ -724,8 +880,7 @@ fn us_053_inline_routing_registers_polymorphic_alias_and_hydrates_targets() {
         )
     );
 
-    let artifacts = engine
-        .find_all("artifact")
+    let artifacts = read_records(&engine, OperationFilter::drawer("artifact"))
         .expect("artifact lookup should succeed");
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0]["attachments"][0]["element"], "Fire");
@@ -758,21 +913,23 @@ fn us_053_self_referencing_alias_resolves_clean_string_keys() {
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "alex",
                 "name": "Alex"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("first character should upsert");
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "sam",
                 "name": "Sam",
                 "spouse": "alex"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("self-referencing character should upsert");
 
@@ -783,8 +940,7 @@ fn us_053_self_referencing_alias_resolves_clean_string_keys() {
             .any(|record| record["spouse"] == "@character:alex")
     );
 
-    let sam = engine
-        .find_by_id("@character:sam")
+    let sam = read_record(&engine, OperationFilter::pointer("@character:sam"))
         .expect("lookup should succeed")
         .expect("sam should exist");
     assert_eq!(sam["name"], "Sam");
@@ -799,13 +955,14 @@ fn us_019_scalar_arrays_are_preserved_on_upsert() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_array_scalars",
                 "name": "Array Keeper",
                 "tags": ["tank", "support", "night-watch"],
                 "scores": [10, 20, 30]
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert with scalar arrays");
 
@@ -814,8 +971,7 @@ fn us_019_scalar_arrays_are_preserved_on_upsert() {
         == json!(["tank", "support", "night-watch"])
         && record["scores"] == json!([10, 20, 30])));
 
-    let characters = engine
-        .find_all("character")
+    let characters = read_records(&engine, OperationFilter::drawer("character"))
         .expect("character lookup should succeed");
     assert_eq!(
         characters[0]["tags"],
@@ -832,38 +988,40 @@ fn us_019_pointer_arrays_are_hydrated_in_order() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_array_fire",
                 "element": "Fire",
                 "potency": 10
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("fire gem should upsert");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_array_water",
                 "element": "Water",
                 "potency": 20
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("water gem should upsert");
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_pointer_array",
                 "name": "Twin Wand",
                 "gems": ["@gem:lnk_array_fire", "@gem:lnk_array_water"]
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert with pointer array");
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapon lookup should succeed");
     assert_eq!(weapons[0]["gems"][0]["element"], "Fire");
     assert_eq!(weapons[0]["gems"][1]["element"], "Water");
@@ -877,28 +1035,29 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_array_existing_fire",
                 "element": "Fire",
                 "potency": 111
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("fire gem should upsert");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_array_existing_air",
                 "element": "Air",
                 "potency": 222
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("air gem should upsert");
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_id_only_array",
                 "name": "Reference Bow",
@@ -907,6 +1066,8 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
                     { "_id": "@gem:lnk_array_existing_air" }
                 ]
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert with id-only array references");
 
@@ -915,8 +1076,7 @@ fn us_019_id_only_object_arrays_are_normalized_to_references() {
         record["gems"] == json!(["@gem:array_existing_fire", "@gem:array_existing_air"])
     }));
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapon lookup should succeed");
     assert_eq!(weapons[0]["gems"][0]["element"], "Fire");
     assert_eq!(weapons[0]["gems"][1]["element"], "Air");
@@ -930,7 +1090,6 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_nested_array_owner",
                 "name": "Grace",
@@ -959,6 +1118,8 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
                     }
                 ]
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert with nested object arrays");
 
@@ -982,8 +1143,7 @@ fn us_019_full_nested_object_arrays_are_upserted_and_hydrated() {
             .any(|record| record["gems"] == json!(["@gem:array_earth"]))
     );
 
-    let characters = engine
-        .find_all("character")
+    let characters = read_records(&engine, OperationFilter::drawer("character"))
         .expect("character lookup should succeed");
     assert_eq!(characters[0]["weapons"][0]["name"], "Spear");
     assert_eq!(characters[0]["weapons"][0]["gems"][0]["element"], "Storm");
@@ -1000,28 +1160,30 @@ fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
-                "gem",
                 json!({
                     "_id": "@gem:lnk_delete_engine",
                     "element": "Solar",
                     "potency": 777
                 }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
             )
             .expect("gem should upsert");
 
         let deleted = engine
-            .delete_by_id("@gem:lnk_delete_engine")
+            .delete(
+                OperationFilter::pointer("@gem:lnk_delete_engine"),
+                None::<OperationOptions>,
+            )
             .expect("delete should succeed");
-        assert!(deleted);
+        assert_eq!(deleted, 1);
         assert!(
-            engine
-                .find_by_id("@gem:lnk_delete_engine")
+            read_record(&engine, OperationFilter::pointer("@gem:lnk_delete_engine"))
                 .expect("lookup should succeed")
                 .is_none()
         );
         assert!(
-            engine
-                .find_all("gem")
+            read_records(&engine, OperationFilter::drawer("gem"))
                 .expect("find all should succeed")
                 .is_empty()
         );
@@ -1032,10 +1194,12 @@ fn us_020_delete_by_id_tombstones_record_and_hides_future_lookups() {
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     assert!(
-        restarted_engine
-            .find_by_id("@gem:lnk_delete_engine")
-            .expect("lookup should succeed after restart")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@gem:lnk_delete_engine")
+        )
+        .expect("lookup should succeed after restart")
+        .is_none()
     );
 }
 
@@ -1047,19 +1211,23 @@ fn us_020_delete_by_id_returns_false_for_missing_record_in_existing_drawer() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_existing",
                 "element": "Solar"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
 
     let deleted = engine
-        .delete_by_id("@gem:lnk_missing")
+        .delete(
+            OperationFilter::pointer("@gem:lnk_missing"),
+            None::<OperationOptions>,
+        )
         .expect("delete against existing drawer should succeed");
 
-    assert!(!deleted);
+    assert_eq!(deleted, 0);
 }
 
 #[test]
@@ -1070,39 +1238,48 @@ fn us_020_delete_by_filter_deletes_matching_records_and_returns_count() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "lnk_delete_filter_fire",
                 "element": "Fire"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("first gem should upsert");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "lnk_delete_filter_water",
                 "element": "Water"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("second gem should upsert");
 
     let deleted = engine
-        .delete_by_filter("gem", json!({ "element": "Fire" }))
+        .delete(
+            OperationFilter::query_in("gem", json!({ "element": "Fire" })),
+            OperationOptions::new().multi(true),
+        )
         .expect("delete by filter should succeed");
 
     assert_eq!(deleted, 1);
     assert!(
-        engine
-            .find_by_id("@gem:lnk_delete_filter_fire")
-            .expect("deleted record lookup should succeed")
-            .is_none()
+        read_record(
+            &engine,
+            OperationFilter::pointer("@gem:lnk_delete_filter_fire")
+        )
+        .expect("deleted record lookup should succeed")
+        .is_none()
     );
     assert!(
-        engine
-            .find_by_id("@gem:lnk_delete_filter_water")
-            .expect("remaining record lookup should succeed")
-            .is_some()
+        read_record(
+            &engine,
+            OperationFilter::pointer("@gem:lnk_delete_filter_water")
+        )
+        .expect("remaining record lookup should succeed")
+        .is_some()
     );
 }
 
@@ -1114,22 +1291,25 @@ fn us_054_delete_accepts_explicit_storage_locator() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_054_explicit",
                 "element": "Locator"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
 
     let deleted = engine
-        .delete(StorageLocator::explicit("gem", "us_054_explicit"))
+        .delete(
+            StorageLocator::explicit("gem", "us_054_explicit"),
+            None::<OperationOptions>,
+        )
         .expect("explicit locator delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert!(
-        engine
-            .find_by_id("@gem:us_054_explicit")
+        read_record(&engine, OperationFilter::pointer("@gem:us_054_explicit"))
             .expect("lookup should succeed")
             .is_none()
     );
@@ -1143,22 +1323,25 @@ fn us_054_delete_accepts_inline_storage_locator() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "us_054_inline",
                 "element": "Inline"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
 
     let deleted = engine
-        .delete(StorageLocator::inline("@gem:us_054_inline"))
+        .delete(
+            StorageLocator::inline("@gem:us_054_inline"),
+            None::<OperationOptions>,
+        )
         .expect("inline locator delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert!(
-        engine
-            .find_by_id("@gem:us_054_inline")
+        read_record(&engine, OperationFilter::pointer("@gem:us_054_inline"))
             .expect("lookup should succeed")
             .is_none()
     );
@@ -1174,25 +1357,34 @@ fn delete_by_id_accepts_deep_structural_pointer() {
 
     let pointer = engine
         .upsert(
-            "basic-usage/public/user",
             json!({
                 "_id": "user-02",
                 "name": "Marcus"
             }),
+            OperationFilter::drawer("basic-usage/public/user"),
+            None::<OperationOptions>,
         )
         .expect("nested user should upsert");
-    assert_eq!(pointer, "@basic-usage/public/user:user-02");
+    assert_eq!(
+        pointer,
+        vec!["@basic-usage/public/user:user-02".to_string()]
+    );
 
     let deleted = engine
-        .delete_by_id("basic-usage/public/user/user-02")
+        .delete(
+            OperationFilter::pointer("basic-usage/public/user/user-02"),
+            None::<OperationOptions>,
+        )
         .expect("structural pointer delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert!(
-        engine
-            .find_by_id("@basic-usage/public/user:user-02")
-            .expect("lookup should succeed")
-            .is_none()
+        read_record(
+            &engine,
+            OperationFilter::pointer("@basic-usage/public/user:user-02")
+        )
+        .expect("lookup should succeed")
+        .is_none()
     );
 }
 
@@ -1204,22 +1396,22 @@ fn us_054_delete_by_id_accepts_tuple_locator_conversion() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_054_tuple",
                 "element": "Tuple"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
 
     let deleted = engine
-        .delete_by_id(("gem", "lnk_us_054_tuple"))
+        .delete(("gem", "lnk_us_054_tuple"), None::<OperationOptions>)
         .expect("tuple locator delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert!(
-        engine
-            .find_by_id("@gem:us_054_tuple")
+        read_record(&engine, OperationFilter::pointer("@gem:us_054_tuple"))
             .expect("lookup should succeed")
             .is_none()
     );
@@ -1232,7 +1424,10 @@ fn us_020_delete_by_id_errors_for_missing_drawer() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     let error = engine
-        .delete_by_id("@missing:lnk_any")
+        .delete(
+            OperationFilter::pointer("@missing:lnk_any"),
+            None::<OperationOptions>,
+        )
         .expect_err("missing drawer should error");
 
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -1247,7 +1442,6 @@ fn us_030_cascade_delete_uses_metadata_rules_leaf_first() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
-                "character",
                 json!({
                     "_id": "@character:lnk_cascade_owner",
                     "name": "Grace",
@@ -1265,6 +1459,8 @@ fn us_030_cascade_delete_uses_metadata_rules_leaf_first() {
                         }
                     ]
                 }),
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>,
             )
             .expect("character graph should upsert");
     }
@@ -1275,27 +1471,36 @@ fn us_030_cascade_delete_uses_metadata_rules_leaf_first() {
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     let deleted = restarted_engine
-        .delete_by_id("@character:lnk_cascade_owner")
+        .delete(
+            OperationFilter::pointer("@character:lnk_cascade_owner"),
+            None::<OperationOptions>,
+        )
         .expect("cascade delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert!(
-        restarted_engine
-            .find_by_id("@character:lnk_cascade_owner")
-            .expect("character lookup should succeed")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@character:lnk_cascade_owner")
+        )
+        .expect("character lookup should succeed")
+        .is_none()
     );
     assert!(
-        restarted_engine
-            .find_by_id("@weapon:lnk_cascade_spear")
-            .expect("weapon lookup should succeed")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@weapon:lnk_cascade_spear")
+        )
+        .expect("weapon lookup should succeed")
+        .is_none()
     );
     assert!(
-        restarted_engine
-            .find_by_id("@gem:lnk_cascade_storm")
-            .expect("gem lookup should succeed")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@gem:lnk_cascade_storm")
+        )
+        .expect("gem lookup should succeed")
+        .is_none()
     );
 }
 
@@ -1308,7 +1513,6 @@ fn us_030_delete_preserves_links_not_configured_for_cascade() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
-                "character",
                 json!({
                     "_id": "@character:lnk_preserve_owner",
                     "name": "Grace",
@@ -1317,6 +1521,8 @@ fn us_030_delete_preserves_links_not_configured_for_cascade() {
                         "name": "Spear"
                     }
                 }),
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>,
             )
             .expect("character graph should upsert");
     }
@@ -1324,20 +1530,27 @@ fn us_030_delete_preserves_links_not_configured_for_cascade() {
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reinitialize");
     restarted_engine
-        .delete_by_id("@character:lnk_preserve_owner")
+        .delete(
+            OperationFilter::pointer("@character:lnk_preserve_owner"),
+            None::<OperationOptions>,
+        )
         .expect("delete should succeed");
 
     assert!(
-        restarted_engine
-            .find_by_id("@character:lnk_preserve_owner")
-            .expect("character lookup should succeed")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@character:lnk_preserve_owner")
+        )
+        .expect("character lookup should succeed")
+        .is_none()
     );
     assert!(
-        restarted_engine
-            .find_by_id("@weapon:lnk_preserved_weapon")
-            .expect("weapon lookup should succeed")
-            .is_some()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@weapon:lnk_preserved_weapon")
+        )
+        .expect("weapon lookup should succeed")
+        .is_some()
     );
 }
 
@@ -1349,27 +1562,28 @@ fn find_by_id_handles_cyclic_links_without_recursive_overflow() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
         .upsert(
-            "node",
             json!({
                 "_id": "@node:lnk_a",
                 "name": "Node A",
                 "next": "@node:lnk_b"
             }),
+            OperationFilter::drawer("node"),
+            None::<OperationOptions>,
         )
         .expect("first node should upsert");
     engine
         .upsert(
-            "node",
             json!({
                 "_id": "@node:lnk_b",
                 "name": "Node B",
                 "next": "@node:lnk_a"
             }),
+            OperationFilter::drawer("node"),
+            None::<OperationOptions>,
         )
         .expect("second node should upsert");
 
-    let hydrated = engine
-        .find_by_id("@node:lnk_a")
+    let hydrated = read_record(&engine, OperationFilter::pointer("@node:lnk_a"))
         .expect("lookup should succeed")
         .expect("record should exist");
 
@@ -1386,43 +1600,50 @@ fn us_031_find_by_filter_matches_exact_properties_and_string_wildcards() {
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_031_sunblade",
                 "name": "Sunblade",
                 "damage": 120
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("sunblade should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_031_moonblade",
                 "name": "Moonblade",
                 "damage": 90
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("moonblade should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_031_storm_spear",
                 "name": "Storm Spear",
                 "damage": 120
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("storm spear should upsert");
 
-    let by_damage = engine
-        .find_by_filter("weapon", json!({ "damage": 120 }), None)
-        .expect("damage filter should succeed");
+    let by_damage = read_records(
+        &engine,
+        OperationFilter::query_in("weapon", json!({ "damage": 120 })),
+    )
+    .expect("damage filter should succeed");
     assert_eq!(by_damage.len(), 2);
 
-    let by_name = engine
-        .find_by_filter("weapon", json!({ "name": "%blade" }), None)
-        .expect("wildcard filter should succeed");
+    let by_name = read_records(
+        &engine,
+        OperationFilter::query_in("weapon", json!({ "name": "%blade" })),
+    )
+    .expect("wildcard filter should succeed");
     assert_eq!(by_name.len(), 2);
     assert_eq!(by_name[0]["name"], "Sunblade");
     assert_eq!(by_name[1]["name"], "Moonblade");
@@ -1436,49 +1657,55 @@ fn us_031_find_by_filter_matches_reference_ids_against_stored_pointers() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_031_fire",
                 "element": "Fire",
                 "potency": 500
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("fire gem should upsert");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_031_ice",
                 "element": "Ice",
                 "potency": 300
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("ice gem should upsert");
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_031_flare",
                 "name": "Flare",
                 "gem": { "_id": "@gem:lnk_us_031_fire" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("flare should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_031_frost",
                 "name": "Frost",
                 "gem": { "_id": "@gem:lnk_us_031_ice" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("frost should upsert");
 
-    let matched = engine
-        .find_by_filter("weapon", json!({ "gem": { "_id": "us_031_fire" } }), None)
-        .expect("reference filter should succeed");
+    let matched = read_records(
+        &engine,
+        OperationFilter::query_in("weapon", json!({ "gem": { "_id": "us_031_fire" } })),
+    )
+    .expect("reference filter should succeed");
 
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0]["name"], "Flare");
@@ -1491,9 +1718,11 @@ fn us_031_find_by_filter_rejects_non_object_filters() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    let error = engine
-        .find_by_filter("weapon", json!(["not", "an", "object"]), None)
-        .expect_err("non-object filter should fail");
+    let error = read_records(
+        &engine,
+        OperationFilter::query_in("weapon", json!(["not", "an", "object"])),
+    )
+    .expect_err("non-object filter should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
@@ -1504,95 +1733,99 @@ fn us_104_find_by_filter_intersects_declared_secondary_indexes() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    engine
-        .bulk_upsert(
-            "book",
-            vec![
-                json!({
-                    "_id": "book_a",
-                    "title": "Indexed Alpha",
-                    "author_id": "entity_a",
-                    "editor_id": "entity_a",
-                    "purge_bucket": 0
-                }),
-                json!({
-                    "_id": "book_b",
-                    "title": "Indexed Beta",
-                    "author_id": "entity_a",
-                    "editor_id": "entity_b",
-                    "purge_bucket": 0
-                }),
-                json!({
-                    "_id": "book_c",
-                    "title": "Indexed Gamma",
-                    "author_id": "entity_a",
-                    "editor_id": "entity_a",
-                    "purge_bucket": 1
-                }),
-                json!({
-                    "_id": "book_d",
-                    "title": "Other Delta",
-                    "author_id": "entity_b",
-                    "editor_id": "entity_a",
-                    "purge_bucket": 0
-                }),
-            ],
-            true,
-        )
-        .expect("book batch should upsert");
+    upsert_batch(
+        &engine,
+        "book",
+        vec![
+            json!({
+                "_id": "book_a",
+                "title": "Indexed Alpha",
+                "author_id": "entity_a",
+                "editor_id": "entity_a",
+                "purge_bucket": 0
+            }),
+            json!({
+                "_id": "book_b",
+                "title": "Indexed Beta",
+                "author_id": "entity_a",
+                "editor_id": "entity_b",
+                "purge_bucket": 0
+            }),
+            json!({
+                "_id": "book_c",
+                "title": "Indexed Gamma",
+                "author_id": "entity_a",
+                "editor_id": "entity_a",
+                "purge_bucket": 1
+            }),
+            json!({
+                "_id": "book_d",
+                "title": "Other Delta",
+                "author_id": "entity_b",
+                "editor_id": "entity_a",
+                "purge_bucket": 0
+            }),
+        ],
+    )
+    .expect("book batch should upsert");
 
     for field_name in ["author_id", "editor_id", "purge_bucket"] {
         engine
-            .manage_schema(
+            .alter(AlterRequest::schema_rule(
                 "book",
                 "add",
                 "index",
                 field_name,
                 json!({ "kind": "index" }),
-            )
+            ))
             .expect("index should be registered");
     }
 
-    let mut record_ids = engine
-        .find_by_filter(
+    let mut record_ids = read_records(
+        &engine,
+        OperationFilter::query_in(
             "book",
             json!({
                 "author_id": "entity_a",
                 "editor_id": "entity_a",
                 "purge_bucket": 0
             }),
-            None,
-        )
-        .expect("indexed filter should succeed")
-        .into_iter()
-        .map(|record| {
-            record["_id"]
-                .as_str()
-                .expect("record id should be a string")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
+        ),
+    )
+    .expect("indexed filter should succeed")
+    .into_iter()
+    .map(|record| {
+        record["_id"]
+            .as_str()
+            .expect("record id should be a string")
+            .to_string()
+    })
+    .collect::<Vec<_>>();
     record_ids.sort();
 
     assert_eq!(record_ids, vec!["book_a".to_string()]);
     assert_eq!(
         engine
             .count(
-                "book",
-                Some(json!({
-                    "author_id": "entity_a",
-                    "editor_id": "entity_a",
-                    "purge_bucket": 0
-                })),
-                None
+                OperationFilter::query_in(
+                    "book",
+                    json!({
+                        "author_id": "entity_a",
+                        "editor_id": "entity_a",
+                        "purge_bucket": 0
+                    })
+                ),
+                None::<OperationOptions>
             )
             .expect("indexed count should succeed"),
         1
     );
 
-    let wildcard_records = engine
-        .find_by_filter("book", json!({ "title": "Indexed %" }), None)
-        .expect("unsupported wildcard filter should fall back");
+    let wildcard_records = read_records(
+        &engine,
+        OperationFilter::query_in("book", json!({ "title": "Indexed %" })),
+    )
+    .expect("unsupported wildcard filter should fall back");
     assert_eq!(wildcard_records.len(), 3);
 }
 
@@ -1604,26 +1837,28 @@ fn us_032_count_uses_metadata_fast_path_when_no_filter_is_provided() {
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_032_flare",
                 "name": "Flare",
                 "gem": "@missing:lnk_unresolved"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("first weapon should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_032_frost",
                 "name": "Frost"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("second weapon should upsert");
 
     let total = engine
-        .count("weapon", None, None)
+        .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
         .expect("count without filter should succeed");
 
     assert_eq!(total, 2);
@@ -1639,75 +1874,85 @@ fn us_032_count_matches_filter_semantics_without_hydrating_records() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_032_fire",
                 "element": "Fire",
                 "potency": 500
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("fire gem should upsert");
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_032_ice",
                 "element": "Ice",
                 "potency": 300
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("ice gem should upsert");
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_032_blaze",
                 "name": "Blazeblade",
                 "damage": 120,
                 "gem": { "_id": "@gem:lnk_us_032_fire" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("blazeblade should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_032_frost",
                 "name": "Frostblade",
                 "damage": 90,
                 "gem": { "_id": "@gem:lnk_us_032_ice" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("frostblade should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_032_storm",
                 "name": "Storm Spear",
                 "damage": 120,
                 "gem": { "_id": "@gem:lnk_us_032_fire" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("storm spear should upsert");
 
     let wildcard_count = engine
-        .count("weapon", Some(json!({ "name": "%blade" })), None)
+        .count(
+            OperationFilter::query_in("weapon", json!({ "name": "%blade" })),
+            None::<OperationOptions>,
+        )
         .expect("wildcard count should succeed");
     assert_eq!(wildcard_count, 2);
 
     let reference_count = engine
         .count(
-            "weapon",
-            Some(json!({ "gem": { "_id": "us_032_fire" } })),
-            None,
+            OperationFilter::query_in("weapon", json!({ "gem": { "_id": "us_032_fire" } })),
+            None::<OperationOptions>,
         )
         .expect("reference count should succeed");
     assert_eq!(reference_count, 2);
 
     let exact_count = engine
-        .count("weapon", Some(json!({ "damage": 90 })), None)
+        .count(
+            OperationFilter::query_in("weapon", json!({ "damage": 90 })),
+            None::<OperationOptions>,
+        )
         .expect("exact count should succeed");
     assert_eq!(exact_count, 1);
 }
@@ -1719,7 +1964,10 @@ fn us_032_count_rejects_non_object_filters() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     let error = engine
-        .count("weapon", Some(json!(["not", "an", "object"])), None)
+        .count(
+            OperationFilter::query_in("weapon", json!(["not", "an", "object"])),
+            None::<OperationOptions>,
+        )
         .expect_err("non-object filter should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -1739,28 +1987,30 @@ fn us_033_find_by_filter_applies_sorting_before_offset_and_limit() {
     ] {
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": format!("@weapon:lnk_us_033_{id}"),
                     "name": name,
                     "damage": damage
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon should upsert");
     }
 
-    let records = engine
-        .find_by_filter(
-            "weapon",
-            json!({ "name": "%blade" }),
-            Some(QueryModifiers {
+    let records = read_records(
+        &engine,
+        (
+            OperationFilter::query_in("weapon", json!({ "name": "%blade" })),
+            OperationOptions::from(QueryModifiers {
                 order_by: Some("damage".to_string()),
                 order_direction: Some(OrderDirection::Descending),
                 offset: Some(1),
                 limit: Some(2),
             }),
-        )
-        .expect("filtered query should succeed");
+        ),
+    )
+    .expect("filtered query should succeed");
 
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["name"], "Stormblade");
@@ -1795,22 +2045,27 @@ fn us_033_sorting_pushes_missing_and_mixed_type_fields_to_the_end() {
         }),
     ] {
         engine
-            .upsert("weapon", payload)
+            .upsert(
+                payload,
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
+            )
             .expect("weapon should upsert");
     }
 
-    let records = engine
-        .find_by_filter(
-            "weapon",
-            json!({}),
-            Some(QueryModifiers {
+    let records = read_records(
+        &engine,
+        (
+            OperationFilter::query_in("weapon", json!({})),
+            OperationOptions::from(QueryModifiers {
                 order_by: Some("damage".to_string()),
                 order_direction: Some(OrderDirection::Descending),
                 offset: None,
                 limit: None,
             }),
-        )
-        .expect("query should succeed");
+        ),
+    )
+    .expect("query should succeed");
 
     let names = records
         .iter()
@@ -1832,21 +2087,21 @@ fn us_033_count_ignores_query_pagination_modifiers() {
     for i in 0..3 {
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": format!("@weapon:lnk_us_033_count_{i}"),
                     "name": format!("Blade {i}"),
                     "damage": i
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon should upsert");
     }
 
     let count = engine
         .count(
-            "weapon",
-            Some(json!({ "name": "Blade %" })),
-            Some(QueryModifiers {
+            OperationFilter::query_in("weapon", json!({ "name": "Blade %" })),
+            OperationOptions::from(QueryModifiers {
                 order_by: Some("damage".to_string()),
                 order_direction: Some(OrderDirection::Descending),
                 offset: Some(1),
@@ -2073,31 +2328,37 @@ fn us_036_database_level_isolation_uses_independent_open_paths() {
 
     tenant_a_engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_shared_database_key",
                 "name": "Tenant A Blade"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("tenant a weapon should upsert");
     tenant_b_engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_shared_database_key",
                 "name": "Tenant B Blade"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("tenant b weapon should upsert");
 
-    let tenant_a_record = tenant_a_engine
-        .find_by_id("@weapon:lnk_shared_database_key")
-        .expect("tenant a lookup should succeed")
-        .expect("tenant a record should exist");
-    let tenant_b_record = tenant_b_engine
-        .find_by_id("@weapon:lnk_shared_database_key")
-        .expect("tenant b lookup should succeed")
-        .expect("tenant b record should exist");
+    let tenant_a_record = read_record(
+        &tenant_a_engine,
+        OperationFilter::pointer("@weapon:lnk_shared_database_key"),
+    )
+    .expect("tenant a lookup should succeed")
+    .expect("tenant a record should exist");
+    let tenant_b_record = read_record(
+        &tenant_b_engine,
+        OperationFilter::pointer("@weapon:lnk_shared_database_key"),
+    )
+    .expect("tenant b lookup should succeed")
+    .expect("tenant b record should exist");
 
     assert_eq!(tenant_a_record["name"], "Tenant A Blade");
     assert_eq!(tenant_b_record["name"], "Tenant B Blade");
@@ -2333,15 +2594,16 @@ fn us_048_show_tenants_discovers_active_tenant_namespaces() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "root_seed",
                 "element": "Root"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("unscoped root drawer should not create a tenant namespace");
 
-    let tenants = engine.show_tenants().expect("tenants should be discovered");
+    let tenants = status_tenants(&engine).expect("tenants should be discovered");
 
     assert_eq!(
         tenants,
@@ -2413,9 +2675,7 @@ fn us_049_show_databases_discovers_database_footprints_with_inventory() {
     )
     .expect("metadata-only file should write");
 
-    let databases = engine
-        .show_databases()
-        .expect("databases should be discovered");
+    let databases = status_databases(&engine).expect("databases should be discovered");
     let names: Vec<String> = databases
         .iter()
         .map(|inventory| inventory.name.clone())
@@ -2512,9 +2772,7 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
         )
         .expect("coordinate-scoped upsert should succeed");
 
-    let schemas = engine
-        .show_schemas("main_db")
-        .expect("schemas should be discovered");
+    let schemas = status_schemas(&engine, "main_db").expect("schemas should be discovered");
     assert_eq!(
         schemas,
         vec![
@@ -2524,8 +2782,7 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
         ]
     );
 
-    let routed_schemas = engine
-        .show_schemas("tenant_alpha/production")
+    let routed_schemas = status_schemas(&engine, "tenant_alpha/production")
         .expect("routed schemas should be discovered");
     assert_eq!(routed_schemas, vec!["core".to_string()]);
 
@@ -2610,8 +2867,7 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
         )
         .expect("routed drawer should upsert");
 
-    let drawers = engine
-        .show_drawers("main_db", "tenant_schema")
+    let drawers = status_drawers(&engine, "main_db", "tenant_schema")
         .expect("schema drawers should be discovered");
     let drawer_names: Vec<String> = drawers
         .iter()
@@ -2635,15 +2891,13 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
     assert_eq!(weapon_inventory.record_count, 1);
     assert_eq!(weapon_inventory.register_file_count, 3);
 
-    let flat_drawers = engine
-        .show_drawers("main_db", "flat_schema")
+    let flat_drawers = status_drawers(&engine, "main_db", "flat_schema")
         .expect("flat schema drawers should be discovered");
     assert_eq!(flat_drawers.len(), 1);
     assert_eq!(flat_drawers[0].name, "artifact");
     assert_eq!(flat_drawers[0].record_count, 1);
 
-    let routed_drawers = engine
-        .show_drawers("tenant_alpha/production", "core")
+    let routed_drawers = status_drawers(&engine, "tenant_alpha/production", "core")
         .expect("routed drawers should be discovered");
     assert_eq!(routed_drawers.len(), 1);
     assert_eq!(routed_drawers[0].name, "character");
@@ -2695,9 +2949,7 @@ fn us_063_engine_bootstraps_registry_from_catalog_and_validates_locations() {
 
     let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
 
-    let databases = engine
-        .show_databases()
-        .expect("catalog databases should load");
+    let databases = status_databases(&engine).expect("catalog databases should load");
     let database_names: Vec<String> = databases
         .iter()
         .map(|inventory| inventory.name.clone())
@@ -2711,14 +2963,11 @@ fn us_063_engine_bootstraps_registry_from_catalog_and_validates_locations() {
     );
 
     assert_eq!(
-        engine
-            .show_schemas("catalog_db")
-            .expect("catalog schemas should load"),
+        status_schemas(&engine, "catalog_db").expect("catalog schemas should load"),
         vec!["core".to_string()]
     );
     assert_eq!(
-        engine
-            .show_drawers("catalog_db", "core")
+        status_drawers(&engine, "catalog_db", "core")
             .expect("catalog drawers should load")
             .into_iter()
             .map(|inventory| inventory.name)
@@ -2770,24 +3019,26 @@ fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targ
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_037_sword",
                 "name": "Constraint Sword",
                 "gem_slot": { "_id": "us_037_fire" },
                 "faction_id": "@faction:lnk_us_037_order"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("first constrained weapon should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_037_spear",
                 "name": "Constraint Spear",
                 "gem_slot": { "_id": "us_037_water" },
                 "faction_id": "@faction:lnk_us_037_order"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("many-to-one faction target should allow duplicate references");
 
@@ -2800,13 +3051,14 @@ fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targ
 
     let duplicate_error = engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_037_axe",
                 "name": "Constraint Axe",
                 "gem_slot": "@gem:lnk_us_037_fire",
                 "faction_id": "@faction:lnk_us_037_order"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect_err("duplicate one-to-one pointer should fail");
 
@@ -2814,7 +3066,7 @@ fn us_037_one_to_one_blocks_duplicate_pointer_and_many_to_one_allows_shared_targ
     assert!(duplicate_error.to_string().contains("1:1 relationship"));
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("count should succeed"),
         2
     );
@@ -2847,12 +3099,13 @@ fn us_037_relationship_constraints_reject_wrong_target_drawer_pointers() {
 
     let error = engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_037_wrong_target",
                 "name": "Wrong Target",
                 "faction_id": "@gem:lnk_us_037_not_a_faction"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect_err("wrong target drawer should fail validation");
 
@@ -2892,46 +3145,49 @@ fn us_038_one_to_many_virtual_relationships_populate_child_arrays_on_read() {
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_038_mech",
                 "name": "Mech Pilot"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_038_lance",
                 "name": "Pilot Lance",
                 "character": { "_id": "@character:lnk_us_038_mech" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("first child weapon should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_038_blade",
                 "name": "Pilot Blade",
                 "character": { "_id": "@character:lnk_us_038_mech" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("second child weapon should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_038_other",
                 "name": "Other Blade",
                 "character": { "_id": "@character:lnk_us_038_other" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("unrelated child weapon should upsert");
 
-    let characters = engine
-        .find_all("character")
+    let characters = read_records(&engine, OperationFilter::drawer("character"))
         .expect("characters should read with virtual relationships");
 
     assert_eq!(characters.len(), 1);
@@ -2974,18 +3230,18 @@ fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
     for (id, name) in [("dash", "Dash"), ("guard", "Guard")] {
         engine
             .upsert(
-                "skill",
                 json!({
                     "_id": format!("@skill:lnk_us_038_{id}"),
                     "name": name
                 }),
+                OperationFilter::drawer("skill"),
+                None::<OperationOptions>,
             )
             .expect("skill should upsert");
     }
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_038_skilled",
                 "name": "Skilled Character",
@@ -2994,12 +3250,13 @@ fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
                     "@skill:lnk_us_038_guard"
                 ]
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("many-to-many pointer array should upsert");
 
     let error = engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_038_wrong_skill",
                 "name": "Wrong Skill Character",
@@ -3007,13 +3264,14 @@ fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
                     "@gem:lnk_us_038_wrong_target"
                 ]
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect_err("wrong many-to-many pointer target should fail");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("expected target drawer 'skill'"));
 
-    let characters = engine
-        .find_all("character")
+    let characters = read_records(&engine, OperationFilter::drawer("character"))
         .expect("character should read with hydrated many-to-many pointers");
     assert_eq!(characters.len(), 1);
     assert_eq!(characters[0]["shared_skills"][0]["name"], "Dash");
@@ -3052,40 +3310,48 @@ fn us_039_cascade_delete_rule_removes_child_records_tracking_parent_pointer() {
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_039_cascade_parent",
                 "name": "Cascade Parent"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert");
     for (id, name) in [("blade", "Cascade Blade"), ("lance", "Cascade Lance")] {
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": format!("@weapon:lnk_us_039_cascade_{id}"),
                     "name": name,
                     "character": { "_id": "@character:lnk_us_039_cascade_parent" }
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon should upsert");
     }
 
     let deleted = engine
-        .delete_by_id("@character:lnk_us_039_cascade_parent")
+        .delete(
+            OperationFilter::pointer("@character:lnk_us_039_cascade_parent"),
+            None::<OperationOptions>,
+        )
         .expect("cascade delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert_eq!(
         engine
-            .count("character", None, None)
+            .count(
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>
+            )
             .expect("character count should succeed"),
         0
     );
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("weapon count should succeed"),
         0
     );
@@ -3131,39 +3397,47 @@ fn us_039_restrict_delete_rule_aborts_before_cascade_mutations() {
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_039_restrict_parent",
                 "name": "Restrict Parent"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_039_restrict_child",
                 "name": "Restrict Child",
                 "character": { "_id": "@character:lnk_us_039_restrict_parent" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert");
 
     let error = engine
-        .delete_by_id("@character:lnk_us_039_restrict_parent")
+        .delete(
+            OperationFilter::pointer("@character:lnk_us_039_restrict_parent"),
+            None::<OperationOptions>,
+        )
         .expect_err("restrict rule should block delete");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("Delete restricted"));
     assert_eq!(
         engine
-            .count("character", None, None)
+            .count(
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>
+            )
             .expect("character count should succeed"),
         1
     );
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("weapon count should succeed"),
         1
     );
@@ -3201,46 +3475,56 @@ fn us_039_set_null_delete_rule_clears_child_pointer_and_preserves_child_record()
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_039_set_null_parent",
                 "name": "SetNull Parent"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_039_set_null_child",
                 "name": "SetNull Child",
                 "character": { "_id": "@character:lnk_us_039_set_null_parent" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert");
 
     let deleted = engine
-        .delete_by_id("@character:lnk_us_039_set_null_parent")
+        .delete(
+            OperationFilter::pointer("@character:lnk_us_039_set_null_parent"),
+            None::<OperationOptions>,
+        )
         .expect("set-null delete should succeed");
 
-    assert!(deleted);
+    assert_eq!(deleted, 1);
     assert_eq!(
         engine
-            .count("character", None, None)
+            .count(
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>
+            )
             .expect("character count should succeed"),
         0
     );
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("weapon count should succeed"),
         1
     );
 
-    let weapon = engine
-        .find_by_id("@weapon:lnk_us_039_set_null_child")
-        .expect("weapon lookup should succeed")
-        .expect("weapon should remain");
+    let weapon = read_record(
+        &engine,
+        OperationFilter::pointer("@weapon:lnk_us_039_set_null_child"),
+    )
+    .expect("weapon lookup should succeed")
+    .expect("weapon should remain");
     assert_eq!(weapon["name"], "SetNull Child");
     assert!(weapon.get("character").is_none());
 }
@@ -3251,28 +3535,30 @@ fn us_112_delete_by_filter_runs_as_single_transaction_and_updates_metadata() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    engine
-        .bulk_upsert(
-            "gem",
-            vec![
-                json!({"_id": "fire_a", "element": "Fire"}),
-                json!({"_id": "fire_b", "element": "Fire"}),
-                json!({"_id": "water", "element": "Water"}),
-                json!({"_id": "earth", "element": "Earth"}),
-            ],
-            true,
-        )
-        .expect("records should seed");
+    upsert_batch(
+        &engine,
+        "gem",
+        vec![
+            json!({"_id": "fire_a", "element": "Fire"}),
+            json!({"_id": "fire_b", "element": "Fire"}),
+            json!({"_id": "water", "element": "Water"}),
+            json!({"_id": "earth", "element": "Earth"}),
+        ],
+    )
+    .expect("records should seed");
 
     let wal_record_count_before_delete = wal_records(&database).len();
     let deleted = engine
-        .delete_by_filter("gem", json!({"element": "Fire"}))
+        .delete(
+            OperationFilter::query_in("gem", json!({"element": "Fire"})),
+            OperationOptions::new().multi(true),
+        )
         .expect("delete-by-filter should succeed");
 
     assert_eq!(deleted, 2);
     assert_eq!(
         engine
-            .count("gem", None, None)
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("remaining count should succeed"),
         2
     );
@@ -3302,7 +3588,10 @@ fn us_112_delete_by_filter_runs_as_single_transaction_and_updates_metadata() {
     assert_eq!(begin_records[0]["operation"]["drawer_name"], "gem");
     assert_eq!(
         engine
-            .delete_by_filter("gem", json!({"element": "Void"}))
+            .delete(
+                OperationFilter::query_in("gem", json!({"element": "Void"})),
+                OperationOptions::new().multi(true)
+            )
             .expect("no-match delete should succeed"),
         0
     );
@@ -3314,17 +3603,16 @@ fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    engine
-        .bulk_upsert(
-            "gem",
-            vec![
-                json!({"_id": "fire_a", "element": "Fire"}),
-                json!({"_id": "fire_b", "element": "Fire"}),
-                json!({"_id": "water", "element": "Water"}),
-            ],
-            true,
-        )
-        .expect("records should seed");
+    upsert_batch(
+        &engine,
+        "gem",
+        vec![
+            json!({"_id": "fire_a", "element": "Fire"}),
+            json!({"_id": "fire_b", "element": "Fire"}),
+            json!({"_id": "water", "element": "Water"}),
+        ],
+    )
+    .expect("records should seed");
     engine
         .execute_command(Command::ManageSchema {
             action: "add".to_string(),
@@ -3337,7 +3625,10 @@ fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
 
     assert_eq!(
         engine
-            .count("gem", Some(json!({"element": "Fire"})), None)
+            .count(
+                OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                None::<OperationOptions>
+            )
             .expect("first indexed count should materialize index"),
         2
     );
@@ -3357,7 +3648,10 @@ fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
 
     assert_eq!(
         engine
-            .delete_by_filter("gem", json!({"element": "Fire"}))
+            .delete(
+                OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                OperationOptions::new().multi(true)
+            )
             .expect("indexed delete-by-filter should succeed"),
         2
     );
@@ -3379,7 +3673,10 @@ fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
     );
     assert_eq!(
         engine
-            .count("gem", Some(json!({"element": "Fire"})), None)
+            .count(
+                OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                None::<OperationOptions>
+            )
             .expect("post-delete count should succeed"),
         0
     );
@@ -3392,16 +3689,15 @@ fn us_112_delete_by_filter_replays_from_transaction_wal() {
 
     {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
-        engine
-            .bulk_upsert(
-                "gem",
-                vec![
-                    json!({"_id": "fire", "element": "Fire"}),
-                    json!({"_id": "water", "element": "Water"}),
-                ],
-                true,
-            )
-            .expect("records should seed");
+        upsert_batch(
+            &engine,
+            "gem",
+            vec![
+                json!({"_id": "fire", "element": "Fire"}),
+                json!({"_id": "water", "element": "Water"}),
+            ],
+        )
+        .expect("records should seed");
     }
 
     write_wal_record(
@@ -3429,13 +3725,19 @@ fn us_112_delete_by_filter_replays_from_transaction_wal() {
     let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
     assert_eq!(
         reopened
-            .count("gem", Some(json!({"element": "Fire"})), None)
+            .count(
+                OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                None::<OperationOptions>
+            )
             .expect("fire count should succeed"),
         0
     );
     assert_eq!(
         reopened
-            .count("gem", Some(json!({"element": "Water"})), None)
+            .count(
+                OperationFilter::query_in("gem", json!({"element": "Water"})),
+                None::<OperationOptions>
+            )
             .expect("water count should succeed"),
         1
     );
@@ -3450,7 +3752,6 @@ fn us_112_delete_by_filter_preserves_cascade_rules() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
         engine
             .upsert(
-                "character",
                 json!({
                     "_id": "@character:lnk_us_112_cascade_owner",
                     "name": "Cascade Target",
@@ -3461,6 +3762,8 @@ fn us_112_delete_by_filter_preserves_cascade_rules() {
                         }
                     ]
                 }),
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>,
             )
             .expect("character graph should upsert");
     }
@@ -3471,21 +3774,28 @@ fn us_112_delete_by_filter_preserves_cascade_rules() {
 
     assert_eq!(
         restarted_engine
-            .delete_by_filter("character", json!({"name": "Cascade Target"}))
+            .delete(
+                OperationFilter::query_in("character", json!({"name": "Cascade Target"})),
+                OperationOptions::new().multi(true)
+            )
             .expect("cascade delete-by-filter should succeed"),
         1
     );
     assert!(
-        restarted_engine
-            .find_by_id("@character:lnk_us_112_cascade_owner")
-            .expect("character lookup should succeed")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@character:lnk_us_112_cascade_owner")
+        )
+        .expect("character lookup should succeed")
+        .is_none()
     );
     assert!(
-        restarted_engine
-            .find_by_id("@weapon:lnk_us_112_cascade_weapon")
-            .expect("weapon lookup should succeed")
-            .is_none()
+        read_record(
+            &restarted_engine,
+            OperationFilter::pointer("@weapon:lnk_us_112_cascade_weapon")
+        )
+        .expect("weapon lookup should succeed")
+        .is_none()
     );
 }
 
@@ -3521,39 +3831,47 @@ fn us_112_delete_by_filter_preserves_restrict_rules() {
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_112_restrict_parent",
                 "name": "Restrict Target"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_112_restrict_child",
                 "name": "Restrict Child",
                 "character": { "_id": "@character:lnk_us_112_restrict_parent" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert");
 
     let error = engine
-        .delete_by_filter("character", json!({"name": "Restrict Target"}))
+        .delete(
+            OperationFilter::query_in("character", json!({"name": "Restrict Target"})),
+            OperationOptions::new().multi(true),
+        )
         .expect_err("restrict rule should block delete-by-filter");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("Delete restricted"));
     assert_eq!(
         engine
-            .count("character", None, None)
+            .count(
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>
+            )
             .expect("character count should succeed"),
         1
     );
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("weapon count should succeed"),
         1
     );
@@ -3591,35 +3909,42 @@ fn us_112_delete_by_filter_preserves_set_null_rules() {
 
     engine
         .upsert(
-            "character",
             json!({
                 "_id": "@character:lnk_us_112_set_null_parent",
                 "name": "SetNull Target"
             }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
         )
         .expect("character should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_us_112_set_null_child",
                 "name": "SetNull Child",
                 "character": { "_id": "@character:lnk_us_112_set_null_parent" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert");
 
     assert_eq!(
         engine
-            .delete_by_filter("character", json!({"name": "SetNull Target"}))
+            .delete(
+                OperationFilter::query_in("character", json!({"name": "SetNull Target"})),
+                OperationOptions::new().multi(true)
+            )
             .expect("set-null delete-by-filter should succeed"),
         1
     );
 
-    let weapon = engine
-        .find_by_id("@weapon:lnk_us_112_set_null_child")
-        .expect("weapon lookup should succeed")
-        .expect("weapon should remain");
+    let weapon = read_record(
+        &engine,
+        OperationFilter::pointer("@weapon:lnk_us_112_set_null_child"),
+    )
+    .expect("weapon lookup should succeed")
+    .expect("weapon should remain");
     assert_eq!(weapon["name"], "SetNull Child");
     assert!(weapon.get("character").is_none());
 }
@@ -3633,12 +3958,13 @@ fn us_040_shared_engine_allows_concurrent_reader_threads() {
     for i in 0..12 {
         engine
             .upsert(
-                "gem",
                 json!({
                     "_id": format!("@gem:lnk_us_040_reader_{i}"),
                     "element": if i % 2 == 0 { "Fire" } else { "Water" },
                     "potency": i
                 }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
             )
             .expect("seed gem should upsert");
     }
@@ -3653,19 +3979,26 @@ fn us_040_shared_engine_allows_concurrent_reader_threads() {
                 barrier.wait();
 
                 let total = engine
-                    .count("gem", None, None)
+                    .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
                     .expect("count should succeed concurrently");
                 assert_eq!(total, 12);
 
-                let filtered = engine
-                    .find_by_filter("gem", json!({ "element": "Fire" }), None)
-                    .expect("filter should succeed concurrently");
+                let filtered = read_records(
+                    &engine,
+                    OperationFilter::query_in("gem", json!({ "element": "Fire" })),
+                )
+                .expect("filter should succeed concurrently");
                 assert_eq!(filtered.len(), 6);
 
-                let found = engine
-                    .find_by_id(&format!("@gem:lnk_us_040_reader_{}", thread_index % 4))
-                    .expect("find_by_id should succeed concurrently")
-                    .expect("gem should exist");
+                let found = read_record(
+                    &engine,
+                    OperationFilter::pointer(format!(
+                        "@gem:lnk_us_040_reader_{}",
+                        thread_index % 4
+                    )),
+                )
+                .expect("find_by_id should succeed concurrently")
+                .expect("gem should exist");
                 assert!(found["element"] == "Fire" || found["element"] == "Water");
             })
         })
@@ -3685,12 +4018,13 @@ fn us_040_shared_engine_serializes_competing_writer_threads() {
     for i in 0..10 {
         engine
             .upsert(
-                "gem",
                 json!({
                     "_id": format!("@gem:lnk_us_040_delete_{i}"),
                     "element": "Old",
                     "potency": i
                 }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
             )
             .expect("seed gem should upsert");
     }
@@ -3706,18 +4040,24 @@ fn us_040_shared_engine_serializes_competing_writer_threads() {
 
                 if thread_index < 10 {
                     let deleted = engine
-                        .delete_by_id(&format!("@gem:lnk_us_040_delete_{thread_index}"))
+                        .delete(
+                            OperationFilter::pointer(format!(
+                                "@gem:lnk_us_040_delete_{thread_index}"
+                            )),
+                            None::<OperationOptions>,
+                        )
                         .expect("delete should succeed concurrently");
-                    assert!(deleted);
+                    assert_eq!(deleted, 1);
                 } else {
                     engine
                         .upsert(
-                            "gem",
                             json!({
                                 "_id": format!("@gem:lnk_us_040_insert_{thread_index}"),
                                 "element": "New",
                                 "potency": thread_index
                             }),
+                            OperationFilter::drawer("gem"),
+                            None::<OperationOptions>,
                         )
                         .expect("upsert should succeed concurrently");
                 }
@@ -3730,13 +4070,15 @@ fn us_040_shared_engine_serializes_competing_writer_threads() {
     }
 
     let total = engine
-        .count("gem", None, None)
+        .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
         .expect("final count should succeed");
     assert_eq!(total, 10);
 
-    let new_records = engine
-        .find_by_filter("gem", json!({ "element": "New" }), None)
-        .expect("new records should query");
+    let new_records = read_records(
+        &engine,
+        OperationFilter::query_in("gem", json!({ "element": "New" })),
+    )
+    .expect("new records should query");
     assert_eq!(new_records.len(), 10);
 }
 
@@ -3748,12 +4090,13 @@ fn us_041_mutations_append_durable_wal_begin_and_commit_records() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_us_041_logged",
                 "element": "Logged",
                 "potency": 41
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("logged upsert should succeed");
 
@@ -3777,10 +4120,14 @@ fn us_074_transaction_coordinator_commits_wal_and_hardens_drawer_state() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     let pointer = engine
-        .upsert("gem", json!({"_id": "coordinated_fire", "element": "Fire"}))
+        .upsert(
+            json!({"_id": "coordinated_fire", "element": "Fire"}),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
+        )
         .expect("coordinated upsert should succeed");
 
-    assert_eq!(pointer, "@gem:coordinated_fire");
+    assert_eq!(pointer, vec!["@gem:coordinated_fire".to_string()]);
     let records = wal_records(&database);
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["event"], "begin");
@@ -3826,9 +4173,11 @@ fn us_103_open_ignores_uncommitted_upsert_transaction_from_wal() {
 
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should recover");
-    let found = engine
-        .find_by_id("@gem:lnk_us_041_replayed")
-        .expect("lookup should succeed");
+    let found = read_record(
+        &engine,
+        OperationFilter::pointer("@gem:lnk_us_041_replayed"),
+    )
+    .expect("lookup should succeed");
 
     assert!(found.is_none());
 
@@ -3865,10 +4214,12 @@ fn us_103_open_replays_committed_upsert_transaction_from_wal() {
 
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should recover");
-    let found = engine
-        .find_by_id("@gem:lnk_us_103_replayed")
-        .expect("lookup should succeed")
-        .expect("replayed record should exist");
+    let found = read_record(
+        &engine,
+        OperationFilter::pointer("@gem:lnk_us_103_replayed"),
+    )
+    .expect("lookup should succeed")
+    .expect("replayed record should exist");
 
     assert_eq!(found["element"], "Replay");
     assert_eq!(found["potency"], 4100);
@@ -3908,21 +4259,23 @@ fn us_103_open_replays_committed_cascading_delete_transaction_from_wal() {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should open");
         engine
             .upsert(
-                "character",
                 json!({
                     "_id": "@character:lnk_us_041_cascade_parent",
                     "name": "Wal Cascade Parent"
                 }),
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>,
             )
             .expect("character should upsert");
         engine
             .upsert(
-                "weapon",
                 json!({
                     "_id": "@weapon:lnk_us_041_cascade_child",
                     "name": "Wal Cascade Child",
                     "character": { "_id": "@character:lnk_us_041_cascade_parent" }
                 }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
             )
             .expect("weapon should upsert");
     }
@@ -3951,13 +4304,16 @@ fn us_103_open_replays_committed_cascading_delete_transaction_from_wal() {
 
     assert_eq!(
         recovered_engine
-            .count("character", None, None)
+            .count(
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>
+            )
             .expect("character count should succeed"),
         0
     );
     assert_eq!(
         recovered_engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("weapon count should succeed"),
         0
     );
@@ -3973,7 +4329,11 @@ fn us_041_failed_mutations_append_abort_and_do_not_replay_on_open() {
     {
         let engine = WardrobeEngine::open(&database_directory).expect("engine should open");
         let error = engine
-            .upsert("gem", json!(["not", "an", "object"]))
+            .upsert(
+                json!(["not", "an", "object"]),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
+            )
             .expect_err("invalid mutation should fail");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
@@ -3988,7 +4348,7 @@ fn us_041_failed_mutations_append_abort_and_do_not_replay_on_open() {
         WardrobeEngine::open(&database_directory).expect("aborted wal should not replay");
     assert_eq!(
         recovered_engine
-            .count("gem", None, None)
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("count should succeed"),
         0
     );
@@ -4025,12 +4385,13 @@ fn us_035_engine_rejects_schema_violations_as_invalid_data() {
 
     let error = engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_schema_invalid",
                 "name": "Schema Blade",
                 "damage": "heavy"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect_err("schema violation should fail");
 
@@ -4042,24 +4403,25 @@ fn us_035_engine_rejects_schema_violations_as_invalid_data() {
     );
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("count should succeed"),
         0
     );
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_schema_valid",
                 "name": "Schema Blade",
                 "damage": 42
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("valid schema record should write");
     assert_eq!(
         engine
-            .count("weapon", None, None)
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
             .expect("count should succeed"),
         1
     );
@@ -4073,7 +4435,6 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_vacuum_keep",
                 "name": "Very Long Vacuum Blade Name",
@@ -4084,29 +4445,36 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
                     "potency": 9001
                 }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_vacuum_delete",
                 "name": "Deleted Blade"
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("second weapon should upsert");
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_vacuum_keep",
                 "name": "Compact Blade",
                 "gem": { "_id": "@gem:lnk_vacuum_gem" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should update");
     engine
-        .delete_by_id("@weapon:lnk_vacuum_delete")
+        .delete(
+            OperationFilter::pointer("@weapon:lnk_vacuum_delete"),
+            None::<OperationOptions>,
+        )
         .expect("weapon should delete");
 
     let data_path = database.path.join("weapon.drw");
@@ -4116,7 +4484,7 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
     assert!(drawer_tombstone_count(&data_path) >= 1);
 
     let report = engine
-        .vacuum_drawer("weapon")
+        .compact(CompactRequest::drawer("weapon"))
         .expect("vacuum should succeed");
 
     let after_len = fs::metadata(&data_path)
@@ -4130,8 +4498,7 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
     assert!(after_len < before_len);
     assert_eq!(drawer_tombstone_count(&data_path), 0);
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapons should read after vacuum");
     assert_eq!(weapons.len(), 1);
     assert_eq!(weapons[0]["name"], "Compact Blade");
@@ -4139,10 +4506,12 @@ fn us_042_engine_vacuum_drawer_compacts_storage_and_preserves_hydration() {
 
     let restarted_engine =
         WardrobeEngine::open(&database_directory).expect("engine should reopen after vacuum");
-    let weapon = restarted_engine
-        .find_by_id("@weapon:lnk_vacuum_keep")
-        .expect("lookup should succeed")
-        .expect("weapon should exist");
+    let weapon = read_record(
+        &restarted_engine,
+        OperationFilter::pointer("@weapon:lnk_vacuum_keep"),
+    )
+    .expect("lookup should succeed")
+    .expect("weapon should exist");
     assert_eq!(weapon["gem"]["potency"], 9001);
 }
 
@@ -4236,8 +4605,7 @@ fn us_072_find_all_rejects_legacy_newline_record_layout() {
     );
 
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
-    let error = engine
-        .find_all("gem")
+    let error = read_records(&engine, OperationFilter::drawer("gem"))
         .expect_err("legacy newline records should be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
@@ -4263,7 +4631,10 @@ fn us_072_batch_migration_rejects_legacy_newline_storage_partition() {
 
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     let error = engine
-        .migrate_drawer("weapon")
+        .compact(CompactRequest::drawer_with_mode(
+            "weapon",
+            CompactMode::Migrate,
+        ))
         .expect_err("legacy newline records should be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
@@ -4282,60 +4653,52 @@ fn us_043_engine_reloads_evicted_drawers_from_disk_with_cache_limit() {
 
     engine
         .upsert(
-            "gem",
             json!({
                 "_id": "@gem:lnk_lru_gem",
                 "element": "Light",
                 "potency": 9001
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("gem should upsert");
     assert_eq!(
-        engine
-            .cached_drawer_count()
-            .expect("cache count should read"),
+        status_cached_drawer_count(&engine).expect("cache count should read"),
         1
     );
 
     engine
         .upsert(
-            "weapon",
             json!({
                 "_id": "@weapon:lnk_lru_weapon",
                 "name": "Cache Blade",
                 "gem": { "_id": "@gem:lnk_lru_gem" }
             }),
+            OperationFilter::drawer("weapon"),
+            None::<OperationOptions>,
         )
         .expect("weapon should upsert");
     assert_eq!(
-        engine
-            .cached_drawer_count()
-            .expect("cache count should read"),
+        status_cached_drawer_count(&engine).expect("cache count should read"),
         1
     );
 
-    let gem = engine
-        .find_by_id("@gem:lnk_lru_gem")
+    let gem = read_record(&engine, OperationFilter::pointer("@gem:lnk_lru_gem"))
         .expect("evicted gem drawer should reload")
         .expect("gem should exist");
     assert_eq!(gem["element"], "Light");
     assert_eq!(
-        engine
-            .cached_drawer_count()
-            .expect("cache count should read"),
+        status_cached_drawer_count(&engine).expect("cache count should read"),
         1
     );
 
-    let weapons = engine
-        .find_all("weapon")
+    let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("evicted weapon drawer should reload");
     assert_eq!(weapons.len(), 1);
     assert_eq!(weapons[0]["name"], "Cache Blade");
     assert_eq!(weapons[0]["gem"]["potency"], 9001);
     assert_eq!(
-        engine
-            .cached_drawer_count()
-            .expect("cache count should read"),
+        status_cached_drawer_count(&engine).expect("cache count should read"),
         1
     );
 }
@@ -4358,7 +4721,11 @@ fn engine_appends_to_wal_on_write() -> std::io::Result<()> {
     fs::create_dir_all(&database.path).expect("temp dir should create");
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine opens");
-    let _ = engine.upsert("character", json!({"name":"hero"}))?;
+    let _ = engine.upsert(
+        json!({"name":"hero"}),
+        OperationFilter::drawer("character"),
+        None::<OperationOptions>,
+    )?;
     let wal_path = database.path.join(WAL_FILE_NAME);
     assert!(wal_path.exists());
     let metadata = fs::metadata(&wal_path)?;
@@ -4374,8 +4741,12 @@ fn us_060_ops_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Resu
         WardrobeEngine::open_with_wal_checkpoint_thresholds(&database_directory, 1_048_576, 2)
             .expect("engine opens with WAL thresholds");
 
-    let pointer = engine.upsert("gem", json!({"_id": "fire", "element": "Fire"}))?;
-    assert_eq!(pointer, "@gem:fire");
+    let pointer = engine.upsert(
+        json!({"_id": "fire", "element": "Fire"}),
+        OperationFilter::drawer("gem"),
+        None::<OperationOptions>,
+    )?;
+    assert_eq!(pointer, vec!["@gem:fire".to_string()]);
 
     let wal_path = database.path.join(WAL_FILE_NAME);
     let wal_meta_path = database.path.join(".wal.meta");
@@ -4385,8 +4756,7 @@ fn us_060_ops_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Resu
 
     drop(engine);
     let reopened = WardrobeEngine::open(&database_directory).expect("engine reopens");
-    let record = reopened
-        .find_by_id("@gem:fire")
+    let record = read_record(&reopened, OperationFilter::pointer("@gem:fire"))
         .expect("record lookup succeeds")
         .expect("record should survive checkpoint");
     assert_eq!(record["element"], "Fire");
@@ -4400,7 +4770,11 @@ fn us_060_byte_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Res
     let engine = WardrobeEngine::open_with_wal_checkpoint_thresholds(&database_directory, 1, 1000)
         .expect("engine opens with WAL thresholds");
 
-    engine.upsert("gem", json!({"_id": "water", "element": "Water"}))?;
+    engine.upsert(
+        json!({"_id": "water", "element": "Water"}),
+        OperationFilter::drawer("gem"),
+        None::<OperationOptions>,
+    )?;
 
     let wal_path = database.path.join(WAL_FILE_NAME);
     let wal_meta_path = database.path.join(".wal.meta");
@@ -4410,8 +4784,7 @@ fn us_060_byte_threshold_triggers_checkpoint_and_truncates_wal() -> std::io::Res
 
     drop(engine);
     let reopened = WardrobeEngine::open(&database_directory).expect("engine reopens");
-    let record = reopened
-        .find_by_id("@gem:water")
+    let record = read_record(&reopened, OperationFilter::pointer("@gem:water"))
         .expect("record lookup succeeds")
         .expect("record should survive checkpoint");
     assert_eq!(record["element"], "Water");
@@ -4447,26 +4820,32 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
     let storage_pool = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
 
-    let database_inventory = engine
-        .create_database("managed_db")
-        .expect("database should be created");
+    let database_inventory = create_inventory(
+        engine
+            .create(CreateRequest::database("managed_db"))
+            .expect("database should be created"),
+    );
     assert_eq!(database_inventory.name, "managed_db");
     assert!(database.path.join("managed_db").exists());
 
     let missing_parent = engine
-        .create_schema("missing_db", "core")
+        .create(CreateRequest::schema("missing_db", "core"))
         .expect_err("schema creation should require a registered database");
     assert_eq!(missing_parent.kind(), std::io::ErrorKind::NotFound);
 
-    let schema_inventory = engine
-        .create_schema("managed_db", "core")
-        .expect("schema should be created");
+    let schema_inventory = create_inventory(
+        engine
+            .create(CreateRequest::schema("managed_db", "core"))
+            .expect("schema should be created"),
+    );
     assert_eq!(schema_inventory.name, "core");
     assert!(database.path.join("managed_db").join("core").exists());
 
-    let drawer_inventory = engine
-        .create_drawer("managed_db", "core", "gem")
-        .expect("drawer should be created");
+    let drawer_inventory = create_inventory(
+        engine
+            .create(CreateRequest::drawer("managed_db", "core", "gem"))
+            .expect("drawer should be created"),
+    );
     assert_eq!(drawer_inventory.name, "gem");
     assert!(
         database
@@ -4490,9 +4869,7 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
     ));
 
     let reopened = WardrobeEngine::open(&storage_pool).expect("engine should reopen");
-    let databases = reopened
-        .show_databases()
-        .expect("catalog databases should load");
+    let databases = status_databases(&reopened).expect("catalog databases should load");
     assert_eq!(
         databases
             .iter()
@@ -4501,14 +4878,11 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
         vec!["managed_db"]
     );
     assert_eq!(
-        reopened
-            .show_schemas("managed_db")
-            .expect("catalog schemas should load"),
+        status_schemas(&reopened, "managed_db").expect("catalog schemas should load"),
         vec!["core".to_string()]
     );
     assert_eq!(
-        reopened
-            .show_drawers("managed_db", "core")
+        status_drawers(&reopened, "managed_db", "core")
             .expect("catalog drawers should load")
             .iter()
             .map(|inventory| inventory.name.as_str())
@@ -4547,7 +4921,7 @@ fn us_065_logical_tenant_routes_to_catalog_defined_location() {
 
     let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
     assert_eq!(
-        engine.show_tenants().expect("tenants should load"),
+        status_tenants(&engine).expect("tenants should load"),
         vec!["tenant_a".to_string()]
     );
 
@@ -4617,7 +4991,7 @@ fn us_066_binary_wal_logs_mutating_commands() {
     let storage_pool = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&storage_pool).expect("engine should initialize");
 
-    let empty_verification = engine.verify_wal(None).expect("empty wal should verify");
+    let empty_verification = status_wal(&engine, None).expect("empty wal should verify");
     assert_eq!(empty_verification.entry_count, 0);
     assert_eq!(empty_verification.last_sequence, None);
 
@@ -4635,7 +5009,7 @@ fn us_066_binary_wal_logs_mutating_commands() {
     let root_wal = database.path.join(WAL_FILE_NAME);
     assert!(root_wal.exists());
 
-    let verification = engine.verify_wal(None).expect("wal should verify");
+    let verification = status_wal(&engine, None).expect("wal should verify");
     assert_eq!(verification.entry_count, 3);
     assert_eq!(verification.last_sequence, Some(3));
 
@@ -4667,9 +5041,8 @@ fn us_066_binary_wal_logs_mutating_commands() {
         .join(WAL_FILE_NAME);
     assert!(routed_wal.exists());
 
-    let routed_verification = engine
-        .verify_wal(Some("tenant_wal/production/core"))
-        .expect("routed wal should verify");
+    let routed_verification =
+        status_wal(&engine, Some("tenant_wal/production/core")).expect("routed wal should verify");
     assert_eq!(routed_verification.entry_count, 3);
     assert_eq!(routed_verification.last_sequence, Some(3));
 }
@@ -4700,7 +5073,7 @@ fn us_101_bulk_upsert_returns_ordered_pointers() {
     );
     assert_eq!(
         engine
-            .count("gem", None, None)
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("count should succeed"),
         2
     );
@@ -4735,29 +5108,27 @@ fn us_101_bulk_upsert_normalizes_plain_relationship_ids() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    engine
-        .bulk_upsert(
-            "entity",
-            vec![
-                json!({"_id": "entity_00000000", "display_name": "Author"}),
-                json!({"_id": "entity_00000001", "display_name": "Editor"}),
-            ],
-            true,
-        )
-        .expect("entity batch should upsert");
+    upsert_batch(
+        &engine,
+        "entity",
+        vec![
+            json!({"_id": "entity_00000000", "display_name": "Author"}),
+            json!({"_id": "entity_00000001", "display_name": "Editor"}),
+        ],
+    )
+    .expect("entity batch should upsert");
 
-    let pointers = engine
-        .bulk_upsert(
-            "book",
-            vec![json!({
-                "_id": "book_00000000",
-                "title": "Bulk Relationship Book",
-                "author_id": "entity_00000000",
-                "editor_id": "entity_00000001"
-            })],
-            true,
-        )
-        .expect("book batch should normalize relationship ids");
+    let pointers = upsert_batch(
+        &engine,
+        "book",
+        vec![json!({
+            "_id": "book_00000000",
+            "title": "Bulk Relationship Book",
+            "author_id": "entity_00000000",
+            "editor_id": "entity_00000001"
+        })],
+    )
+    .expect("book batch should normalize relationship ids");
 
     assert_eq!(pointers, vec!["@book:book_00000000".to_string()]);
     let book_records = drawer_records_from_disk(&database.path.join("book.drw"));
@@ -4794,21 +5165,20 @@ fn us_101_atomic_bulk_upsert_rejects_invalid_batch_without_writes() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    let error = engine
-        .bulk_upsert(
-            "gem",
-            vec![
-                json!({"_id": "bulk_fire", "element": "Fire"}),
-                json!({"_id": "bulk_broken"}),
-            ],
-            true,
-        )
-        .expect_err("invalid atomic batch should fail");
+    let error = upsert_batch(
+        &engine,
+        "gem",
+        vec![
+            json!({"_id": "bulk_fire", "element": "Fire"}),
+            json!({"_id": "bulk_broken"}),
+        ],
+    )
+    .expect_err("invalid atomic batch should fail");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(
         engine
-            .count("gem", None, None)
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("count should succeed"),
         0
     );
@@ -4817,7 +5187,7 @@ fn us_101_atomic_bulk_upsert_rejects_invalid_batch_without_writes() {
     let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
     assert_eq!(
         reopened
-            .count("gem", None, None)
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("count should succeed"),
         0
     );
@@ -4829,16 +5199,15 @@ fn us_102_engine_transactions_flush_dirty_metadata_on_commit() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
-    engine
-        .bulk_upsert(
-            "gem",
-            vec![
-                json!({"_id": "fire", "element": "Fire"}),
-                json!({"_id": "water", "element": "Water"}),
-            ],
-            true,
-        )
-        .expect("bulk upsert should commit");
+    upsert_batch(
+        &engine,
+        "gem",
+        vec![
+            json!({"_id": "fire", "element": "Fire"}),
+            json!({"_id": "water", "element": "Water"}),
+        ],
+    )
+    .expect("bulk upsert should commit");
 
     let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
         .expect("metadata should read after bulk upsert");
@@ -4847,7 +5216,11 @@ fn us_102_engine_transactions_flush_dirty_metadata_on_commit() {
     assert_eq!(metadata["record_count"], 2);
 
     engine
-        .upsert("gem", json!({"_id": "fire", "element": "Flame"}))
+        .upsert(
+            json!({"_id": "fire", "element": "Flame"}),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
+        )
         .expect("update should commit");
     let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
         .expect("metadata should read after update");
@@ -4855,7 +5228,15 @@ fn us_102_engine_transactions_flush_dirty_metadata_on_commit() {
         serde_json::from_str(&metadata_contents).expect("metadata should parse after update");
     assert_eq!(metadata["record_count"], 2);
 
-    assert!(engine.delete("@gem:water").expect("delete should commit"));
+    assert_eq!(
+        engine
+            .delete(
+                OperationFilter::pointer("@gem:water"),
+                None::<OperationOptions>
+            )
+            .expect("delete should commit"),
+        1
+    );
     let metadata_contents = fs::read_to_string(database.path.join("gem_meta.drw"))
         .expect("metadata should read after delete");
     let metadata: serde_json::Value =

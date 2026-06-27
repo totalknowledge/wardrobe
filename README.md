@@ -42,8 +42,9 @@ They map directly:
 `wardrobe-core` currently re-exports these public items:
 
 - Core entry points: `WardrobeEngine`, `WardrobeClient`
-- Command and routing types: `Command`, `CommandResult`, `StorageCoordinate`, `StorageScope`, `StorageLocator`, `StorageInventory`
-- Query types: `QueryModifiers`, `OrderDirection`
+- Routing types: `StorageCoordinate`, `StorageScope`, `StorageLocator`, `StorageInventory`
+- Query and request types: `ReadRequest`, `ReadResult`, `DeleteRequest`, `QueryModifiers`, `OrderDirection`
+- Lifecycle request types: `CreateRequest`, `CreateResult`, `AlterRequest`, `DropRequest`, `CompactRequest`, `CompactMode`, `InspectRequest`, `StatusRequest`, `StatusResult`, `PermissionRequest`
 - Connection and protocol types: `ConnectionTarget`, `DriverKind`, `DEFAULT_NETWORK_PORT`, `ProtocolFrame`, `ProtocolOpcode`, `PROTOCOL_MAGIC`
 - Inspection, verification, and recovery types: `DrawerInspectionMetrics`, `CheckReport`, `CheckEntry`, `StorageDiagnosis`, `VacuumReport`, `WalVerification`, `BackupArchive`, `BackupArchiveFile`, `RestoreReport`
 - Lower-level storage types: `Database`, `Drawer`, `DatabaseReader`, `DatabaseWriter`, `Recycler`, `StorageFormat`, `BsonBinaryFormat`
@@ -54,15 +55,14 @@ The two main application entry points are:
 - `WardrobeEngine` for direct embedded access
 - `WardrobeClient` for path, TCP, and Unix socket targets with the same command surface
 
-`WardrobeClient` currently exposes:
+`WardrobeClient` and `WardrobeEngine` expose the canonical Wardrobe verbs:
 
-- Record operations: `upsert`, `find_all`, `find_by_filter`, `count`, `find_by_id`, `delete`, `delete_by_id`, `delete_by_filter`
-- Maintenance and inspection: `vacuum_drawer`, `migrate_drawer`, `inspect_drawer`, `check_path`, `diagnose_storage`, `list_drawer_names`, `verify_wal`
-- Lifecycle and recovery: `create_database`, `create_schema`, `create_drawer`, `register_tenant_route`, `backup_archive`, `restore_archive`
-- Administrative management: `manage_schema`, `manage_user`
-- Discovery: `show_tenants`, `show_databases`, `show_schemas`, `show_drawers`, plus `list_*` aliases
+- Record operations: `upsert`, `read`, `count`, `delete`
+- Maintenance and inspection: `compact`, `inspect`, `status`
+- Lifecycle and recovery: `create`, `alter`, `drop`, `backup`, `restore`
+- Administrative management: `grant`, `revoke`, plus user creation/removal through `create` and `drop`
 
-`WardrobeEngine` exposes the same data, inspection, lifecycle, and discovery methods locally, and adds direct command execution with `execute`, `execute_in_scope`, `execute_for_tenant`, `execute_command`, and `cached_drawer_count`.
+`WardrobeEngine` also exposes low-level protocol execution with `execute`, `execute_in_scope`, `execute_for_tenant`, and `execute_command` for server integration.
 
 ## Usage
 
@@ -70,12 +70,12 @@ The two main application entry points are:
 
 ```rust
 use serde_json::json;
-use wardrobe_core::WardrobeEngine;
+use wardrobe_core::{ReadRequest, ReadResult, WardrobeEngine};
 
 fn main() -> std::io::Result<()> {
     let engine = WardrobeEngine::open("./data")?;
 
-    let pointer = engine.upsert(
+    let pointers = engine.upsert(
         "weapon",
         json!({
             "_id": "field-service-kit",
@@ -85,7 +85,10 @@ fn main() -> std::io::Result<()> {
         }),
     )?;
 
-    let record = engine.find_by_id(&pointer)?;
+    let record = match engine.read(ReadRequest::id(&pointers[0]))? {
+        ReadResult::Record(record) => record,
+        _ => None,
+    };
     println!("{record:?}");
 
     Ok(())
@@ -124,10 +127,10 @@ Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{OrderDirection, QueryModifiers, WardrobeEngine};
+use wardrobe_core::{OrderDirection, QueryModifiers, ReadRequest, ReadResult, WardrobeEngine};
 
 fn query(engine: &WardrobeEngine) -> std::io::Result<()> {
-    let records = engine.find_by_filter(
+    let records = match engine.read(ReadRequest::filter_with_modifiers(
         "device",
         json!({ "name": "sensor%" }),
         Some(QueryModifiers {
@@ -136,7 +139,10 @@ fn query(engine: &WardrobeEngine) -> std::io::Result<()> {
             offset: Some(0),
             limit: Some(25),
         }),
-    )?;
+    ))? {
+        ReadResult::Records(records) => records,
+        _ => Vec::new(),
+    };
 
     let total = engine.count("device", Some(json!({ "name": "sensor%" })), None)?;
 
@@ -235,7 +241,7 @@ Behavior notes:
 - `show wardrobes` and `create wardrobe` map to the Rust `database` lifecycle APIs
 - `show bays` and `create bay` map to the Rust `schema` lifecycle APIs
 - `add user`, `grant permission`, and `revoke permission` require a remote server-backed target; `WardrobeClient` rejects them for embedded connections
-- `clean` can target a wardrobe, a bay, or a single drawer and fans out to the relevant `vacuum_drawer` calls
+- `clean` can target a wardrobe, a bay, or a single drawer and fans out to the relevant `compact` calls
 - `backup` and `restore` operate at wardrobe, bay, or drawer scope
 
 Compatibility aliases remain available for older workflows, including `list`, `ls`, `find`, `get`, `query`, `insert`, `drawers`, `diagnose`, `show-databases`, `show-schemas`, `show-drawers`, `delete-by-id`, `define`, `manage`, `auth`, and `rbac`.
@@ -261,11 +267,11 @@ Compatibility aliases remain available for older workflows, including `list`, `l
 Run the basic sample crate to execute an end-to-end integration flow that:
 
 - Opens a local embedded engine against `./wardrobe`
-- Uses `show_drawers("main", "public")` for drawer metadata enumeration
+- Uses `status(StatusRequest::drawers("main", "public"))` for drawer metadata enumeration
 - Upserts a `public.user` parent with multiple `public.gem` children and a `public.weapon` child
 - Exercises relation links across drawers
-- Filters by array tags and owner via `find_by_filter`
-- Cleans up by querying related gems and deleting each via `delete_by_id`
+- Filters by array tags and owner via `read(ReadRequest::filter(...))`
+- Cleans up by querying related gems and deleting each via `delete`
 
 ```text
 cargo run -p basic-usage

@@ -3,7 +3,20 @@ mod common;
 use common::TempDatabase;
 use serde_json::json;
 use std::collections::HashMap;
-use wardrobe_core::Database;
+use wardrobe_core::{Database, OperationFilter, OperationOptions, ReadResult};
+
+fn read_record(
+    engine: &wardrobe_core::WardrobeEngine,
+    filter: OperationFilter,
+) -> Option<serde_json::Value> {
+    match engine
+        .read(filter, None::<OperationOptions>)
+        .expect("read should succeed")
+    {
+        ReadResult::Record(record) => record,
+        other => panic!("expected record, got {other:?}"),
+    }
+}
 
 #[test]
 fn us_001_database_initialization_creates_storage_directory() {
@@ -60,21 +73,20 @@ fn us_012_indexes_rebuild_from_disk_after_restart() {
             .expect("engine should initialize");
         engine
             .upsert(
-                "gem",
                 json!({
                     "_id": record_id,
                     "element": "Water",
                     "potency": 7300
                 }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
             )
             .expect("record should upsert");
     }
 
     let restarted_engine = wardrobe_core::WardrobeEngine::open(&database_directory)
         .expect("engine should reinitialize");
-    let found = restarted_engine
-        .find_by_id(record_id)
-        .expect("lookup should use rebuilt index")
+    let found = read_record(&restarted_engine, OperationFilter::pointer(record_id))
         .expect("record should be found after restart");
 
     assert_eq!(found["element"].as_str(), Some("Water"));

@@ -6,8 +6,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
-    Command, CommandResult, DurabilityPolicy, ProtocolFrame, ProtocolOpcode, StorageCoordinate,
-    WardrobeClient, WardrobeEngine,
+    Command, CommandResult, CompactRequest, CreateRequest, CreateResult, DurabilityPolicy,
+    InspectResult, OperationFilter, OperationOptions, PermissionRequest, ProtocolFrame,
+    ProtocolOpcode, ReadResult, StatusRequest, StatusResult, StorageCoordinate, WardrobeClient,
+    WardrobeEngine,
 };
 use wardrobe_server::{ServerConfig, serve_tcp_listener};
 
@@ -41,6 +43,63 @@ fn read_result(stream: &mut TcpStream) -> CommandResult {
     let response = ProtocolFrame::read_from_stream(stream).expect("result frame should read");
     assert_eq!(response.opcode, ProtocolOpcode::Result);
     serde_json::from_slice(&response.payload).expect("result should deserialize")
+}
+
+fn read_records(client: &WardrobeClient, filter: OperationFilter) -> Vec<serde_json::Value> {
+    match client
+        .read(filter, None::<OperationOptions>)
+        .expect("read should route")
+    {
+        ReadResult::Records(records) => records,
+        other => panic!("expected records, got {other:?}"),
+    }
+}
+
+fn engine_read_records(engine: &WardrobeEngine, filter: OperationFilter) -> Vec<serde_json::Value> {
+    match engine
+        .read(filter, None::<OperationOptions>)
+        .expect("read should succeed")
+    {
+        ReadResult::Records(records) => records,
+        other => panic!("expected records, got {other:?}"),
+    }
+}
+
+fn status_storage(client: &WardrobeClient) -> wardrobe_core::StorageDiagnosis {
+    match client
+        .status(StatusRequest::storage())
+        .expect("status storage")
+    {
+        StatusResult::Storage(diagnosis) => diagnosis,
+        other => panic!("expected storage status, got {other:?}"),
+    }
+}
+
+fn status_check(client: &WardrobeClient, path: &str) -> wardrobe_core::CheckReport {
+    match client
+        .status(StatusRequest::path(path))
+        .expect("status path")
+    {
+        StatusResult::Check(report) => report,
+        other => panic!("expected check status, got {other:?}"),
+    }
+}
+
+fn status_drawer_names(client: &WardrobeClient) -> Vec<String> {
+    match client
+        .status(StatusRequest::drawer_names())
+        .expect("status drawer names")
+    {
+        StatusResult::DrawerNames(drawers) => drawers,
+        other => panic!("expected drawer names, got {other:?}"),
+    }
+}
+
+fn admin_result(result: CreateResult) -> serde_json::Value {
+    match result {
+        CreateResult::Admin(payload) => payload,
+        other => panic!("expected admin result, got {other:?}"),
+    }
 }
 
 #[test]
@@ -92,18 +151,22 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
         WardrobeClient::open(format!("wardrobe://{address}")).expect("client should connect");
     let pointer = client
         .upsert(
-            "gem",
             json!({
                 "_id": "server_fire",
                 "element": "Fire"
             }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("upsert should route through server");
-    assert_eq!(pointer, "@gem:server_fire");
+    assert_eq!(pointer, vec!["@gem:server_fire".to_string()]);
 
     assert_eq!(
         client
-            .count("gem", Some(json!({"element": "Fire"})), None)
+            .count(
+                OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                None::<OperationOptions>
+            )
             .expect("count should route through server"),
         1
     );
@@ -114,7 +177,7 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
         .expect("server thread should finish")
         .expect("server should finish cleanly");
 
-    let records = engine.find_all("gem").expect("records should read");
+    let records = engine_read_records(&engine, OperationFilter::drawer("gem"));
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["element"], "Fire");
     let _ = std::fs::remove_dir_all(storage_directory);
@@ -171,7 +234,12 @@ fn tcp_connection_pool_limit_does_not_terminate_listener() {
         .expect("server thread should finish")
         .expect("server should finish cleanly");
 
-    assert_eq!(engine.count("gem", None, None).expect("gem count"), 2);
+    assert_eq!(
+        engine
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+            .expect("gem count"),
+        2
+    );
     let _ = std::fs::remove_dir_all(storage_directory);
 }
 
@@ -191,14 +259,22 @@ fn tcp_daemon_handles_multiple_clients_concurrently() {
         let client =
             WardrobeClient::open(format!("wardrobe://{address}")).expect("client should connect");
         client
-            .upsert("gem", json!({ "_id": "client_one", "element": "Air" }))
+            .upsert(
+                json!({ "_id": "client_one", "element": "Air" }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
+            )
             .expect("first client should upsert");
     });
     let second = thread::spawn(move || {
         let client =
             WardrobeClient::open(format!("wardrobe://{address}")).expect("client should connect");
         client
-            .upsert("weapon", json!({ "_id": "client_two", "name": "Blade" }))
+            .upsert(
+                json!({ "_id": "client_two", "name": "Blade" }),
+                OperationFilter::drawer("weapon"),
+                None::<OperationOptions>,
+            )
             .expect("second client should upsert");
     });
 
@@ -209,8 +285,18 @@ fn tcp_daemon_handles_multiple_clients_concurrently() {
         .expect("server thread should finish")
         .expect("server should finish cleanly");
 
-    assert_eq!(engine.count("gem", None, None).expect("gem count"), 1);
-    assert_eq!(engine.count("weapon", None, None).expect("weapon count"), 1);
+    assert_eq!(
+        engine
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+            .expect("gem count"),
+        1
+    );
+    assert_eq!(
+        engine
+            .count(OperationFilter::drawer("weapon"), None::<OperationOptions>)
+            .expect("weapon count"),
+        1
+    );
     let _ = std::fs::remove_dir_all(storage_directory);
 }
 
@@ -290,47 +376,52 @@ fn tcp_daemon_routes_full_cli_command_matrix() {
     let client =
         WardrobeClient::open(format!("wardrobe://{address}")).expect("client should connect");
     client
-        .create_database("armory")
+        .create(CreateRequest::database("armory"))
         .expect("database should be created remotely");
     client
-        .create_schema("armory", "public")
+        .create(CreateRequest::schema("armory", "public"))
         .expect("schema should be created remotely");
     client
-        .create_drawer("armory", "public", "gem")
+        .create(CreateRequest::drawer("armory", "public", "gem"))
         .expect("drawer should be created remotely");
 
     client
         .upsert(
-            "armory/public/gem",
             json!({
                 "_id": "server_matrix",
                 "element": "Light"
             }),
+            OperationFilter::drawer("armory/public/gem"),
+            None::<OperationOptions>,
         )
         .expect("upsert should route remotely");
     assert_eq!(
         client
-            .count("armory/public/gem", Some(json!({"element": "Light"})), None)
+            .count(
+                OperationFilter::query_in("armory/public/gem", json!({"element": "Light"})),
+                None::<OperationOptions>
+            )
             .expect("count should route remotely"),
         1
     );
     assert_eq!(
-        client
-            .find_all("armory/public/gem")
-            .expect("records should route remotely")
-            .len(),
+        read_records(&client, OperationFilter::drawer("armory/public/gem")).len(),
         1
     );
 
     let inspection = client
-        .inspect_drawer("armory/public/gem")
+        .inspect(
+            OperationFilter::drawer("armory/public/gem"),
+            None::<OperationOptions>,
+        )
         .expect("inspect should route remotely");
+    let InspectResult::Drawer(inspection) = inspection else {
+        panic!("expected drawer inspection result");
+    };
     assert_eq!(inspection.path, "armory/public/gem");
     assert_eq!(inspection.record_count, 1);
 
-    let check = client
-        .check_path("armory/public/gem")
-        .expect("check should route remotely");
+    let check = status_check(&client, "armory/public/gem");
     assert_eq!(check.kind, "drawer");
     assert!(
         check
@@ -340,55 +431,47 @@ fn tcp_daemon_routes_full_cli_command_matrix() {
     );
 
     let vacuum = client
-        .vacuum_drawer("armory/public/gem")
+        .compact(CompactRequest::drawer("armory/public/gem"))
         .expect("clean/vacuum should route remotely");
     assert!(vacuum.data_bytes_after <= vacuum.data_bytes_before);
 
     let archive = client
-        .backup_archive("armory/public/gem")
+        .backup("armory/public/gem")
         .expect("backup should route remotely");
     assert_eq!(archive.scope, "drawer");
     assert!(!archive.files.is_empty());
 
     let restore = client
-        .restore_archive("armory/public/gem_copy", archive)
+        .restore("armory/public/gem_copy", archive)
         .expect("restore should route remotely");
     assert_eq!(restore.destination_path, "armory/public/gem_copy");
     assert_eq!(
         client
-            .count("armory/public/gem_copy", None, None)
+            .count(
+                OperationFilter::drawer("armory/public/gem_copy"),
+                None::<OperationOptions>
+            )
             .expect("restored drawer should be queryable remotely"),
         1
     );
 
-    let diagnosis = client
-        .diagnose_storage()
-        .expect("diagnose should route remotely");
+    let diagnosis = status_storage(&client);
     assert!(diagnosis.drawer_count >= 2);
-    let drawer_names = client
-        .list_drawer_names()
-        .expect("drawers should route remotely");
+    let drawer_names = status_drawer_names(&client);
     assert!(drawer_names.iter().any(|name| name == "armory/public/gem"));
 
     let add_user = client
-        .manage_user(
-            "add_user",
+        .create(CreateRequest::user(
             json!({"username": "dev_admin", "role": "operator"}),
-        )
+        ))
         .expect("add user should route remotely");
-    assert_eq!(add_user["ok"], true);
+    assert_eq!(admin_result(add_user)["ok"], true);
     let grant = client
-        .manage_user(
-            "grant_permission",
-            json!({"username": "dev_admin", "permission_scope": "armory/public:rud"}),
-        )
+        .grant(PermissionRequest::new("dev_admin", "armory/public:rud"))
         .expect("grant permission should route remotely");
     assert_eq!(grant["permission_scope"], "armory/public:rud");
     let revoke = client
-        .manage_user(
-            "revoke_permission",
-            json!({"username": "dev_admin", "permission_scope": "armory/public:d"}),
-        )
+        .revoke(PermissionRequest::new("dev_admin", "armory/public:d"))
         .expect("revoke permission should route remotely");
     assert_eq!(revoke["ok"], true);
 
@@ -429,8 +512,9 @@ fn malformed_frame_drops_only_that_client_channel() {
         .expect("healthy client should connect");
     client
         .upsert(
-            "gem",
             json!({ "_id": "after_bad_frame", "element": "Water" }),
+            OperationFilter::drawer("gem"),
+            None::<OperationOptions>,
         )
         .expect("healthy client should still succeed");
     drop(client);
@@ -439,7 +523,12 @@ fn malformed_frame_drops_only_that_client_channel() {
         .join()
         .expect("server thread should finish")
         .expect("server should finish cleanly");
-    assert_eq!(engine.count("gem", None, None).expect("gem count"), 1);
+    assert_eq!(
+        engine
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+            .expect("gem count"),
+        1
+    );
     let _ = std::fs::remove_dir_all(storage_directory);
 }
 

@@ -5,7 +5,44 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use wardrobe_cli::{
     CliConfig, print_json, pub_normalize_record_ids, run_cli_logic, run_command, shell_split,
 };
-use wardrobe_core::{Command, CommandResult, StorageInventory, WardrobeClient, WardrobeEngine};
+use wardrobe_core::{
+    Command, CommandResult, OperationFilter, OperationOptions, StatusRequest, StatusResult,
+    StorageInventory, WardrobeClient, WardrobeEngine,
+};
+
+fn status_databases(client: &WardrobeClient) -> Vec<StorageInventory> {
+    match client
+        .status(StatusRequest::databases())
+        .expect("status databases")
+    {
+        StatusResult::Databases(databases) => databases,
+        other => panic!("expected databases, got {other:?}"),
+    }
+}
+
+fn status_schemas(client: &WardrobeClient, database_name: &str) -> Vec<String> {
+    match client
+        .status(StatusRequest::schemas(database_name))
+        .expect("status schemas")
+    {
+        StatusResult::Schemas(schemas) => schemas,
+        other => panic!("expected schemas, got {other:?}"),
+    }
+}
+
+fn status_drawers(
+    client: &WardrobeClient,
+    database_name: &str,
+    schema_name: &str,
+) -> Vec<StorageInventory> {
+    match client
+        .status(StatusRequest::drawers(database_name, schema_name))
+        .expect("status drawers")
+    {
+        StatusResult::Drawers(drawers) => drawers,
+        other => panic!("expected drawers, got {other:?}"),
+    }
+}
 
 fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -118,7 +155,11 @@ fn test_embedded_drawers_and_diagnose_execution() {
         let engine =
             WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine open");
         engine
-            .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
+            .upsert(
+                json!({ "_id": "@gem:lnk_fire", "element": "Fire" }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
+            )
             .expect("insert");
     }
 
@@ -146,7 +187,11 @@ fn test_embedded_inspect_and_records_execution() {
         let engine =
             WardrobeEngine::open(&storage_directory.to_string_lossy()).expect("engine open");
         engine
-            .upsert("gem", json!({ "_id": "@gem:lnk_fire", "element": "Fire" }))
+            .upsert(
+                json!({ "_id": "@gem:lnk_fire", "element": "Fire" }),
+                OperationFilter::drawer("gem"),
+                None::<OperationOptions>,
+            )
             .expect("insert");
     }
 
@@ -324,18 +369,11 @@ fn test_embedded_administrative_setup_commands_execution_paths() {
     ];
     assert!(run_command(&client, &ls_drawers, false).is_ok());
 
-    let databases = client.show_databases().expect("databases");
+    let databases = status_databases(&client);
     assert!(databases.iter().any(|db| db.name == "admin_db"));
+    assert!(status_schemas(&client, "admin_db").contains(&"public".to_string()));
     assert!(
-        client
-            .show_schemas("admin_db")
-            .expect("schemas")
-            .contains(&"public".to_string())
-    );
-    assert!(
-        client
-            .show_drawers("admin_db", "public")
-            .expect("drawers")
+        status_drawers(&client, "admin_db", "public")
             .iter()
             .any(|drawer| drawer.name == "gem")
     );
@@ -538,7 +576,10 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
     );
     assert_eq!(
         client
-            .count("armory/public/gem", Some(json!({"element": "fire"})), None)
+            .count(
+                OperationFilter::query_in("armory/public/gem", json!({"element": "fire"})),
+                None::<OperationOptions>
+            )
             .unwrap(),
         0
     );
@@ -555,7 +596,15 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
         )
         .is_ok()
     );
-    assert_eq!(client.count("armory/public/gem", None, None).unwrap(), 0);
+    assert_eq!(
+        client
+            .count(
+                OperationFilter::drawer("armory/public/gem"),
+                None::<OperationOptions>
+            )
+            .unwrap(),
+        0
+    );
 
     assert!(
         run_command(
@@ -763,7 +812,12 @@ fn test_backup_and_restore_commands_execution_paths() {
     ];
     assert!(run_command(&client, &drawer_restore, false).is_ok());
     assert_eq!(
-        client.count("armory/public/gem_copy", None, None).unwrap(),
+        client
+            .count(
+                OperationFilter::drawer("armory/public/gem_copy"),
+                None::<OperationOptions>
+            )
+            .unwrap(),
         1
     );
 
@@ -782,7 +836,12 @@ fn test_backup_and_restore_commands_execution_paths() {
     ];
     assert!(run_command(&client, &bay_restore, false).is_ok());
     assert_eq!(
-        client.count("armory_copy/public/gem", None, None).unwrap(),
+        client
+            .count(
+                OperationFilter::drawer("armory_copy/public/gem"),
+                None::<OperationOptions>
+            )
+            .unwrap(),
         1
     );
 
@@ -800,7 +859,15 @@ fn test_backup_and_restore_commands_execution_paths() {
         wardrobe_archive.to_string_lossy().to_string(),
     ];
     assert!(run_command(&client, &wardrobe_restore, false).is_ok());
-    assert_eq!(client.count("vault/public/gem", None, None).unwrap(), 1);
+    assert_eq!(
+        client
+            .count(
+                OperationFilter::drawer("vault/public/gem"),
+                None::<OperationOptions>
+            )
+            .unwrap(),
+        1
+    );
 
     let invalid_archive = temp_storage_directory("invalid_backup").with_extension("wrb");
     fs::write(&invalid_archive, "not a wardrobe archive").unwrap();
@@ -963,8 +1030,15 @@ fn test_network_administrative_commands_routing() {
         assert_eq!(
             command,
             Command::ManageUser {
-                action: "grant".to_string(),
-                payload: serde_json::json!({"user": "alice"})
+                action: "grant_permission".to_string(),
+                payload: serde_json::json!({
+                    "username": "alice",
+                    "permission_scope": "armory/public:rud",
+                    "scope": {
+                        "path": "armory/public",
+                        "rights": "rud"
+                    }
+                })
             }
         );
         let payload = serde_json::to_vec(&CommandResult::Admin(serde_json::json!({"ok": true})))
@@ -979,10 +1053,10 @@ fn test_network_administrative_commands_routing() {
 
     let client_manage = WardrobeClient::open(&target_manage).unwrap();
     let manage_args = vec![
-        "manage".to_string(),
-        "user".to_string(),
         "grant".to_string(),
-        "{\"user\":\"alice\"}".to_string(),
+        "permission".to_string(),
+        "alice".to_string(),
+        "armory/public:rud".to_string(),
     ];
     assert!(run_command(&client_manage, &manage_args, false).is_ok());
 }
@@ -1034,21 +1108,56 @@ fn test_documented_user_admin_permission_commands_routing() {
 #[test]
 fn test_rbac_aliases_parse_nested_user_payloads() {
     assert_manage_user_command(
-        &["auth", "user", "grant", "{\"user\":\"alice\"}"],
-        "grant",
-        json!({"user": "alice"}),
+        &[
+            "auth",
+            "user",
+            "grant",
+            "{\"username\":\"alice\",\"permission_scope\":\"global:rud\",\"scope\":{\"path\":\"global\",\"rights\":\"rud\"}}",
+        ],
+        "grant_permission",
+        json!({
+            "username": "alice",
+            "permission_scope": "global:rud",
+            "scope": {
+                "path": "global",
+                "rights": "rud"
+            }
+        }),
     );
 
     assert_manage_user_command(
-        &["rbac", "user", "revoke", "{\"user\":\"bob\"}"],
-        "revoke",
-        json!({"user": "bob"}),
+        &[
+            "rbac",
+            "user",
+            "revoke",
+            "{\"username\":\"bob\",\"permission_scope\":\"global:d\",\"scope\":{\"path\":\"global\",\"rights\":\"d\"}}",
+        ],
+        "revoke_permission",
+        json!({
+            "username": "bob",
+            "permission_scope": "global:d",
+            "scope": {
+                "path": "global",
+                "rights": "d"
+            }
+        }),
     );
 
     assert_manage_user_command(
-        &["auth", "grant", "{\"user\":\"carol\"}"],
-        "grant",
-        json!({"user": "carol"}),
+        &[
+            "auth",
+            "grant",
+            "{\"username\":\"carol\",\"permission_scope\":\"global:r\",\"scope\":{\"path\":\"global\",\"rights\":\"r\"}}",
+        ],
+        "grant_permission",
+        json!({
+            "username": "carol",
+            "permission_scope": "global:r",
+            "scope": {
+                "path": "global",
+                "rights": "r"
+            }
+        }),
     );
 }
 

@@ -65,12 +65,12 @@ The simplest client entry point is `WardrobeClient`.
 
 ```rust
 use serde_json::json;
-use wardrobe_core::WardrobeClient;
+use wardrobe_core::{ReadRequest, ReadResult, WardrobeClient};
 
 fn main() -> std::io::Result<()> {
     let client = WardrobeClient::open("wardrobe://127.0.0.1:24842")?;
 
-    let pointer = client.upsert(
+    let pointers = client.upsert(
         "gem",
         json!({
             "_id": "server_fire",
@@ -78,9 +78,12 @@ fn main() -> std::io::Result<()> {
         }),
     )?;
 
-    let records = client.find_all("gem")?;
+    let records = match client.read(ReadRequest::all("gem"))? {
+        ReadResult::Records(records) => records,
+        _ => Vec::new(),
+    };
 
-    println!("stored: {pointer}");
+    println!("stored: {pointers:?}");
     println!("records: {}", records.len());
     Ok(())
 }

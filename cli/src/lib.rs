@@ -4,7 +4,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use wardrobe_core::{ConnectionTarget, Database, VacuumReport, WardrobeClient};
+use wardrobe_core::{
+    AlterRequest, CompactRequest, ConnectionTarget, CreateRequest, CreateResult, Database,
+    DropRequest, InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult,
+    StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, VacuumReport, WardrobeClient,
+};
 
 #[derive(Debug)]
 pub struct CliConfig {
@@ -272,6 +276,249 @@ fn repl(client: &WardrobeClient, pretty: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn status_drawer_names(client: &WardrobeClient) -> io::Result<Vec<String>> {
+    match client
+        .status(StatusRequest::drawer_names())
+        .map_err(client_error)?
+    {
+        StatusResult::DrawerNames(drawers) => Ok(drawers),
+        other => unexpected_client_result("drawer names", other),
+    }
+}
+
+fn status_storage(client: &WardrobeClient) -> io::Result<StorageDiagnosis> {
+    match client
+        .status(StatusRequest::storage())
+        .map_err(client_error)?
+    {
+        StatusResult::Storage(diagnosis) => Ok(diagnosis),
+        other => unexpected_client_result("storage diagnosis", other),
+    }
+}
+
+fn status_check(client: &WardrobeClient, path: &str) -> io::Result<wardrobe_core::CheckReport> {
+    match client
+        .status(StatusRequest::path(path))
+        .map_err(client_error)?
+    {
+        StatusResult::Check(report) => Ok(report),
+        other => unexpected_client_result("check report", other),
+    }
+}
+
+fn status_tenants(client: &WardrobeClient) -> io::Result<Vec<String>> {
+    match client
+        .status(StatusRequest::tenants())
+        .map_err(client_error)?
+    {
+        StatusResult::Tenants(tenants) => Ok(tenants),
+        other => unexpected_client_result("tenants", other),
+    }
+}
+
+fn status_databases(client: &WardrobeClient) -> io::Result<Vec<StorageInventory>> {
+    match client
+        .status(StatusRequest::databases())
+        .map_err(client_error)?
+    {
+        StatusResult::Databases(databases) => Ok(databases),
+        other => unexpected_client_result("databases", other),
+    }
+}
+
+fn status_schemas(client: &WardrobeClient, database_name: &str) -> io::Result<Vec<String>> {
+    match client
+        .status(StatusRequest::schemas(database_name))
+        .map_err(client_error)?
+    {
+        StatusResult::Schemas(schemas) => Ok(schemas),
+        other => unexpected_client_result("schemas", other),
+    }
+}
+
+fn status_drawers(
+    client: &WardrobeClient,
+    database_name: &str,
+    schema_name: &str,
+) -> io::Result<Vec<StorageInventory>> {
+    match client
+        .status(StatusRequest::drawers(database_name, schema_name))
+        .map_err(client_error)?
+    {
+        StatusResult::Drawers(drawers) => Ok(drawers),
+        other => unexpected_client_result("drawers", other),
+    }
+}
+
+fn create_inventory(
+    client: &WardrobeClient,
+    request: CreateRequest,
+) -> io::Result<StorageInventory> {
+    match client.create(request).map_err(client_error)? {
+        CreateResult::StorageInventory(inventory) => Ok(inventory),
+        other => unexpected_create_result("storage inventory", other),
+    }
+}
+
+fn drawer_query_filter(drawer_name: impl Into<String>, query: Value) -> OperationFilter {
+    OperationFilter::query_in(drawer_name, query)
+}
+
+fn read_records(
+    client: &WardrobeClient,
+    filter: OperationFilter,
+    options: impl Into<OperationOptions>,
+) -> io::Result<Vec<Value>> {
+    match client.read(filter, options.into()).map_err(client_error)? {
+        ReadResult::Records(records) => Ok(records),
+        other => unexpected_read_result("records", other),
+    }
+}
+
+fn inspect_metrics(
+    client: &WardrobeClient,
+    filter: OperationFilter,
+) -> io::Result<wardrobe_core::DrawerInspectionMetrics> {
+    match client
+        .inspect(filter, None::<OperationOptions>)
+        .map_err(client_error)?
+    {
+        InspectResult::Drawer(metrics) => Ok(metrics),
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected drawer inspection metrics, got {other:?}"),
+        )),
+    }
+}
+
+fn alter_schema_rule(
+    client: &WardrobeClient,
+    drawer_path: &str,
+    action: &str,
+    kind: &str,
+    field_name: &str,
+    payload: Value,
+) -> io::Result<Value> {
+    if action == "remove" {
+        client
+            .drop(DropRequest::schema_rule(
+                drawer_path,
+                kind,
+                field_name,
+                payload,
+            ))
+            .map_err(client_error)
+    } else {
+        client
+            .alter(AlterRequest::schema_rule(
+                drawer_path,
+                action,
+                kind,
+                field_name,
+                payload,
+            ))
+            .map_err(client_error)
+    }
+}
+
+fn administer_user_action(
+    client: &WardrobeClient,
+    action: &str,
+    payload: Value,
+) -> io::Result<Value> {
+    match action.replace('-', "_").to_ascii_lowercase().as_str() {
+        "add" | "add_user" | "create" | "create_user" => client
+            .create(CreateRequest::user(payload))
+            .map_err(client_error)
+            .and_then(|result| match result {
+                CreateResult::Admin(response) => Ok(response),
+                other => unexpected_create_result("admin response", other),
+            }),
+        "drop" | "drop_user" | "remove_user" | "delete_user" => client
+            .drop(DropRequest::user(payload_username(&payload)?))
+            .map_err(client_error),
+        "grant" | "grant_permission" => client
+            .grant(permission_request_from_payload(payload)?)
+            .map_err(client_error),
+        "revoke" | "revoke_permission" => client
+            .revoke(permission_request_from_payload(payload)?)
+            .map_err(client_error),
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("unsupported canonical user admin action: {other}"),
+        )),
+    }
+}
+
+fn permission_request_from_payload(payload: Value) -> io::Result<PermissionRequest> {
+    let username = payload_username(&payload)?;
+    let permission_scope = payload
+        .get("permission_scope")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "permission payload requires permission_scope",
+            )
+        })?;
+    if let Some(scope) = payload.get("scope").and_then(Value::as_object) {
+        let path = scope
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "scope requires path"))?;
+        let rights = scope
+            .get("rights")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "scope requires rights"))?;
+        Ok(PermissionRequest::with_scope(
+            username,
+            permission_scope,
+            path,
+            rights,
+        ))
+    } else {
+        Ok(PermissionRequest::new(username, permission_scope))
+    }
+}
+
+fn payload_username(payload: &Value) -> io::Result<String> {
+    payload
+        .get("username")
+        .or_else(|| payload.get("user"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|username| !username.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "user admin payload requires a non-empty username",
+            )
+        })
+}
+
+fn unexpected_client_result<T>(expected: &str, actual: StatusResult) -> io::Result<T> {
+    Err(Error::new(
+        ErrorKind::InvalidData,
+        format!("expected {expected}, got {actual:?}"),
+    ))
+}
+
+fn unexpected_create_result<T>(expected: &str, actual: CreateResult) -> io::Result<T> {
+    Err(Error::new(
+        ErrorKind::InvalidData,
+        format!("expected {expected}, got {actual:?}"),
+    ))
+}
+
+fn unexpected_read_result<T>(expected: &str, actual: ReadResult) -> io::Result<T> {
+    Err(Error::new(
+        ErrorKind::InvalidData,
+        format!("expected {expected}, got {actual:?}"),
+    ))
+}
+
 pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.is_empty() {
         return Ok(());
@@ -279,14 +526,14 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
 
     match parts[0].as_str() {
         "drawers" => {
-            let drawers = client.list_drawer_names().map_err(client_error)?;
+            let drawers = status_drawer_names(client)?;
             for drawer in drawers {
                 println!("{drawer}");
             }
             Ok(())
         }
         "diagnose" => {
-            let diagnosis = client.diagnose_storage().map_err(client_error)?;
+            let diagnosis = status_storage(client)?;
             println!("Storage directory: {}", diagnosis.storage_directory);
             println!("Storage bytes: {}", diagnosis.storage_bytes);
             println!("Drawer count: {}", diagnosis.drawer_count);
@@ -326,8 +573,13 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "delete-by-id requires a pointer",
                 ));
             }
-            let deleted = client.delete_by_id(&parts[1]).map_err(client_error)?;
-            println!("deleted: {deleted}");
+            let deleted = client
+                .delete(
+                    OperationFilter::pointer(&parts[1]),
+                    None::<OperationOptions>,
+                )
+                .map_err(client_error)?;
+            println!("deleted: {}", deleted.deleted);
             Ok(())
         }
         "remove"
@@ -346,7 +598,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "create-db requires a database name",
                 ));
             }
-            let inventory = client.create_database(&parts[1]).map_err(client_error)?;
+            let inventory = create_inventory(client, CreateRequest::database(&parts[1]))?;
             print_json(&inventory, pretty)
         }
         "create-schema" => {
@@ -356,9 +608,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "create-schema requires <database> <schema>",
                 ));
             }
-            let inventory = client
-                .create_schema(&parts[1], &parts[2])
-                .map_err(client_error)?;
+            let inventory = create_inventory(client, CreateRequest::schema(&parts[1], &parts[2]))?;
             print_json(&inventory, pretty)
         }
         "create-drawer" => {
@@ -368,9 +618,10 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "create-drawer requires <database> <schema> <drawer>",
                 ));
             }
-            let inventory = client
-                .create_drawer(&parts[1], &parts[2], &parts[3])
-                .map_err(client_error)?;
+            let inventory = create_inventory(
+                client,
+                CreateRequest::drawer(&parts[1], &parts[2], &parts[3]),
+            )?;
             print_json(&inventory, pretty)
         }
         "manage" => run_manage_user_command(client, parts, pretty),
@@ -382,7 +633,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         "backup" => run_backup_command(client, parts, pretty),
         "restore" => run_restore_command(client, parts, pretty),
         "show-databases" => {
-            let dbs = client.show_databases().map_err(client_error)?;
+            let dbs = status_databases(client)?;
             print_json(&dbs, pretty)
         }
         "show-schemas" => {
@@ -392,7 +643,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "show-schemas requires a database name",
                 ));
             }
-            let schemas = client.show_schemas(&parts[1]).map_err(client_error)?;
+            let schemas = status_schemas(client, &parts[1])?;
             print_json(&schemas, pretty)
         }
         "show-drawers" => {
@@ -402,9 +653,7 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                     "show-drawers requires <database> <schema>",
                 ));
             }
-            let drawers = client
-                .show_drawers(&parts[1], &parts[2])
-                .map_err(client_error)?;
+            let drawers = status_drawers(client, &parts[1], &parts[2])?;
             print_json(&drawers, pretty)
         }
         _ => Err(Error::new(
@@ -422,8 +671,19 @@ fn run_upsert_command(client: &WardrobeClient, parts: &[String]) -> io::Result<(
         ));
     }
     let payload = parse_json_arg(&parts[2], "payload")?;
-    let pointer = client.upsert(&parts[1], payload).map_err(client_error)?;
-    println!("{pointer}");
+    let pointers = client
+        .upsert(
+            payload,
+            OperationFilter::drawer(&parts[1]),
+            None::<OperationOptions>,
+        )
+        .map_err(client_error)?
+        .into_pointers();
+    if pointers.len() == 1 {
+        println!("{}", pointers[0]);
+    } else {
+        print_json(&pointers, false)?;
+    }
     Ok(())
 }
 
@@ -436,12 +696,12 @@ fn run_count_command(client: &WardrobeClient, parts: &[String], pretty: bool) ->
     }
 
     let filter = if parts.len() >= 3 {
-        Some(parse_json_arg(&parts[2], "count filter")?)
+        drawer_query_filter(&parts[1], parse_json_arg(&parts[2], "count filter")?)
     } else {
-        None
+        OperationFilter::drawer(&parts[1])
     };
     let count = client
-        .count(&parts[1], filter, None)
+        .count(filter, None::<OperationOptions>)
         .map_err(client_error)?;
     print_json(&count, pretty)
 }
@@ -467,11 +727,17 @@ fn run_records_command(
 
     let mut records = if parts.len() >= 3 {
         let filter = parse_json_arg(&parts[2], "query filter")?;
-        client
-            .find_by_filter(&parts[1], filter, None)
-            .map_err(client_error)?
+        read_records(
+            client,
+            drawer_query_filter(&parts[1], filter),
+            None::<OperationOptions>,
+        )?
     } else {
-        client.find_all(&parts[1]).map_err(client_error)?
+        read_records(
+            client,
+            OperationFilter::drawer(&parts[1]),
+            None::<OperationOptions>,
+        )?
     };
     pub_normalize_record_ids(&mut records);
     print_json(&records, pretty)
@@ -486,7 +752,7 @@ fn run_inspect_command(client: &WardrobeClient, parts: &[String], pretty: bool) 
     }
 
     let drawer_path = parts[1..].join("/");
-    let metrics = client.inspect_drawer(&drawer_path).map_err(client_error)?;
+    let metrics = inspect_metrics(client, OperationFilter::drawer(&drawer_path))?;
     print_json(&metrics, pretty)
 }
 
@@ -507,16 +773,23 @@ fn run_delete_command(client: &WardrobeClient, parts: &[String]) -> io::Result<(
     }
 
     if parts.len() == 2 {
-        let deleted = client.delete_by_id(&parts[1]).map_err(client_error)?;
-        println!("deleted: {deleted}");
+        let deleted = client
+            .delete(
+                OperationFilter::pointer(&parts[1]),
+                None::<OperationOptions>,
+            )
+            .map_err(client_error)?;
+        println!("deleted: {}", deleted.deleted);
         return Ok(());
     }
 
     match parse_delete_target(&parts[2])? {
         DeleteTarget::Id(record_id) => {
             let pointer = pointer_from_record_id(&parts[1], &record_id);
-            let deleted = client.delete_by_id(&pointer).map_err(client_error)?;
-            println!("deleted: {deleted}");
+            let deleted = client
+                .delete(OperationFilter::pointer(&pointer), None::<OperationOptions>)
+                .map_err(client_error)?;
+            println!("deleted: {}", deleted.deleted);
         }
         DeleteTarget::Filter(filter) => {
             let (matched, deleted) = delete_by_filter(client, &parts[1], filter)?;
@@ -556,34 +829,16 @@ fn delete_by_filter(
     drawer_name: &str,
     filter: Value,
 ) -> io::Result<(usize, usize)> {
-    let records = client
-        .find_by_filter(drawer_name, filter, None)
+    let operation_filter = drawer_query_filter(drawer_name, filter);
+    let matched = client
+        .count(operation_filter.clone(), None::<OperationOptions>)
         .map_err(client_error)?;
-    let matched = records.len();
-    let mut deleted = 0;
-
-    for record in records {
-        let record_id = record_id_for_delete(&record)?;
-        let pointer = pointer_from_record_id(drawer_name, &record_id);
-        if client.delete_by_id(&pointer).map_err(client_error)? {
-            deleted += 1;
-        }
-    }
+    let deleted = client
+        .delete(operation_filter, OperationOptions::new().multi(true))
+        .map_err(client_error)?
+        .deleted;
 
     Ok((matched, deleted))
-}
-
-fn record_id_for_delete(record: &Value) -> io::Result<String> {
-    record
-        .get("_id")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidData,
-                "record matched for deletion did not include a string _id",
-            )
-        })
 }
 
 fn run_schema_management_command(
@@ -606,9 +861,7 @@ fn run_schema_management_command(
     let drawer_path = normalize_drawer_path(&parts[2], "schema command path")?;
     let field_name = &parts[3];
     let payload = schema_management_payload(action, &kind, field_name, parts)?;
-    let response = client
-        .manage_schema(&drawer_path, action, &kind, field_name, payload)
-        .map_err(client_error)?;
+    let response = alter_schema_rule(client, &drawer_path, action, &kind, field_name, payload)?;
     print_json(&response, pretty)
 }
 
@@ -741,7 +994,7 @@ fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
                     "define database requires a database name",
                 ));
             }
-            let inventory = client.create_database(&parts[2]).map_err(client_error)?;
+            let inventory = create_inventory(client, CreateRequest::database(&parts[2]))?;
             print_json(&inventory, pretty)
         }
         "schema" => {
@@ -751,9 +1004,7 @@ fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
                     "define schema requires <database> <schema>",
                 ));
             }
-            let inventory = client
-                .create_schema(&parts[2], &parts[3])
-                .map_err(client_error)?;
+            let inventory = create_inventory(client, CreateRequest::schema(&parts[2], &parts[3]))?;
             print_json(&inventory, pretty)
         }
         "drawer" => {
@@ -763,9 +1014,10 @@ fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
                     "define drawer requires <database> <schema> <drawer>",
                 ));
             }
-            let inventory = client
-                .create_drawer(&parts[2], &parts[3], &parts[4])
-                .map_err(client_error)?;
+            let inventory = create_inventory(
+                client,
+                CreateRequest::drawer(&parts[2], &parts[3], &parts[4]),
+            )?;
             print_json(&inventory, pretty)
         }
         "tenant-route" => {
@@ -775,9 +1027,10 @@ fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
                     "define tenant-route requires <tenant> <database> <location>",
                 ));
             }
-            let inventory = client
-                .register_tenant_route(&parts[2], &parts[3], &parts[4])
-                .map_err(client_error)?;
+            let inventory = create_inventory(
+                client,
+                CreateRequest::tenant_route(&parts[2], &parts[3], &parts[4]),
+            )?;
             print_json(&inventory, pretty)
         }
         other => Err(Error::new(
@@ -798,21 +1051,18 @@ fn run_create_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
     match parts[1].as_str() {
         "wardrobe" | "wardrobes" | "database" | "databases" => {
             let (wardrobe, _, _) = parse_structural_path(&parts[2], 1, "wardrobe path")?;
-            let inventory = client.create_database(&wardrobe).map_err(client_error)?;
+            let inventory = create_inventory(client, CreateRequest::database(&wardrobe))?;
             print_json(&inventory, pretty)
         }
         "bay" | "bays" | "schema" | "schemas" => {
             let (wardrobe, bay, _) = parse_structural_path(&parts[2], 2, "bay path")?;
-            let inventory = client
-                .create_schema(&wardrobe, &bay)
-                .map_err(client_error)?;
+            let inventory = create_inventory(client, CreateRequest::schema(&wardrobe, &bay))?;
             print_json(&inventory, pretty)
         }
         "drawer" | "drawers" => {
             let (wardrobe, bay, drawer) = parse_structural_path(&parts[2], 3, "drawer path")?;
-            let inventory = client
-                .create_drawer(&wardrobe, &bay, &drawer)
-                .map_err(client_error)?;
+            let inventory =
+                create_inventory(client, CreateRequest::drawer(&wardrobe, &bay, &drawer))?;
             print_json(&inventory, pretty)
         }
         other => Err(Error::new(
@@ -835,11 +1085,11 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
 
     match parts[1].as_str() {
         "tenant" | "tenants" => {
-            let tenants = client.show_tenants().map_err(client_error)?;
+            let tenants = status_tenants(client)?;
             print_json(&tenants, pretty)
         }
         "wardrobe" | "wardrobes" | "database" | "databases" => {
-            let dbs = client.show_databases().map_err(client_error)?;
+            let dbs = status_databases(client)?;
             print_json(&dbs, pretty)
         }
         "bay" | "bays" | "schema" | "schemas" => {
@@ -850,7 +1100,7 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
                 ));
             }
             let (wardrobe, _, _) = parse_structural_path(&parts[2], 1, "wardrobe path")?;
-            let schemas = client.show_schemas(&wardrobe).map_err(client_error)?;
+            let schemas = status_schemas(client, &wardrobe)?;
             print_json(&schemas, pretty)
         }
         "drawer" | "drawers" => {
@@ -866,7 +1116,7 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
                 let (wardrobe, bay, _) = parse_structural_path(&parts[2], 2, "bay path")?;
                 (wardrobe, bay)
             };
-            let drawers = client.show_drawers(&wardrobe, &bay).map_err(client_error)?;
+            let drawers = status_drawers(client, &wardrobe, &bay)?;
             print_json(&drawers, pretty)
         }
         other => Err(Error::new(
@@ -881,7 +1131,7 @@ fn run_check_command(client: &WardrobeClient, parts: &[String]) -> io::Result<()
         return Err(Error::new(ErrorKind::InvalidInput, "check requires <path>"));
     }
 
-    let report = client.check_path(&parts[1]).map_err(client_error)?;
+    let report = status_check(client, &parts[1])?;
     println!("Path: {}", report.path);
     println!("Type: {}", report.kind);
     for entry in report.entries {
@@ -909,7 +1159,9 @@ fn run_clean_command(client: &WardrobeClient, parts: &[String], pretty: bool) ->
     let targets = clean_targets(client, &parts[1])?;
     let mut results = Vec::new();
     for path in targets {
-        let report = client.vacuum_drawer(&path).map_err(client_error)?;
+        let report = client
+            .compact(CompactRequest::drawer(&path))
+            .map_err(client_error)?;
         results.push(CleanResult { path, report });
     }
     print_json(&results, pretty)
@@ -921,8 +1173,8 @@ fn clean_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<Stri
         1 => {
             let wardrobe = &segments[0];
             let mut targets = Vec::new();
-            for bay in client.show_schemas(wardrobe).map_err(client_error)? {
-                for drawer in client.show_drawers(wardrobe, &bay).map_err(client_error)? {
+            for bay in status_schemas(client, wardrobe)? {
+                for drawer in status_drawers(client, wardrobe, &bay)? {
                     targets.push(format!("{wardrobe}/{bay}/{}", drawer.name));
                 }
             }
@@ -931,15 +1183,12 @@ fn clean_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<Stri
         2 => {
             let wardrobe = &segments[0];
             let bay = &segments[1];
-            client
-                .show_drawers(wardrobe, bay)
-                .map_err(client_error)
-                .map(|drawers| {
-                    drawers
-                        .into_iter()
-                        .map(|drawer| format!("{wardrobe}/{bay}/{}", drawer.name))
-                        .collect()
-                })
+            status_drawers(client, wardrobe, bay).map(|drawers| {
+                drawers
+                    .into_iter()
+                    .map(|drawer| format!("{wardrobe}/{bay}/{}", drawer.name))
+                    .collect()
+            })
         }
         3 => Ok(vec![segments.join("/")]),
         _ => Err(Error::new(
@@ -977,7 +1226,7 @@ fn run_backup_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
         ));
     }
 
-    let archive = client.backup_archive(&parts[1]).map_err(client_error)?;
+    let archive = client.backup(&parts[1]).map_err(client_error)?;
     let byte_count = archive
         .files
         .iter()
@@ -1022,9 +1271,7 @@ fn run_restore_command(client: &WardrobeClient, parts: &[String], pretty: bool) 
 
     let archive_path = PathBuf::from(&parts[2]);
     let archive = read_backup_archive(&archive_path)?;
-    let report = client
-        .restore_archive(&parts[1], archive)
-        .map_err(client_error)?;
+    let report = client.restore(&parts[1], archive).map_err(client_error)?;
 
     print_json(
         &RestoreCommandResult {
@@ -1078,9 +1325,7 @@ fn run_add_user_command(client: &WardrobeClient, parts: &[String], pretty: bool)
 
     let raw_payload = parts[2..].join(" ");
     let payload = parse_user_admin_payload(&raw_payload)?;
-    let response = client
-        .manage_user("add_user", payload)
-        .map_err(client_error)?;
+    let response = administer_user_action(client, "add_user", payload)?;
     print_json(&response, pretty)
 }
 
@@ -1107,20 +1352,13 @@ fn run_permission_command(
 
     let username = validate_permission_username(&parts[2])?;
     let scope = parse_permission_scope(&parts[3])?;
-    let action = format!("{}_permission", parts[0]);
-    let response = client
-        .manage_user(
-            &action,
-            json!({
-                "username": username,
-                "permission_scope": scope.normalized,
-                "scope": {
-                    "path": scope.path,
-                    "rights": scope.rights,
-                }
-            }),
-        )
-        .map_err(client_error)?;
+    let request =
+        PermissionRequest::with_scope(username, scope.normalized, scope.path, scope.rights);
+    let response = match parts[0].as_str() {
+        "grant" => client.grant(request).map_err(client_error)?,
+        "revoke" => client.revoke(request).map_err(client_error)?,
+        _ => unreachable!("permission command only routes grant or revoke"),
+    };
     print_json(&response, pretty)
 }
 
@@ -1144,9 +1382,7 @@ fn run_manage_user_command(
 
     let raw_payload = parts[3..].join(" ");
     let payload = parse_json_arg(&raw_payload, "user admin payload")?;
-    let response = client
-        .manage_user(&parts[2], payload)
-        .map_err(client_error)?;
+    let response = administer_user_action(client, &parts[2], payload)?;
     print_json(&response, pretty)
 }
 
@@ -1170,9 +1406,7 @@ fn run_manage_user_alias(
 
     let raw_payload = parts[payload_index..].join(" ");
     let payload = parse_json_arg(&raw_payload, "user admin payload")?;
-    let response = client
-        .manage_user(&parts[action_index], payload)
-        .map_err(client_error)?;
+    let response = administer_user_action(client, &parts[action_index], payload)?;
     print_json(&response, pretty)
 }
 

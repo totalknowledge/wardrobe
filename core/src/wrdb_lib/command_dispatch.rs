@@ -265,8 +265,14 @@ where
         Command::Upsert {
             drawer_name,
             payload,
-        } => E::upsert_in_database(database, &drawer_name, payload, context)
-            .map(CommandResult::Pointer),
+        } => match payload {
+            Value::Array(records) => {
+                E::bulk_upsert_in_database(database, &drawer_name, records, true, context)
+                    .map(CommandResult::Pointers)
+            }
+            payload => E::upsert_in_database(database, &drawer_name, payload, context)
+                .map(CommandResult::Pointer),
+        },
         Command::BulkUpsert {
             drawer_name,
             records,

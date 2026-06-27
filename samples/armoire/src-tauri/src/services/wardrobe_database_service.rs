@@ -1,7 +1,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use wardrobe_core::{WardrobeClient, WardrobeEngine};
+use wardrobe_core::{
+    StatusRequest, StatusResult, StorageInventory, WardrobeClient, WardrobeEngine,
+};
 
 pub struct WardrobeDatabaseService;
 
@@ -36,17 +38,17 @@ impl WardrobeDatabaseService {
         let engine = WardrobeEngine::open(&database_directory)?;
         let client = WardrobeClient::open(&database_directory)?;
 
-        let databases = engine.list_databases()?;
+        let databases = status_databases(&engine)?;
         println!("Wardrobe databases:");
 
         for database in databases {
             println!(" - {}", database.name);
 
-            let schemas = engine.list_schemas(&database.name)?;
+            let schemas = status_schemas(&engine, &database.name)?;
             for schema_name in schemas {
                 println!("   schema: {}", schema_name);
 
-                let drawers = engine.show_drawers(&database.name, &schema_name)?;
+                let drawers = status_drawers(&engine, &database.name, &schema_name)?;
                 for drawer in drawers {
                     println!(
                         "     drawer: {} ({} records)",
@@ -56,7 +58,7 @@ impl WardrobeDatabaseService {
             }
         }
 
-        let available_databases = client.show_databases()?;
+        let available_databases = status_databases(&client)?;
         println!("Client can see {} database(s).", available_databases.len());
 
         Ok(())
@@ -159,4 +161,70 @@ impl WardrobeDatabaseService {
 
         Ok(false)
     }
+}
+
+trait StatusSource {
+    fn status_databases(&self) -> io::Result<StatusResult>;
+    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult>;
+    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult>;
+}
+
+impl StatusSource for WardrobeEngine {
+    fn status_databases(&self) -> io::Result<StatusResult> {
+        self.status(StatusRequest::databases())
+    }
+
+    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::schemas(database_name))
+    }
+
+    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::drawers(database_name, schema_name))
+    }
+}
+
+impl StatusSource for WardrobeClient {
+    fn status_databases(&self) -> io::Result<StatusResult> {
+        self.status(StatusRequest::databases())
+    }
+
+    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::schemas(database_name))
+    }
+
+    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::drawers(database_name, schema_name))
+    }
+}
+
+fn status_databases(source: &impl StatusSource) -> io::Result<Vec<StorageInventory>> {
+    match source.status_databases()? {
+        StatusResult::Databases(databases) => Ok(databases),
+        other => Err(unexpected_status_result("databases", other)),
+    }
+}
+
+fn status_schemas(source: &impl StatusSource, database_name: &str) -> io::Result<Vec<String>> {
+    match source.status_schemas(database_name)? {
+        StatusResult::Schemas(schemas) => Ok(schemas),
+        other => Err(unexpected_status_result("schemas", other)),
+    }
+}
+
+fn status_drawers(
+    source: &impl StatusSource,
+    database_name: &str,
+    schema_name: &str,
+) -> io::Result<Vec<StorageInventory>> {
+    match source.status_drawers(database_name, schema_name)? {
+        StatusResult::Drawers(drawers) => Ok(drawers),
+        other => Err(unexpected_status_result("drawers", other)),
+    }
+}
+
+fn unexpected_status_result(expected: &str, actual: StatusResult) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("expected {expected}, got {actual:?}"),
+    )
 }

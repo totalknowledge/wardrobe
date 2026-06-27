@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 use std::io::{self, Error, ErrorKind};
 use wardrobe_core::{
-    Command, CommandResult, OrderDirection, QueryModifiers, StorageScope, WardrobeClient,
-    WardrobeEngine,
+    Command, CommandResult, OperationFilter, OperationOptions, OrderDirection, QueryModifiers,
+    ReadResult, StatusRequest, StatusResult, StorageScope, WardrobeClient, WardrobeEngine,
 };
 
 const DATABASE_DIRECTORY: &str = "./wardrobe";
@@ -57,18 +57,127 @@ fn pointer_from_record(record: &Value, drawer_name: &str) -> io::Result<String> 
     Ok(format!("@{drawer_name}:{raw_id}"))
 }
 
+fn drawer_query_filter(drawer_name: impl Into<String>, query: Value) -> OperationFilter {
+    OperationFilter::query_in(drawer_name, query)
+}
+
+fn read_records(
+    client: &WardrobeClient,
+    filter: OperationFilter,
+    options: impl Into<OperationOptions>,
+) -> io::Result<Vec<Value>> {
+    match client.read(filter, options.into())? {
+        ReadResult::Records(records) => Ok(records),
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected record list, got {other:?}"),
+        )),
+    }
+}
+
+fn read_record(
+    client: &WardrobeClient,
+    filter: OperationFilter,
+    options: impl Into<OperationOptions>,
+) -> io::Result<Option<Value>> {
+    match client.read(filter, options.into())? {
+        ReadResult::Record(record) => Ok(record),
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected single record, got {other:?}"),
+        )),
+    }
+}
+
+fn status_databases<C>(client: &C) -> io::Result<Vec<wardrobe_core::StorageInventory>>
+where
+    C: StatusSource,
+{
+    match client.status_databases()? {
+        StatusResult::Databases(databases) => Ok(databases),
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected databases, got {other:?}"),
+        )),
+    }
+}
+
+fn status_schemas<C>(client: &C, database_name: &str) -> io::Result<Vec<String>>
+where
+    C: StatusSource,
+{
+    match client.status_schemas(database_name)? {
+        StatusResult::Schemas(schemas) => Ok(schemas),
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected schemas, got {other:?}"),
+        )),
+    }
+}
+
+fn status_drawers<C>(
+    client: &C,
+    database_name: &str,
+    schema_name: &str,
+) -> io::Result<Vec<wardrobe_core::StorageInventory>>
+where
+    C: StatusSource,
+{
+    match client.status_drawers(database_name, schema_name)? {
+        StatusResult::Drawers(drawers) => Ok(drawers),
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected drawers, got {other:?}"),
+        )),
+    }
+}
+
+trait StatusSource {
+    fn status_databases(&self) -> io::Result<StatusResult>;
+    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult>;
+    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult>;
+}
+
+impl StatusSource for WardrobeClient {
+    fn status_databases(&self) -> io::Result<StatusResult> {
+        self.status(StatusRequest::databases())
+    }
+
+    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::schemas(database_name))
+    }
+
+    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::drawers(database_name, schema_name))
+    }
+}
+
+impl StatusSource for WardrobeEngine {
+    fn status_databases(&self) -> io::Result<StatusResult> {
+        self.status(StatusRequest::databases())
+    }
+
+    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::schemas(database_name))
+    }
+
+    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
+        self.status(StatusRequest::drawers(database_name, schema_name))
+    }
+}
+
 fn perform_full_diagnostic_suite(client: &WardrobeClient) -> io::Result<()> {
-    let available_databases = client.show_databases()?;
+    let available_databases = status_databases(client)?;
     let database_names: Vec<String> = available_databases.iter().map(|d| d.name.clone()).collect();
     println!("System Databases: {:?}", database_names);
 
-    let available_schemas = client.show_schemas(DATABASE_NAME)?;
+    let available_schemas = status_schemas(client, DATABASE_NAME)?;
     println!(
         "Available Schemas in '{}': {:?}",
         DATABASE_NAME, available_schemas
     );
 
-    let drawer_inventory = client.show_drawers(DATABASE_NAME, SCHEMA_NAME)?;
+    let drawer_inventory = status_drawers(client, DATABASE_NAME, SCHEMA_NAME)?;
     println!("Drawers in basic-usage/public:");
     for drawer in drawer_inventory {
         println!(
@@ -178,8 +287,11 @@ fn execute_and_print_tag_filter(client: &WardrobeClient, user_pointer: &str) -> 
         "user_id": user_pointer,
         "tags": ["support", "magic"]
     });
-    let matching_records =
-        client.find_by_filter(GEM_DRAWER, filter_payload, Some(query_modifiers))?;
+    let matching_records = read_records(
+        client,
+        drawer_query_filter(GEM_DRAWER, filter_payload),
+        OperationOptions::from(query_modifiers),
+    )?;
 
     println!("Filtered gems for tag match: {}", matching_records.len());
     println!(
@@ -199,38 +311,42 @@ fn verify_three_relations(
     gem_pointer: &str,
     weapon_pointer: &str,
 ) -> io::Result<()> {
-    let gem = client
-        .find_by_filter(
+    let gem = read_records(
+        client,
+        drawer_query_filter(
             GEM_DRAWER,
             json!({
                 "_id": gem_pointer.trim_start_matches("@gem:")
             }),
-            None,
-        )?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::NotFound,
-                "gem record missing before verification",
-            )
-        })?;
-    let weapon = client
-        .find_by_filter(
+        ),
+        None::<OperationOptions>,
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| {
+        Error::new(
+            ErrorKind::NotFound,
+            "gem record missing before verification",
+        )
+    })?;
+    let weapon = read_records(
+        client,
+        drawer_query_filter(
             WEAPON_DRAWER,
             json!({
                 "_id": weapon_pointer.trim_start_matches("@weapon:")
             }),
-            None,
-        )?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::NotFound,
-                "weapon record missing before verification",
-            )
-        })?;
+        ),
+        None::<OperationOptions>,
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| {
+        Error::new(
+            ErrorKind::NotFound,
+            "weapon record missing before verification",
+        )
+    })?;
 
     println!(
         "Relation check: gem record {}, weapon record {}, user pointer {}",
@@ -245,26 +361,38 @@ fn perform_cascade_delete_sequence(
     user_pointer: &str,
     weapon_pointer: &str,
 ) -> io::Result<()> {
-    let related_gems = client.find_by_filter(
-        GEM_DRAWER,
-        json!({
-            "user_id": user_pointer
-        }),
-        None,
+    let related_gems = read_records(
+        client,
+        drawer_query_filter(
+            GEM_DRAWER,
+            json!({
+                "user_id": user_pointer
+            }),
+        ),
+        None::<OperationOptions>,
     )?;
     let removed_gem_count = related_gems.len();
     println!("Identifying {} gems to remove", removed_gem_count);
 
     for gem in related_gems {
         let gem_pointer = pointer_from_record(&gem, GEM_DRAWER)?;
-        client.delete_by_id(&gem_pointer)?;
+        client.delete(
+            OperationFilter::pointer(&gem_pointer),
+            None::<OperationOptions>,
+        )?;
         println!("  Deleted orphaned gem: {}", gem_pointer);
     }
 
-    client.delete_by_id(weapon_pointer)?;
+    client.delete(
+        OperationFilter::pointer(weapon_pointer),
+        None::<OperationOptions>,
+    )?;
     println!("  Deleted orphaned weapon: {}", weapon_pointer);
 
-    client.delete_by_id(user_pointer)?;
+    client.delete(
+        OperationFilter::pointer(user_pointer),
+        None::<OperationOptions>,
+    )?;
     println!("  Deleted primary user record: {}", user_pointer);
     println!("Deleted {} gems linked to user", removed_gem_count);
 
@@ -272,8 +400,8 @@ fn perform_cascade_delete_sequence(
 }
 
 fn perform_maintenance_check(client: &WardrobeClient) -> io::Result<()> {
-    let gem_count = client.count(GEM_DRAWER, None, None)?;
-    let weapon_count = client.count(WEAPON_DRAWER, None, None)?;
+    let gem_count = client.count(GEM_DRAWER, None::<OperationOptions>)?;
+    let weapon_count = client.count(WEAPON_DRAWER, None::<OperationOptions>)?;
     println!(
         "Maintenance check: {} gems, {} weapons",
         gem_count, weapon_count
@@ -284,15 +412,21 @@ fn perform_maintenance_check(client: &WardrobeClient) -> io::Result<()> {
 fn run_stress_test_cycle(client: &WardrobeClient) -> io::Result<()> {
     for i in 0..5 {
         let temp_gem_id = format!("temp_gem_{}", i);
-        let pointer = client.upsert(
-            GEM_DRAWER,
-            json!({
-                "_id": temp_gem_id,
-                "element": "Temporary",
-                "tags": ["test"]
-            }),
-        )?;
-        client.delete_by_id(&pointer)?;
+        let pointers = client
+            .upsert(
+                json!({
+                    "_id": temp_gem_id,
+                    "element": "Temporary",
+                    "tags": ["test"]
+                }),
+                OperationFilter::drawer(GEM_DRAWER),
+                None::<OperationOptions>,
+            )?
+            .into_pointers();
+        let pointer = pointers
+            .first()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "upsert returned no pointer"))?;
+        client.delete(OperationFilter::pointer(pointer), None::<OperationOptions>)?;
     }
 
     println!("Stress test cycle completed (5 upserts/deletes).");
@@ -300,17 +434,17 @@ fn run_stress_test_cycle(client: &WardrobeClient) -> io::Result<()> {
 }
 
 fn perform_detailed_inspection(engine: &WardrobeEngine) -> io::Result<()> {
-    let databases = engine.list_databases()?;
+    let databases = status_databases(engine)?;
     for db in databases {
         println!("Inspecting Database: {}", db.name);
 
-        let schemas = engine.list_schemas(&db.name)?;
+        let schemas = status_schemas(engine, &db.name)?;
         for schema_name in schemas {
             println!("  Schema: {}", schema_name);
 
-            let drawers = engine.show_drawers(&db.name, &schema_name)?;
+            let drawers = status_drawers(engine, &db.name, &schema_name)?;
             for drawer in drawers {
-                let count = engine.count(&drawer.name, None, None)?;
+                let count = engine.count(drawer.name.as_str(), None::<OperationOptions>)?;
                 println!("    Drawer: {} ({} records)", drawer.name, count);
             }
         }
@@ -320,15 +454,27 @@ fn perform_detailed_inspection(engine: &WardrobeEngine) -> io::Result<()> {
 }
 
 fn verify_final_database_integrity(client: &WardrobeClient, user_pointer: &str) -> io::Result<()> {
-    let remaining_gems = client.find_all(GEM_DRAWER)?;
-    let remaining_weapons = client.find_all(WEAPON_DRAWER)?;
+    let remaining_gems = read_records(
+        client,
+        OperationFilter::drawer(GEM_DRAWER),
+        None::<OperationOptions>,
+    )?;
+    let remaining_weapons = read_records(
+        client,
+        OperationFilter::drawer(WEAPON_DRAWER),
+        None::<OperationOptions>,
+    )?;
     println!(
         "Total records remaining: {} gems, {} weapons",
         remaining_gems.len(),
         remaining_weapons.len()
     );
 
-    match client.find_by_id(user_pointer)? {
+    match read_record(
+        client,
+        OperationFilter::pointer(user_pointer),
+        None::<OperationOptions>,
+    )? {
         Some(_) => println!("INTEGRITY ERROR: User record persists."),
         None => println!("INTEGRITY SUCCESS: User record has been purged."),
     }

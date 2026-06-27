@@ -33,10 +33,12 @@ const DEFAULT_CHUNK_SIZE: usize = 500;
 const DEFAULT_TRAVERSAL_QUERIES: usize = 100;
 const DEFAULT_PURGE_BUCKETS: usize = 10;
 const DEFAULT_MYSQL_USER: &str = "wardrobe_benchmark";
+const DEFAULT_MYSQL_PASSWORD: &str = "wardrobe_benchmark";
 const DEFAULT_MYSQL_USER_ENV: &str = "WARDROBE_BENCH_MYSQL_USER";
 const DEFAULT_MYSQL_PASSWORD_ENV: &str = "WARDROBE_BENCH_MYSQL_PASSWORD";
 const DEFAULT_MYSQL_CREDENTIALS_FILE: &str = "target/wardrobe-benchmark/mysql-credentials.env";
 const DEFAULT_NEO4J_USER: &str = "neo4j";
+const DEFAULT_NEO4J_PASSWORD: &str = "wardrobe_benchmark";
 const DEFAULT_NEO4J_USER_ENV: &str = "WARDROBE_BENCH_NEO4J_USER";
 const DEFAULT_NEO4J_PASSWORD_ENV: &str = "WARDROBE_BENCH_NEO4J_PASSWORD";
 const DEFAULT_NEO4J_CREDENTIALS_FILE: &str = "target/wardrobe-benchmark/neo4j-credentials.env";
@@ -2116,7 +2118,9 @@ impl MySqlTarget {
             Some(name) => match env::var(&name) {
                 Ok(value) => Some(value),
                 Err(env::VarError::NotPresent) if name == DEFAULT_MYSQL_PASSWORD_ENV => {
-                    fallback_credentials.password
+                    fallback_credentials
+                        .password
+                        .or_else(|| Some(DEFAULT_MYSQL_PASSWORD.to_string()))
                 }
                 Err(env::VarError::NotPresent) => {
                     return Err(Error::new(
@@ -2380,14 +2384,9 @@ impl Neo4jTarget {
         let password = match env::var(&password_env) {
             Ok(value) => value,
             Err(env::VarError::NotPresent) if password_env == DEFAULT_NEO4J_PASSWORD_ENV => {
-                fallback_credentials.password.ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "Neo4j password environment variable '{password_env}' is not set and {DEFAULT_NEO4J_CREDENTIALS_FILE} was not found; run utilities/benchmark/start-neo4j-docker.sh or set {password_env}"
-                        ),
-                    )
-                })?
+                fallback_credentials
+                    .password
+                    .unwrap_or_else(|| DEFAULT_NEO4J_PASSWORD.to_string())
             }
             Err(env::VarError::NotPresent) => {
                 return Err(Error::new(

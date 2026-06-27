@@ -4,6 +4,10 @@ set -euo pipefail
 CONTAINER_NAME="${WARDROBE_BENCH_MYSQL_CONTAINER:-wardrobe-benchmark-mysql}"
 IMAGE="${WARDROBE_BENCH_MYSQL_IMAGE:-mysql:8.4}"
 HOST_PORT="${WARDROBE_BENCH_MYSQL_PORT:-3306}"
+DATABASE_EXPLICIT="${WARDROBE_BENCH_MYSQL_DATABASE+x}"
+ROOT_PASSWORD_EXPLICIT="${WARDROBE_BENCH_MYSQL_ROOT_PASSWORD+x}"
+BENCHMARK_USER_EXPLICIT="${WARDROBE_BENCH_MYSQL_USER+x}"
+BENCHMARK_PASSWORD_EXPLICIT="${WARDROBE_BENCH_MYSQL_PASSWORD+x}"
 DATABASE="${WARDROBE_BENCH_MYSQL_DATABASE:-wardrobe_benchmark}"
 ROOT_PASSWORD="${WARDROBE_BENCH_MYSQL_ROOT_PASSWORD:-wardrobe_benchmark}"
 BENCHMARK_USER="${WARDROBE_BENCH_MYSQL_USER:-wardrobe_benchmark}"
@@ -35,6 +39,46 @@ container_exists() {
 
 container_running() {
     docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
+}
+
+container_env_value() {
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null |
+        sed -n "s/^$1=//p" |
+        head -n 1
+}
+
+capture_existing_container_credentials() {
+    if ! container_exists; then
+        return 0
+    fi
+
+    log_step "Capturing credentials from existing MySQL container"
+    local value
+    if [ -z "$DATABASE_EXPLICIT" ]; then
+        value="$(container_env_value MYSQL_DATABASE || true)"
+        if [ -n "$value" ]; then
+            DATABASE="$value"
+        fi
+    fi
+    if [ -z "$ROOT_PASSWORD_EXPLICIT" ]; then
+        value="$(container_env_value MYSQL_ROOT_PASSWORD || true)"
+        if [ -n "$value" ]; then
+            ROOT_PASSWORD="$value"
+        fi
+    fi
+    if [ -z "$BENCHMARK_USER_EXPLICIT" ]; then
+        value="$(container_env_value MYSQL_USER || true)"
+        if [ -n "$value" ]; then
+            BENCHMARK_USER="$value"
+        fi
+    fi
+    if [ -z "$BENCHMARK_PASSWORD_EXPLICIT" ]; then
+        value="$(container_env_value MYSQL_PASSWORD || true)"
+        if [ -n "$value" ]; then
+            BENCHMARK_PASSWORD="$value"
+        fi
+    fi
+    echo "Credential source: Docker container environment with shell overrides when provided."
 }
 
 wait_for_mysql() {
@@ -108,6 +152,7 @@ write_credentials_file() {
 }
 
 require_docker
+capture_existing_container_credentials
 
 log_step "Preparing MySQL benchmark container"
 echo "Container name : $CONTAINER_NAME"

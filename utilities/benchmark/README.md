@@ -35,7 +35,7 @@ bash utilities/benchmark/start-neo4j-docker.sh
 bash utilities/benchmark/start-wardrobe-docker.sh
 ```
 
-Each script starts or reuses a named container, waits for readiness, and prints the matching benchmark flags. The Wardrobe script runs the current workspace code inside the official Rust image, with named Docker volumes for storage, Cargo caches, and the Linux build target.
+Each script starts or reuses a named container, waits for readiness, writes any service credentials the benchmark needs under `target/wardrobe-benchmark`, and prints the matching benchmark flags. When a MySQL or Neo4j container already exists, the helper reads Docker's stored container environment first so the fallback credentials file matches the running service. The Wardrobe script runs the current workspace code inside the official Rust image, with named Docker volumes for storage, Cargo caches, and the Linux build target.
 
 Useful examples:
 
@@ -68,9 +68,9 @@ Targets:
 - `mysql` uses a persistent native MySQL Rust connection against `--mysql-host`, `--mysql-port`, and `--mysql-database`.
 - `neo4j` uses a persistent native Neo4j Rust driver against `--neo4j-uri`, `--neo4j-database`, `--neo4j-user`, and `--neo4j-password-env`.
 
-The MySQL helper creates a dedicated `wardrobe_benchmark` user and writes `target/wardrobe-benchmark/mysql-credentials.env`, which the benchmark reads by default. For custom credentials, set `WARDROBE_BENCH_MYSQL_USER` and `WARDROBE_BENCH_MYSQL_PASSWORD`, or pass `--mysql-user` and `--mysql-password-env <VAR>`.
+The MySQL helper creates a dedicated `wardrobe_benchmark` user and writes `target/wardrobe-benchmark/mysql-credentials.env`, which the benchmark reads by default. If neither the env vars nor the credentials file exists, the benchmark still sends the standard helper password `wardrobe_benchmark`. For custom credentials, set `WARDROBE_BENCH_MYSQL_USER` and `WARDROBE_BENCH_MYSQL_PASSWORD`, or pass `--mysql-user` and `--mysql-password-env <VAR>`. Use `--mysql-no-password` only for intentionally unauthenticated MySQL targets.
 
-The Neo4j helper writes `target/wardrobe-benchmark/neo4j-credentials.env`, which the benchmark reads by default. For custom credentials, set `WARDROBE_BENCH_NEO4J_USER` and `WARDROBE_BENCH_NEO4J_PASSWORD`, or pass `--neo4j-user` and `--neo4j-password-env <VAR>`.
+The Neo4j helper writes `target/wardrobe-benchmark/neo4j-credentials.env`, which the benchmark reads by default. If neither the env vars nor the credentials file exists, the benchmark still sends the standard helper password `wardrobe_benchmark`. For custom credentials, set `WARDROBE_BENCH_NEO4J_USER` and `WARDROBE_BENCH_NEO4J_PASSWORD`, or pass `--neo4j-user` and `--neo4j-password-env <VAR>`.
 
 The benchmark phases are:
 

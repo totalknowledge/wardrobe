@@ -52,7 +52,7 @@ pub(super) fn inspect_drawer(
         .iter()
         .filter(|path| path.is_file())
         .count();
-    let record_count = engine.count(&target.label, None, None)?;
+    let record_count = engine.count(target.label.as_str(), None::<crate::OperationOptions>)?;
 
     Ok(DrawerInspectionMetrics {
         path: target.label,

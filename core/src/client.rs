@@ -1,8 +1,9 @@
 use crate::wrdb_lib::connection::{ConnectionTarget, DriverKind};
 use crate::wrdb_lib::driver::ClientDriver;
 use crate::{
-    BackupArchive, CheckReport, DrawerInspectionMetrics, QueryModifiers, RestoreReport,
-    StorageDiagnosis, StorageInventory, StorageLocator, VacuumReport, WalVerification,
+    AlterRequest, BackupArchive, CompactRequest, CreateRequest, CreateResult, DeleteResult,
+    DropRequest, InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult,
+    RestoreReport, StatusRequest, StatusResult, UpsertResult, VacuumReport,
 };
 use serde_json::Value;
 use std::io::Result;
@@ -35,185 +36,96 @@ impl WardrobeClient {
         self.target.uses_socket_transport()
     }
 
-    pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String> {
-        self.driver.upsert(drawer_name, payload)
-    }
-
-    pub fn bulk_upsert(
-        &self,
-        drawer_name: &str,
-        records: Vec<Value>,
-        atomic: bool,
-    ) -> Result<Vec<String>> {
-        self.driver.bulk_upsert(drawer_name, records, atomic)
-    }
-
-    pub fn find_all(&self, drawer_name: &str) -> Result<Vec<Value>> {
-        self.driver.find_all(drawer_name)
-    }
-
-    pub fn find_by_filter(
-        &self,
-        drawer_name: &str,
-        filter: Value,
-        modifiers: Option<QueryModifiers>,
-    ) -> Result<Vec<Value>> {
-        self.driver.find_by_filter(drawer_name, filter, modifiers)
-    }
-
-    pub fn count(
-        &self,
-        drawer_name: &str,
-        filter: Option<Value>,
-        modifiers: Option<QueryModifiers>,
-    ) -> Result<usize> {
-        self.driver.count(drawer_name, filter, modifiers)
-    }
-
-    pub fn find_by_id(&self, pointer: &str) -> Result<Option<Value>> {
-        self.driver.find_by_id(pointer)
-    }
-
-    pub fn delete_by_id(&self, pointer: &str) -> Result<bool> {
-        self.driver.delete_by_id(pointer)
-    }
-
-    pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize> {
-        self.driver.delete_by_filter(drawer_name, filter)
-    }
-
-    pub fn delete<L>(&self, locator: L) -> Result<bool>
+    pub fn upsert<P, F, O>(&self, payload: P, filter: F, options: O) -> Result<UpsertResult>
     where
-        L: Into<StorageLocator>,
+        P: Into<Value>,
+        F: Into<OperationFilter>,
+        O: Into<OperationOptions>,
     {
-        self.driver.delete(locator.into())
-    }
-
-    pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
-        self.driver.vacuum_drawer(drawer_name)
-    }
-
-    pub fn migrate_drawer(&self, drawer_name: &str) -> Result<VacuumReport> {
-        self.driver.migrate_drawer(drawer_name)
-    }
-
-    pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics> {
-        self.driver.inspect_drawer(drawer_name)
-    }
-
-    pub fn check_path(&self, path: &str) -> Result<CheckReport> {
-        self.driver.check_path(path)
-    }
-
-    pub fn diagnose_storage(&self) -> Result<StorageDiagnosis> {
-        self.driver.diagnose_storage()
-    }
-
-    pub fn list_drawer_names(&self) -> Result<Vec<String>> {
-        self.driver.list_drawer_names()
-    }
-
-    pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive> {
-        self.driver.backup_archive(source_path)
-    }
-
-    pub fn restore_archive(
-        &self,
-        destination_path: &str,
-        archive: BackupArchive,
-    ) -> Result<RestoreReport> {
-        self.driver.restore_archive(destination_path, archive)
-    }
-
-    pub fn create_database(&self, database_name: &str) -> Result<StorageInventory> {
-        self.driver.create_database(database_name)
-    }
-
-    pub fn create_schema(
-        &self,
-        database_name: &str,
-        schema_name: &str,
-    ) -> Result<StorageInventory> {
-        self.driver.create_schema(database_name, schema_name)
-    }
-
-    pub fn create_drawer(
-        &self,
-        database_name: &str,
-        schema_name: &str,
-        drawer_name: &str,
-    ) -> Result<StorageInventory> {
         self.driver
-            .create_drawer(database_name, schema_name, drawer_name)
+            .upsert(payload.into(), filter.into(), options.into())
     }
 
-    pub fn register_tenant_route(
-        &self,
-        tenant_id: &str,
-        database_name: &str,
-        location: &str,
-    ) -> Result<StorageInventory> {
-        self.driver
-            .register_tenant_route(tenant_id, database_name, location)
+    pub fn read<F, O>(&self, filter: F, options: O) -> Result<ReadResult>
+    where
+        F: Into<OperationFilter>,
+        O: Into<OperationOptions>,
+    {
+        self.driver.read(filter.into(), options.into())
     }
 
-    pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value> {
-        self.driver.manage_user(action, payload)
+    pub fn count<F, O>(&self, filter: F, options: O) -> Result<usize>
+    where
+        F: Into<OperationFilter>,
+        O: Into<OperationOptions>,
+    {
+        self.driver.count(filter.into(), options.into())
     }
 
-    pub fn manage_schema(
-        &self,
-        drawer_name: &str,
-        action: &str,
-        kind: &str,
-        field_name: &str,
-        payload: Value,
-    ) -> Result<Value> {
-        self.driver
-            .manage_schema(drawer_name, action, kind, field_name, payload)
+    pub fn delete<F, O>(&self, filter: F, options: O) -> Result<DeleteResult>
+    where
+        F: Into<OperationFilter>,
+        O: Into<OperationOptions>,
+    {
+        self.driver.delete(filter.into(), options.into())
     }
 
-    pub fn show_tenants(&self) -> Result<Vec<String>> {
-        self.driver.show_tenants()
+    pub fn compact<C>(&self, request: C) -> Result<VacuumReport>
+    where
+        C: Into<CompactRequest>,
+    {
+        self.driver.compact(request.into())
     }
 
-    pub fn list_tenants(&self) -> Result<Vec<String>> {
-        self.show_tenants()
+    pub fn inspect<F, O>(&self, filter: F, options: O) -> Result<InspectResult>
+    where
+        F: Into<OperationFilter>,
+        O: Into<OperationOptions>,
+    {
+        self.driver.inspect(filter.into(), options.into())
     }
 
-    pub fn show_databases(&self) -> Result<Vec<StorageInventory>> {
-        self.driver.show_databases()
+    pub fn backup(&self, source_path: &str) -> Result<BackupArchive> {
+        self.driver.backup(source_path)
     }
 
-    pub fn list_databases(&self) -> Result<Vec<StorageInventory>> {
-        self.show_databases()
+    pub fn restore(&self, destination_path: &str, archive: BackupArchive) -> Result<RestoreReport> {
+        self.driver.restore(destination_path, archive)
     }
 
-    pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification> {
-        self.driver.verify_wal(database_name)
+    pub fn create<C>(&self, request: C) -> Result<CreateResult>
+    where
+        C: Into<CreateRequest>,
+    {
+        self.driver.create(request.into())
     }
 
-    pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>> {
-        self.driver.show_schemas(database_name)
+    pub fn alter<A>(&self, request: A) -> Result<Value>
+    where
+        A: Into<AlterRequest>,
+    {
+        self.driver.alter(request.into())
     }
 
-    pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>> {
-        self.show_schemas(database_name)
+    pub fn drop<D>(&self, request: D) -> Result<Value>
+    where
+        D: Into<DropRequest>,
+    {
+        self.driver.drop(request.into())
     }
 
-    pub fn show_drawers(
-        &self,
-        database_name: &str,
-        schema_name: &str,
-    ) -> Result<Vec<StorageInventory>> {
-        self.driver.show_drawers(database_name, schema_name)
+    pub fn grant(&self, request: PermissionRequest) -> Result<Value> {
+        self.driver.grant(request)
     }
 
-    pub fn list_drawers(
-        &self,
-        database_name: &str,
-        schema_name: &str,
-    ) -> Result<Vec<StorageInventory>> {
-        self.show_drawers(database_name, schema_name)
+    pub fn revoke(&self, request: PermissionRequest) -> Result<Value> {
+        self.driver.revoke(request)
+    }
+
+    pub fn status<S>(&self, request: S) -> Result<StatusResult>
+    where
+        S: Into<StatusRequest>,
+    {
+        self.driver.status(request.into())
     }
 }

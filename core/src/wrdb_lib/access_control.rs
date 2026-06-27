@@ -26,6 +26,18 @@ pub(super) fn manage_user(root_directory: &Path, action: &str, payload: Value) -
                 "username": username,
             }))
         }
+        "drop_user" | "drop" | "remove_user" | "delete_user" => {
+            let username = user_payload_username(&payload)?;
+            let users = access_control_users_mut(&mut registry)?;
+            let removed = users.remove(&username).is_some();
+            write_access_control_registry(root_directory, &registry)?;
+            Ok(json!({
+                "ok": true,
+                "action": "drop_user",
+                "username": username,
+                "removed": removed,
+            }))
+        }
         "grant_permission" | "revoke_permission" => {
             let username = permission_payload_username(&payload)?;
             let scope = permission_payload_scope(&payload)?;

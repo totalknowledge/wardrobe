@@ -5,6 +5,9 @@ CONTAINER_NAME="${WARDROBE_BENCH_NEO4J_CONTAINER:-wardrobe-benchmark-neo4j}"
 IMAGE="${WARDROBE_BENCH_NEO4J_IMAGE:-neo4j:5.26-community}"
 HOST_BOLT_PORT="${WARDROBE_BENCH_NEO4J_BOLT_PORT:-7687}"
 HOST_HTTP_PORT="${WARDROBE_BENCH_NEO4J_HTTP_PORT:-7474}"
+DATABASE_EXPLICIT="${WARDROBE_BENCH_NEO4J_DATABASE+x}"
+NEO4J_USER_EXPLICIT="${WARDROBE_BENCH_NEO4J_USER+x}"
+NEO4J_PASSWORD_EXPLICIT="${WARDROBE_BENCH_NEO4J_PASSWORD+x}"
 DATABASE="${WARDROBE_BENCH_NEO4J_DATABASE:-neo4j}"
 NEO4J_USER="${WARDROBE_BENCH_NEO4J_USER:-neo4j}"
 NEO4J_PASSWORD="${WARDROBE_BENCH_NEO4J_PASSWORD:-wardrobe_benchmark}"
@@ -33,6 +36,37 @@ container_exists() {
 
 container_running() {
     docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
+}
+
+container_env_value() {
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null |
+        sed -n "s/^$1=//p" |
+        head -n 1
+}
+
+capture_existing_container_credentials() {
+    if ! container_exists; then
+        return 0
+    fi
+
+    log_step "Capturing credentials from existing Neo4j container"
+    local value
+    if [ -z "$DATABASE_EXPLICIT" ]; then
+        value="$(container_env_value NEO4J_dbms_default__database || true)"
+        if [ -n "$value" ]; then
+            DATABASE="$value"
+        fi
+    fi
+    value="$(container_env_value NEO4J_AUTH || true)"
+    if [ -n "$value" ] && [ "$value" != "none" ] && [ "${value#*/}" != "$value" ]; then
+        if [ -z "$NEO4J_USER_EXPLICIT" ]; then
+            NEO4J_USER="${value%%/*}"
+        fi
+        if [ -z "$NEO4J_PASSWORD_EXPLICIT" ]; then
+            NEO4J_PASSWORD="${value#*/}"
+        fi
+    fi
+    echo "Credential source: Docker container environment with shell overrides when provided."
 }
 
 wait_for_neo4j() {
@@ -70,6 +104,7 @@ write_credentials_file() {
 }
 
 require_docker
+capture_existing_container_credentials
 
 log_step "Preparing Neo4j benchmark container"
 echo "Container name : $CONTAINER_NAME"

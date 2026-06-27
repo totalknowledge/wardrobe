@@ -1,593 +1,868 @@
 # Wardrobe API
 
-This document describes the current public API of `wardrobe-core`.
+This document describes the canonical public Rust API exposed by wardrobe-core.
 
-There are two main application-facing surfaces:
+The stable operation vocabulary is:
 
-- Client API: use `WardrobeClient` when code should work across embedded, TCP, and Unix socket targets
-- Engine API: use `WardrobeEngine` when code runs directly against the local storage engine
+- read
+- upsert
+- delete
+- inspect
+- count
+- compact
+- create
+- alter
+- drop
+- backup
+- restore
+- grant
+- revoke
+- status
 
-The engine is the local superset. The client mirrors the same command surface wherever transport allows it.
+The public API should use the same operation names as the CLI and server command protocol. Internal helper functions may use more specific names, but public-facing Rust methods, CLI commands, and command variants should follow this vocabulary.
 
-Most operations return `std::io::Result<T>`.
+## Entry Points
 
-Note on naming: the CLI help and `NOTES.txt` use `wardrobe` and `bay` as user-facing terms. The Rust API names those same layers `database` and `schema`.
+WardrobeEngine executes directly against an embedded storage root.
 
----
-
-## Client API
-
-The client API is the preferred boundary for application code that may move between embedded and remote execution.
-
-### `WardrobeClient`
-
-Primary connection-driven facade.
-
-#### Constructors and connection metadata
+WardrobeClient selects embedded, TCP, or Unix socket transport from a connection string while preserving the same high-level operation model.
 
 ```rust
+impl WardrobeEngine {
+pub fn open(directory: impl AsRef<str>) -> Result<Self>
+}
+
+impl WardrobeClient {
 pub fn open(connection_string: impl AsRef<str>) -> Result<Self>
+}
+```
+
+WardrobeClient also exposes connection metadata:
+
+```rust
 pub fn connection_target(&self) -> &ConnectionTarget
 pub fn driver_kind(&self) -> DriverKind
 pub fn requires_embedded_engine(&self) -> bool
 pub fn uses_socket_transport(&self) -> bool
 ```
 
-Accepted connection shapes:
+## Shared Operation Shape
 
-- Embedded path: `./data`
-- Embedded URI: `wardrobe://local/path/to/data`
-- File URI: `wardrobe+file://path/to/data`
-- TCP URI: `wardrobe://host[:port]`
-- Unix socket URI: `wardrobe+unix:///tmp/wardrobe.sock`
-
-#### Record operations
+The canonical data-operation shape is:
 
 ```rust
-pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String>
-pub fn find_all(&self, drawer_name: &str) -> Result<Vec<Value>>
-pub fn find_by_filter(
-    &self,
-    drawer_name: &str,
-    filter: Value,
-    modifiers: Option<QueryModifiers>,
-) -> Result<Vec<Value>>
-pub fn count(
-    &self,
-    drawer_name: &str,
-    filter: Option<Value>,
-    modifiers: Option<QueryModifiers>,
-) -> Result<usize>
-pub fn find_by_id(&self, pointer: &str) -> Result<Option<Value>>
-pub fn delete_by_id(&self, pointer: &str) -> Result<bool>
-pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize>
-pub fn delete<L>(&self, locator: L) -> Result<bool>
+read(filter, options)
+upsert(payload, filter, options)
+delete(filter, options)
+inspect(filter, options)
+count(filter, options)
+```
+
+Where:
+
+- payload is the data being written.
+- filter identifies a drawer, record, candidate key, query criteria, or structural target.
+- options modifies execution behavior, return shape, safety rules, traversal, hydration, sorting, limits, or diagnostic depth.
+
+upsert is the only RUDIC operation whose first argument is payload.
+
+read, delete, inspect, and count use filter as their first argument.
+
+options is always optional.
+
+## Record Operations
+
+```rust
+pub fn upsert<P, F, O>(&self, payload: P, filter: F, options: O) -> Result<UpsertResult>
 where
-    L: Into<StorageLocator>
-```
+P: Into<Value>,
+F: Into<OperationFilter>,
+O: Into<OperationOptions>
 
-`delete` accepts either an inline pointer such as `@user:john` or an explicit locator such as `("user", "john")`.
-
-#### Maintenance, inspection, lifecycle, and recovery
-
-```rust
-pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
-pub fn migrate_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
-pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics>
-pub fn check_path(&self, path: &str) -> Result<CheckReport>
-pub fn diagnose_storage(&self) -> Result<StorageDiagnosis>
-pub fn list_drawer_names(&self) -> Result<Vec<String>>
-pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive>
-pub fn restore_archive(
-    &self,
-    destination_path: &str,
-    archive: BackupArchive,
-) -> Result<RestoreReport>
-pub fn create_database(&self, database_name: &str) -> Result<StorageInventory>
-pub fn create_schema(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<StorageInventory>
-pub fn create_drawer(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-    drawer_name: &str,
-) -> Result<StorageInventory>
-pub fn register_tenant_route(
-    &self,
-    tenant_id: &str,
-    database_name: &str,
-    location: &str,
-) -> Result<StorageInventory>
-pub fn manage_schema(
-    &self,
-    drawer_name: &str,
-    action: &str,
-    kind: &str,
-    field_name: &str,
-    payload: Value,
-) -> Result<Value>
-pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value>
-```
-
-Notes:
-
-- `manage_schema` is the programmatic surface behind CLI `add` and `remove`
-- `manage_user` is the programmatic surface behind CLI `add user`, `grant permission`, and `revoke permission`
-- `manage_user` is intentionally remote-only on `WardrobeClient`; embedded targets return `ErrorKind::Unsupported`
-- Path-style drawer names such as `inventory/public/tool` are accepted by the structural admin and inspection surfaces
-
-#### Discovery and verification
-
-```rust
-pub fn show_tenants(&self) -> Result<Vec<String>>
-pub fn list_tenants(&self) -> Result<Vec<String>>
-pub fn show_databases(&self) -> Result<Vec<StorageInventory>>
-pub fn list_databases(&self) -> Result<Vec<StorageInventory>>
-pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification>
-pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>>
-pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>>
-pub fn show_drawers(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<Vec<StorageInventory>>
-pub fn list_drawers(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<Vec<StorageInventory>>
-```
-
-`list_*` methods are aliases for the corresponding `show_*` methods.
-
----
-
-## Engine API
-
-The engine API is the local storage engine surface. It includes the same record, maintenance, inspection, lifecycle, and discovery operations as the client, plus local engine construction, cache inspection, direct command execution, and tenant-scoped execution helpers.
-
-### `WardrobeEngine`
-
-Local filesystem-backed engine facade.
-
-#### Constructors
-
-```rust
-pub fn open(directory: &str) -> Result<Self>
-pub fn open_with_drawer_cache_limit(
-    directory: &str,
-    max_cached_drawers: usize,
-) -> Result<Self>
-pub fn open_with_wal_checkpoint_thresholds(
-    directory: &str,
-    wal_size_threshold_bytes: u64,
-    wal_ops_threshold_count: u64,
-) -> Result<Self>
-pub fn open_with_drawer_cache_limit_and_wal_checkpoint_thresholds(
-    directory: &str,
-    max_cached_drawers: usize,
-    wal_size_threshold_bytes: u64,
-    wal_ops_threshold_count: u64,
-) -> Result<Self>
-#[deprecated(note = "Use WardrobeEngine::open for filesystem-backed initialization")]
-pub fn new(directory: &str) -> Result<Self>
-```
-
-#### Record operations
-
-```rust
-pub fn upsert(&self, drawer_name: &str, payload: Value) -> Result<String>
-pub fn find_all(&self, drawer_name: &str) -> Result<Vec<Value>>
-pub fn find_by_filter(
-    &self,
-    drawer_name: &str,
-    filter: Value,
-    modifiers: Option<QueryModifiers>,
-) -> Result<Vec<Value>>
-pub fn count(
-    &self,
-    drawer_name: &str,
-    filter: Option<Value>,
-    modifiers: Option<QueryModifiers>,
-) -> Result<usize>
-pub fn find_by_id(&self, pointer: &str) -> Result<Option<Value>>
-pub fn delete<L>(&self, locator: L) -> Result<bool>
+pub fn read<F, O>(&self, filter: F, options: O) -> Result<ReadResult>
 where
-    L: Into<StorageLocator>
-pub fn delete_by_id<L>(&self, locator: L) -> Result<bool>
+F: Into<OperationFilter>,
+O: Into<OperationOptions>
+
+pub fn delete<F, O>(&self, filter: F, options: O) -> Result<DeleteResult>
 where
-    L: Into<StorageLocator>
-pub fn delete_by_filter(&self, drawer_name: &str, filter: Value) -> Result<usize>
+F: Into<OperationFilter>,
+O: Into<OperationOptions>
+
+pub fn inspect<F, O>(&self, filter: F, options: O) -> Result<InspectResult>
+where
+F: Into<OperationFilter>,
+O: Into<OperationOptions>
+
+pub fn count<F, O>(&self, filter: F, options: O) -> Result<usize>
+where
+F: Into<OperationFilter>,
+O: Into<OperationOptions>
 ```
 
-#### Maintenance, inspection, lifecycle, and recovery
+Convenience constructors may be provided, but the public model should remain payload, filter, and options.
+
+## Upsert
+
+upsert accepts either a single JSON object or a JSON array of objects.
 
 ```rust
-pub fn vacuum_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
-pub fn migrate_drawer(&self, drawer_name: &str) -> Result<VacuumReport>
-pub fn manage_schema(
-    &self,
-    drawer_name: &str,
-    action: &str,
-    kind: &str,
-    field_name: &str,
-    payload: Value,
-) -> Result<Value>
-pub fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics>
-pub fn check_path(&self, raw_path: &str) -> Result<CheckReport>
-pub fn diagnose_storage(&self) -> Result<StorageDiagnosis>
-pub fn list_drawer_names(&self) -> Result<Vec<String>>
-pub fn backup_archive(&self, source_path: &str) -> Result<BackupArchive>
-pub fn restore_archive(
-    &self,
-    destination_path: &str,
-    archive: BackupArchive,
-) -> Result<RestoreReport>
-pub fn manage_user(&self, action: &str, payload: Value) -> Result<Value>
-pub fn cached_drawer_count(&self) -> Result<usize>
-pub fn create_database(&self, database_name: &str) -> Result<StorageInventory>
-pub fn create_schema(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<StorageInventory>
-pub fn create_drawer(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-    drawer_name: &str,
-) -> Result<StorageInventory>
-pub fn register_tenant_route(
-    &self,
-    tenant_id: &str,
-    database_name: &str,
-    location: &str,
-) -> Result<StorageInventory>
+client.upsert(
+json!({"_id": "@book:123", "title": "The Hobbit"}),
+OperationFilter::none(),
+None::<OperationOptions>,
+)?;
 ```
-
-Unlike `WardrobeClient`, the engine can execute `manage_user` locally because the server uses the same engine-backed administrative primitive.
-
-#### Discovery, verification, and command execution
 
 ```rust
-pub fn show_tenants(&self) -> Result<Vec<String>>
-pub fn list_tenants(&self) -> Result<Vec<String>>
-pub fn show_databases(&self) -> Result<Vec<StorageInventory>>
-pub fn list_databases(&self) -> Result<Vec<StorageInventory>>
-pub fn verify_wal(&self, database_name: Option<&str>) -> Result<WalVerification>
-pub fn show_schemas(&self, database_name: &str) -> Result<Vec<String>>
-pub fn list_schemas(&self, database_name: &str) -> Result<Vec<String>>
-pub fn show_drawers(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<Vec<StorageInventory>>
-pub fn list_drawers(
-    &self,
-    database_name: &str,
-    schema_name: &str,
-) -> Result<Vec<StorageInventory>>
-pub fn execute(
-    &self,
-    coordinate: StorageCoordinate,
-    command: Command,
-) -> Result<CommandResult>
-pub fn execute_in_scope(&self, scope: StorageScope, command: Command) -> Result<CommandResult>
-pub fn execute_for_tenant(
-    &self,
-    tenant_id: &str,
-    database_name: &str,
-    schema_name: &str,
-    command: Command,
-) -> Result<CommandResult>
-pub fn execute_command(&self, command: Command) -> Result<CommandResult>
+client.upsert(
+json!({"title": "The Hobbit"}),
+OperationFilter::drawer("book"),
+None::<OperationOptions>,
+)?;
 ```
-
-`execute`, `execute_in_scope`, `execute_for_tenant`, and `execute_command` all use the shared `Command` / `CommandResult` protocol types that also drive remote server execution.
-
----
-
-## Shared API Types
-
-These types are used by both the client and engine APIs.
-
-### `QueryModifiers`
-
-Optional query modifiers for filtered reads.
-
-Fields:
-
-- `order_by: Option<String>`
-- `order_direction: Option<OrderDirection>`
-- `limit: Option<usize>`
-- `offset: Option<usize>`
-
-### `OrderDirection`
-
-Sort direction for `QueryModifiers`.
-
-Variants:
-
-- `Ascending`
-- `Descending`
-
-### `StorageInventory`
-
-Inventory summary returned by discovery and lifecycle methods.
-
-Fields:
-
-- `name: String`
-- `record_count: usize`
-- `disk_size_bytes: u64`
-- `register_file_count: usize`
-
-### `StorageLocator`
-
-Flexible record locator used by delete APIs.
-
-Variants:
-
-- `Explicit { drawer: String, id: String }`
-- `Inline(String)`
-
-Helpers:
 
 ```rust
-pub fn explicit(drawer: &str, id: &str) -> Self
-pub fn inline(locator: &str) -> Self
+client.upsert(
+json!([
+{"_id": "@book:123", "title": "The Hobbit"},
+{"_id": "@book:456", "title": "Dune"}
+]),
+OperationFilter::none(),
+None::<OperationOptions>,
+)?;
 ```
 
-Conversions:
-
-- `&str` -> `StorageLocator::Inline`
-- `String` -> `StorageLocator::Inline`
-- `&String` -> `StorageLocator::Inline`
-- `(&str, &str)` -> `StorageLocator::Explicit`
-
-### `VacuumReport`
-
-Maintenance result returned by `vacuum_drawer` and `migrate_drawer`.
-
-Fields:
-
-- `records_rewritten: usize`
-- `data_bytes_before: u64`
-- `data_bytes_after: u64`
-- `index_bytes_before: u64`
-- `index_bytes_after: u64`
-- `bytes_reclaimed: u64`
-
-### `WalVerification`
-
-WAL verification result returned by `verify_wal`.
-
-Fields:
-
-- `path: String`
-- `entry_count: usize`
-- `last_sequence: Option<u64>`
-
-### `DrawerInspectionMetrics`
-
-Inspection summary returned by `inspect_drawer`.
-
-Fields:
-
-- `path: String`
-- `data_bytes: u64`
-- `index_bytes: u64`
-- `meta_bytes: u64`
-- `total_bytes: u64`
-- `record_count: usize`
-- `register_file_count: usize`
-- `tombstone_fragmentation_percent: Option<f64>`
-
-### `CheckReport`
-
-Structural presence and sanity report returned by `check_path`.
-
-Fields:
-
-- `path: String`
-- `kind: String`
-- `entries: Vec<CheckEntry>`
-
-### `CheckEntry`
-
-One physical check result inside a `CheckReport`.
-
-Fields:
-
-- `label: String`
-- `path: String`
-- `exists: bool`
-- `bytes: Option<u64>`
-
-### `StorageDiagnosis`
-
-High-level storage diagnosis returned by `diagnose_storage`.
-
-Fields:
-
-- `storage_directory: String`
-- `storage_bytes: u64`
-- `drawer_count: usize`
-- `status: String`
-- `drawers: Vec<String>`
-
-### `BackupArchive`
-
-Archive payload returned by `backup_archive` and consumed by `restore_archive`.
-
-Fields:
-
-- `format: String`
-- `source_path: String`
-- `scope: String`
-- `files: Vec<BackupArchiveFile>`
-
-### `BackupArchiveFile`
-
-One archived file inside a `BackupArchive`.
-
-Fields:
-
-- `path: String`
-- `bytes_hex: String`
-
-### `RestoreReport`
-
-Restore summary returned by `restore_archive`.
-
-Fields:
-
-- `destination_path: String`
-- `scope: String`
-- `file_count: usize`
-- `byte_count: usize`
-
-### `ConnectionTarget`
-
-Parsed client connection target.
-
-Variants:
-
-- `EmbeddedPath(PathBuf)`
-- `Network { host: String, port: u16 }`
-- `UnixSocket { path: PathBuf }`
-
-Helpers:
+upsert returns stored pointers in input order.
 
 ```rust
-pub fn parse(connection_string: &str) -> Result<Self>
-pub fn driver_kind(&self) -> DriverKind
-pub fn requires_embedded_engine(&self) -> bool
-pub fn uses_socket_transport(&self) -> bool
+pub enum UpsertResult {
+Pointers(Vec<String>),
+}
 ```
 
-### `DriverKind`
+A single-object upsert still returns a one-item pointer list.
 
-Driver category selected from a connection target.
+Wardrobe should not expose a separate public bulk_upsert method. Array payloads are bulk upserts.
 
-Variants:
+## Pointer And ID Resolution
 
-- `Embedded`
-- `Network`
-- `UnixSocket`
+Wardrobe pointer parsing must distinguish:
 
-Helpers:
+```text
+@book drawer-only pointer
+@book:123 fully qualified record pointer
+123 local record id
+```
+
+Internal parsing should use a focused parser, not inline ad hoc string handling inside upsert.
+
+Suggested internal shape:
 
 ```rust
-pub fn requires_embedded_engine(self) -> bool
-pub fn uses_socket_transport(self) -> bool
+pub enum ParsedPointer {
+DrawerOnly { drawer: String },
+FullPointer { drawer: String, id: String },
+LocalId { id: String },
+}
 ```
 
-### `Command`
+Resolution rules:
 
-Shared command enum used by local execution and remote protocol execution.
+- _id: "@book:123" means update or create record 123 in drawer book.
+- _id: "@book" means create a new record in drawer book.
+- _id: "123" requires a drawer from the filter and means update or create record 123 in that drawer.
+- Missing _id requires a drawer from the filter and means create a new record.
+- Missing _id with no drawer context is invalid.
+- Conflicting drawer information between payload and filter is invalid unless an explicit future option defines override behavior.
 
-Variants:
+## OperationFilter
 
-- `ShowTenants`
-- `ShowDatabases`
-- `VerifyWal { database_name }`
-- `ShowSchemas { database_name }`
-- `ShowDrawers { database_name, schema_name }`
-- `Upsert { drawer_name, payload }`
-- `FindAll { drawer_name }`
-- `FindById { pointer }`
-- `FindByFilter { drawer_name, filter, modifiers }`
-- `Count { drawer_name, filter, modifiers }`
-- `Delete { pointer }`
-- `DeleteByFilter { drawer_name, filter }`
-- `Vacuum { drawer_name }`
-- `Migrate { drawer_name }`
-- `Inspect { drawer_name }`
-- `Check { path }`
-- `Diagnose`
-- `ListDrawers`
-- `Backup { source_path }`
-- `Restore { destination_path, archive }`
-- `DefineDatabase { database_name }`
-- `DefineSchema { database_name, schema_name }`
-- `DefineDrawer { database_name, schema_name, drawer_name }`
-- `DefineTenantRoute { tenant_id, database_name, location }`
-- `ManageSchema { action, kind, drawer_name, field_name, payload }`
-- `ManageUser { action, payload }`
-- `ExecuteForTenant { tenant_id, database_name, schema_name, command }`
-- `Execute { coordinate, command }`
-- `ExecuteInScope { scope, command }`
+OperationFilter is the canonical target/filter input for read, upsert, delete, inspect, and count.
 
-### `CommandResult`
+It may represent:
 
-Result enum returned by local and remote command execution.
+- no filter
+- drawer target
+- record pointer target
+- candidate-key filter
+- query filter
+- multiple filters
 
-Variants:
-
-- `StorageInventory(StorageInventory)`
-- `Tenants(Vec<String>)`
-- `Databases(Vec<StorageInventory>)`
-- `WalVerification(WalVerification)`
-- `Schemas(Vec<String>)`
-- `Drawers(Vec<StorageInventory>)`
-- `Pointer(String)`
-- `Records(Vec<Value>)`
-- `Record(Option<Value>)`
-- `Count(usize)`
-- `Deleted(bool)`
-- `Vacuumed(VacuumReport)`
-- `Migrated(VacuumReport)`
-- `Inspection(DrawerInspectionMetrics)`
-- `Check(CheckReport)`
-- `Diagnosis(StorageDiagnosis)`
-- `DrawerNames(Vec<String>)`
-- `Backup(BackupArchive)`
-- `Restored(RestoreReport)`
-- `Admin(Value)`
-
----
-
-## Engine-Oriented Supporting Types
-
-These types are primarily useful when working with routed engine execution.
-
-### `StorageCoordinate`
-
-Tenant/database/schema coordinate used by `WardrobeEngine::execute`.
-
-Helpers:
+Suggested public shape:
 
 ```rust
-pub fn new(tenant: &str, database: &str, schema: &str) -> Self
-pub fn tenant(&self) -> &str
-pub fn database(&self) -> &str
-pub fn schema(&self) -> &str
+pub enum OperationFilter {
+None,
+Drawer(String),
+Pointer(String),
+Query(Value),
+Many(Vec<OperationFilter>),
+}
 ```
 
-### `StorageScope`
-
-Scope selector used by `WardrobeEngine::execute_in_scope`.
-
-Variants:
-
-- `Tenant { tenant_id, database, schema }`
-- `Database { database }`
-- `Schema { database, schema }`
-- `Drawer { namespace }`
-
-Helpers:
+Common constructors:
 
 ```rust
-pub fn tenant(
-    tenant_id: impl Into<String>,
-    database: impl Into<String>,
-    schema: impl Into<String>,
-) -> Self
-pub fn database(database: &str) -> Self
-pub fn schema(database: &str, schema: &str) -> Self
-pub fn drawer(namespace: &str) -> Self
+OperationFilter::none()
+OperationFilter::drawer("book")
+OperationFilter::pointer("@book:123")
+OperationFilter::query(json!({"isbn": "9780000000000"}))
+OperationFilter::many(vec![
+OperationFilter::pointer("@book:123"),
+OperationFilter::pointer("@book:456"),
+])
 ```
+
+Supported JSON-equivalent filter shapes:
+
+```json
+"@book:123"
+```
+
+```json
+"@book"
+```
+
+```json
+"book"
+```
+
+```json
+{ "_id": "@book:123" }
+```
+
+```json
+{ "drawer": "book" }
+```
+
+```json
+{ "isbn": "9780000000000" }
+```
+
+```json
+[
+"@book:123",
+"@book:456"
+]
+```
+
+```json
+{}
+```
+
+```json
+[]
+```
+
+Rules:
+
+- String full pointer means exact record target.
+- String drawer pointer means drawer target.
+- Object with _id means exact or partial pointer target.
+- Object with drawer means drawer target.
+- Object without _id or drawer means query/candidate filter.
+- Array means multiple filters.
+- Empty object means no filter.
+- Empty array means no filter.
+- Empty filter is valid only when the operation can infer enough context elsewhere.
+
+## OperationOptions
+
+OperationOptions modifies execution without changing the operation verb.
+
+Suggested initial shape:
+
+```rust
+pub struct OperationOptions {
+pub multi: Option<bool>,
+pub atomic: Option<bool>,
+pub create_if_missing: Option<bool>,
+pub return_shape: Option<ReturnShape>,
+pub hydrate: Option<bool>,
+pub limit: Option<usize>,
+pub offset: Option<usize>,
+pub order_by: Option<String>,
+pub order_direction: Option<OrderDirection>,
+pub include_diagnostics: Option<bool>,
+}
+```
+
+Suggested JSON equivalent:
+
+```json
+{
+"multi": false,
+"atomic": true,
+"create_if_missing": true,
+"return_shape": "default",
+"hydrate": true,
+"limit": 100,
+"offset": 0,
+"order_by": "name",
+"order_direction": "asc",
+"include_diagnostics": false
+}
+```
+
+Rules:
+
+- Missing options use documented defaults.
+- Unknown options should produce a clear invalid input error.
+- Options must be normalized before execution reaches drawer-level operations.
+
+## Read
+
+read retrieves records, record pointers, or existence-style results depending on options.
+
+Examples:
+
+```rust
+client.read(OperationFilter::drawer("book"), None)?;
+client.read(OperationFilter::pointer("@book:123"), None)?;
+client.read(
+OperationFilter::query_in("book", json!({"author": "Tolkien"})),
+None::<OperationOptions>,
+)?;
+```
+
+With options:
+
+```rust
+client.read(
+OperationFilter::query_in("book", json!({"author": "Tolkien"})),
+OperationOptions::new()
+.limit(25)
+.offset(0)
+.order_by("title")
+.order_direction(OrderDirection::Ascending),
+)?;
+```
+
+Suggested result shape:
+
+```rust
+pub enum ReadResult {
+Records(Vec<Value>),
+Record(Option<Value>),
+Pointers(Vec<String>),
+Exists(bool),
+}
+```
+
+Rules:
+
+- Full record pointer returns ReadResult::Record.
+- Drawer target returns ReadResult::Records.
+- Query filter returns ReadResult::Records.
+- Options may request pointers instead of hydrated records.
+- Hydration should default to the current public behavior unless explicitly changed by options.
+
+## Upsert Rules
+
+Single object:
+
+- Object with _id: "@book:123" can resolve drawer and record without filter.
+- Object with _id: "@book" can resolve drawer and create a new record.
+- Object with _id: "123" requires a drawer filter.
+- Object with no _id requires a drawer filter.
+
+Array:
+
+- Array with drawer filter applies that drawer to unqualified items.
+- Array without drawer filter requires every item to resolve its own drawer.
+- Mixed-drawer arrays are allowed when every item can resolve a drawer.
+- Mixed-drawer arrays should preserve one logical operation boundary.
+- If any item cannot resolve a drawer, the whole operation is invalid.
+
+Candidate-key filter:
+
+- If matching records exist, update matching records according to multi.
+- If no records match, create only when create_if_missing permits it.
+- If multiple records match and multi is false, return an error.
+
+## Delete
+
+delete removes records only. It does not remove wardrobes, bays, drawers, indexes, rules, users, permissions, or other structures.
+
+Examples:
+
+```rust
+client.delete(OperationFilter::pointer("@book:123"), None)?;
+client.delete(
+OperationFilter::query_in("book", json!({"author": "Tolkien"})),
+OperationOptions::new().multi(true),
+)?;
+```
+
+Suggested result shape:
+
+```rust
+pub struct DeleteResult {
+pub deleted: usize,
+}
+```
+
+Rules:
+
+- Full record pointer deletes one record.
+- Query filter deletes matching records according to safety options.
+- Drawer-only target without a query is rejected unless a future explicit destructive option is added.
+- Delete rules, cascades, restrict, and set-null behavior must remain equivalent to deleting the same records individually.
+- delete returns the exact number of records removed.
+
+## Inspect
+
+inspect returns diagnostic information about records, filters, drawers, storage, indexes, metadata, or execution plans.
+
+Examples:
+
+```rust
+client.inspect(OperationFilter::drawer("book"), None)?;
+client.inspect(OperationFilter::pointer("@book:123"), None::<OperationOptions>)?;
+client.inspect(
+OperationFilter::query_in("book", json!({"author": "Tolkien"})),
+None::<OperationOptions>,
+)?;
+```
+
+Suggested result shape:
+
+```rust
+pub enum InspectResult {
+Drawer(DrawerInspectionMetrics),
+Record(Value),
+Query(QueryInspection),
+Storage(StorageDiagnosis),
+Path(CheckReport),
+}
+```
+
+Rules:
+
+- Drawer target returns drawer/storage/index/metadata diagnostics.
+- Record pointer may return record-level diagnostics where supported.
+- Query filter may return query path, index usage, candidate count, or storage impact.
+- Inspect must not mutate records.
+
+## Count
+
+count returns the number of records matching a drawer, pointer, or query filter.
+
+Examples:
+
+```rust
+client.count(OperationFilter::drawer("book"), None)?;
+client.count(
+OperationFilter::query_in("book", json!({"author": "Tolkien"})),
+None::<OperationOptions>,
+)?;
+```
+
+Rules:
+
+- Drawer target counts records in that drawer.
+- Query filter counts matching records.
+- Pointer target returns 1 if present and 0 if missing.
+- Count should use indexed candidate paths where possible.
+
+## Internal Normalization
+
+Before executing any RUDIC operation, Wardrobe should normalize payload, filter, and options into an explicit operation plan.
+
+Suggested internal shape:
+
+```rust
+pub struct NormalizedOperation {
+pub verb: OperationVerb,
+pub payload: Option<Value>,
+pub targets: Vec<ResolvedTarget>,
+pub filter: Option<Value>,
+pub options: OperationOptions,
+}
+```
+
+```rust
+pub enum OperationVerb {
+Read,
+Upsert,
+Delete,
+Inspect,
+Count,
+}
+```
+
+```rust
+pub enum ResolvedTarget {
+Drawer { drawer: String },
+Record { drawer: String, id: String },
+Query { drawer: Option<String>, filter: Value },
+}
+```
+
+Rules:
+
+- Public methods should normalize early.
+- Drawer-level storage methods should receive explicit drawer/id/filter values.
+- Pointer parsing and drawer inference should not be duplicated across command handlers.
+- CLI, client, engine, and server protocol should all converge on the same normalized operation model.
+
+## Structural Operations
+
+Structural operations use CAD:
+
+```rust
+pub fn create<C: Into<CreateRequest>>(&self, request: C) -> Result<CreateResult>
+pub fn alter<A: Into<AlterRequest>>(&self, request: A) -> Result<AlterResult>
+pub fn drop<D: Into<DropRequest>>(&self, request: D) -> Result<DropResult>
+```
+
+create creates structures and administrative resources.
+
+alter modifies structures, schema rules, metadata, and administrative state.
+
+drop removes structures and administrative resources.
+
+delete is reserved for records.
+
+## Create Requests
+
+Common creation requests:
+
+```rust
+CreateRequest::wardrobe("catalog")
+CreateRequest::bay("catalog", "public")
+CreateRequest::drawer("catalog", "public", "book")
+CreateRequest::tenant_route("tenant_a", "catalog", "tenant_a/catalog/public")
+CreateRequest::user(json!({"username": "admin"}))
+```
+
+Compatibility note:
+
+The Rust internals may still use database/schema terminology, but public user-facing API docs should prefer wardrobe/bay/drawer unless a lower-level internal type requires otherwise.
+
+Suggested shape:
+
+```rust
+pub enum CreateRequest {
+Wardrobe { name: String },
+Bay { wardrobe: String, bay: String },
+Drawer { wardrobe: String, bay: String, drawer: String },
+TenantRoute { tenant_id: String, wardrobe: String, location: String },
+User { payload: Value },
+}
+```
+
+## Alter Requests
+
+Schema rule changes use alter.
+
+Examples:
+
+```rust
+AlterRequest::schema_rule(
+"book",
+"index",
+"author_id",
+json!({"kind": "index"})
+)
+```
+
+```rust
+AlterRequest::schema_rule(
+"book",
+"constraint",
+"isbn",
+json!({"kind": "unique"})
+)
+```
+
+Suggested shape:
+
+```rust
+pub enum AlterRequest {
+SchemaRule {
+drawer: String,
+kind: String,
+field: String,
+payload: Value,
+},
+User {
+username: String,
+payload: Value,
+},
+}
+```
+
+Rules:
+
+- alter replaces public manage_schema.
+- alter should cover indexes, keys, constraints, triggers, relationships, and cascade-delete rules.
+- alter should not directly mutate records.
+
+## Drop Requests
+
+Examples:
+
+```rust
+DropRequest::wardrobe("catalog")
+DropRequest::bay("catalog", "public")
+DropRequest::drawer("catalog", "public", "book")
+DropRequest::schema_rule("book", "index", "author_id", json!({}))
+DropRequest::user("admin")
+```
+
+Suggested shape:
+
+```rust
+pub enum DropRequest {
+Wardrobe { name: String },
+Bay { wardrobe: String, bay: String },
+Drawer { wardrobe: String, bay: String, drawer: String },
+SchemaRule {
+drawer: String,
+kind: String,
+field: String,
+payload: Value,
+},
+User { username: String },
+}
+```
+
+Rules:
+
+- drop removes structures or admin resources.
+- drop must not be used for record deletion.
+- delete must not be used for structural deletion.
+
+## Maintenance And Recovery
+
+```rust
+pub fn compact<C: Into<CompactRequest>>(&self, request: C) -> Result<CompactResult>
+pub fn backup<B: Into<BackupRequest>>(&self, request: B) -> Result<BackupArchive>
+pub fn restore<R: Into<RestoreRequest>>(&self, request: R) -> Result<RestoreReport>
+```
+
+compact replaces public vacuum_drawer, migrate_drawer, and CLI clean.
+
+Compaction examples:
+
+```rust
+CompactRequest::drawer("book")
+CompactRequest::drawer_with_mode("book", CompactMode::Migrate)
+CompactRequest::bay("catalog", "public")
+CompactRequest::wardrobe("catalog")
+```
+
+Suggested shape:
+
+```rust
+pub enum CompactRequest {
+Drawer { drawer: String, mode: CompactMode },
+Bay { wardrobe: String, bay: String, mode: CompactMode },
+Wardrobe { wardrobe: String, mode: CompactMode },
+}
+```
+
+```rust
+pub enum CompactMode {
+Vacuum,
+Migrate,
+}
+```
+
+Backup and restore examples:
+
+```rust
+client.backup(BackupRequest::path("catalog/public"))?;
+client.restore(RestoreRequest::path("catalog/public", archive))?;
+```
+
+## Administration
+
+```rust
+pub fn grant(&self, request: PermissionRequest) -> Result<PermissionResult>
+pub fn revoke(&self, request: PermissionRequest) -> Result<PermissionResult>
+```
+
+Example:
+
+```rust
+PermissionRequest::new("admin", "catalog/public:rud")
+```
+
+Suggested shape:
+
+```rust
+pub struct PermissionRequest {
+pub username: String,
+pub scope: String,
+}
+```
+
+Rules:
+
+- User creation uses create(CreateRequest::user(...)).
+- User removal uses drop(DropRequest::user(...)).
+- Permission grant uses grant.
+- Permission revoke uses revoke.
+- Public manage_user should be removed or made internal.
+
+## Status
+
+```rust
+pub fn status<S: Into<StatusRequest>>(&self, request: S) -> Result<StatusResult>
+```
+
+Common status requests:
+
+```rust
+StatusRequest::tenants()
+StatusRequest::wardrobes()
+StatusRequest::bays("catalog")
+StatusRequest::drawers("catalog", "public")
+StatusRequest::wal(None::<String>)
+StatusRequest::storage()
+StatusRequest::path("catalog/public/book")
+StatusRequest::drawer_names()
+StatusRequest::cached_drawer_count()
+StatusRequest::server()
+StatusRequest::config()
+```
+
+Suggested shape:
+
+```rust
+pub enum StatusRequest {
+Tenants,
+Wardrobes,
+Bays { wardrobe: String },
+Drawers { wardrobe: String, bay: String },
+Wal { wardrobe: Option<String> },
+Storage,
+Path { path: String },
+DrawerNames,
+CachedDrawerCount,
+Server,
+Config,
+}
+```
+
+StatusResult variants include tenants, wardrobes, bays, drawers, WAL verification, storage diagnosis, path checks, drawer names, cached drawer count, server status, and resolved config.
+
+Suggested shape:
+
+```rust
+pub enum StatusResult {
+Tenants(Vec<String>),
+Wardrobes(Vec<StorageInventory>),
+Bays(Vec<String>),
+Drawers(Vec<StorageInventory>),
+Wal(WalVerification),
+Storage(StorageDiagnosis),
+Path(CheckReport),
+DrawerNames(Vec<String>),
+CachedDrawerCount(usize),
+Server(Value),
+Config(Value),
+}
+```
+
+## Configuration
+
+Wardrobe should expose a shared configuration model used by server, CLI, and embedded engine.
+
+The server may load TOML configuration files.
+
+The embedded library should accept config structs/builders directly and should not automatically read global config files.
+
+Suggested entry points:
+
+```rust
+pub fn open_with_config(config: WardrobeConfig) -> Result<Self>
+pub fn builder() -> WardrobeEngineBuilder
+```
+
+Suggested builder style:
+
+```rust
+WardrobeEngine::builder()
+.directory("./data")
+.max_cached_drawers(128)
+.durability(DurabilityPolicy::Strict)
+.open()?;
+```
+
+Suggested config surface:
+
+```rust
+pub struct WardrobeConfig {
+pub data: DataConfig,
+pub network: NetworkConfig,
+pub cache: CacheConfig,
+pub wal: WalConfig,
+pub transactions: TransactionConfig,
+pub security: SecurityConfig,
+pub logging: LoggingConfig,
+}
+```
+
+TOML example:
+
+```toml
+[data]
+directory = "./data"
+
+[network]
+tcp_enabled = true
+tcp_bind = "127.0.0.1:24842"
+unix_socket_enabled = false
+unix_socket = "/tmp/wardrobe.sock"
+
+[cache]
+max_cached_drawers = 128
+
+[wal]
+durability = "strict"
+checkpoint_size_bytes = 1048576
+checkpoint_ops = 1000
+
+[transactions]
+enabled = true
+log_directory = "./data/.transactions"
+recovery = "automatic"
+
+[security]
+access_control_file = "_wardrobe_access_control.json"
+auth_required = false
+
+[logging]
+level = "info"
+format = "pretty"
+destination = "stderr"
+file = "./logs/wardrobe.log"
+```
+
+## Logging
+
+Wardrobe distinguishes three log-like systems:
+
+- WAL: durable command/write recovery log.
+- Transaction log: atomicity and transaction recovery artifact.
+- Application log: operator-facing observability stream.
+
+Application logging should use a structured logging stack such as tracing.
+
+Logging configuration should control:
+
+- level
+- format
+- destination
+- file path
+- module filters
+
+Application logs must not be used for recovery.
+
+WAL and transaction logs must not be treated as operator-facing application logs.
+
+Sensitive payload values, credentials, tokens, and secrets should not be logged by default.
