@@ -482,6 +482,9 @@ fn command_label(command: &Command) -> &'static str {
         Command::DefineDatabase { .. } => "DefineDatabase",
         Command::DefineSchema { .. } => "DefineSchema",
         Command::DefineDrawer { .. } => "DefineDrawer",
+        Command::DropDatabase { .. } => "DropDatabase",
+        Command::DropSchema { .. } => "DropSchema",
+        Command::DropDrawer { .. } => "DropDrawer",
         Command::DefineTenantRoute { .. } => "DefineTenantRoute",
         Command::ManageSchema { .. } => "ManageSchema",
         Command::ManageUser { .. } => "ManageUser",
@@ -719,8 +722,10 @@ impl Drop for ConnectionPoolPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Cursor;
     use std::thread;
+    use wardrobe_core::{BackupArchive, BackupArchiveFile, StorageCoordinate, StorageScope};
 
     #[test]
     fn server_config_from_args_defaults() {
@@ -828,5 +833,264 @@ mod tests {
         let res = ServerConfig::from_args(args);
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn command_label_covers_canonical_protocol_command_set() {
+        let archive = BackupArchive {
+            format: "wardrobe-backup-v1".to_string(),
+            source_path: "source".to_string(),
+            scope: "directory".to_string(),
+            files: vec![BackupArchiveFile {
+                path: "gem.drw".to_string(),
+                bytes_hex: "00".to_string(),
+            }],
+        };
+        let commands = vec![
+            (Command::ShowTenants, "ShowTenants"),
+            (Command::ShowDatabases, "ShowDatabases"),
+            (
+                Command::VerifyWal {
+                    database_name: Some("db".to_string()),
+                },
+                "VerifyWal",
+            ),
+            (
+                Command::ShowSchemas {
+                    database_name: "db".to_string(),
+                },
+                "ShowSchemas",
+            ),
+            (
+                Command::ShowDrawers {
+                    database_name: "db".to_string(),
+                    schema_name: "public".to_string(),
+                },
+                "ShowDrawers",
+            ),
+            (
+                Command::Upsert {
+                    drawer_name: "gem".to_string(),
+                    payload: json!({"_id": "one"}),
+                },
+                "Upsert",
+            ),
+            (
+                Command::BulkUpsert {
+                    drawer_name: "gem".to_string(),
+                    records: vec![json!({"_id": "one"})],
+                    atomic: true,
+                },
+                "BulkUpsert",
+            ),
+            (
+                Command::FindAll {
+                    drawer_name: "gem".to_string(),
+                },
+                "FindAll",
+            ),
+            (
+                Command::FindById {
+                    pointer: "@gem:one".to_string(),
+                },
+                "FindById",
+            ),
+            (
+                Command::FindByFilter {
+                    drawer_name: "gem".to_string(),
+                    filter: json!({"element": "Fire"}),
+                    modifiers: None,
+                },
+                "FindByFilter",
+            ),
+            (
+                Command::Count {
+                    drawer_name: "gem".to_string(),
+                    filter: None,
+                    modifiers: None,
+                },
+                "Count",
+            ),
+            (
+                Command::Delete {
+                    pointer: "@gem:one".to_string(),
+                },
+                "Delete",
+            ),
+            (
+                Command::DeleteByFilter {
+                    drawer_name: "gem".to_string(),
+                    filter: json!({"element": "Fire"}),
+                },
+                "DeleteByFilter",
+            ),
+            (
+                Command::Vacuum {
+                    drawer_name: "gem".to_string(),
+                },
+                "Vacuum",
+            ),
+            (
+                Command::Migrate {
+                    drawer_name: "gem".to_string(),
+                },
+                "Migrate",
+            ),
+            (
+                Command::Inspect {
+                    drawer_name: "gem".to_string(),
+                },
+                "Inspect",
+            ),
+            (
+                Command::Check {
+                    path: "db/public/gem".to_string(),
+                },
+                "Check",
+            ),
+            (Command::Diagnose, "Diagnose"),
+            (Command::ListDrawers, "ListDrawers"),
+            (
+                Command::Backup {
+                    source_path: "source".to_string(),
+                },
+                "Backup",
+            ),
+            (
+                Command::Restore {
+                    destination_path: "destination".to_string(),
+                    archive,
+                },
+                "Restore",
+            ),
+            (
+                Command::DefineDatabase {
+                    database_name: "db".to_string(),
+                },
+                "DefineDatabase",
+            ),
+            (
+                Command::DefineSchema {
+                    database_name: "db".to_string(),
+                    schema_name: "public".to_string(),
+                },
+                "DefineSchema",
+            ),
+            (
+                Command::DefineDrawer {
+                    database_name: "db".to_string(),
+                    schema_name: "public".to_string(),
+                    drawer_name: "gem".to_string(),
+                },
+                "DefineDrawer",
+            ),
+            (
+                Command::DropDatabase {
+                    database_name: "db".to_string(),
+                },
+                "DropDatabase",
+            ),
+            (
+                Command::DropSchema {
+                    database_name: "db".to_string(),
+                    schema_name: "public".to_string(),
+                },
+                "DropSchema",
+            ),
+            (
+                Command::DropDrawer {
+                    database_name: "db".to_string(),
+                    schema_name: "public".to_string(),
+                    drawer_name: "gem".to_string(),
+                },
+                "DropDrawer",
+            ),
+            (
+                Command::DefineTenantRoute {
+                    tenant_id: "tenant".to_string(),
+                    database_name: "db".to_string(),
+                    location: "tenant/db/public".to_string(),
+                },
+                "DefineTenantRoute",
+            ),
+            (
+                Command::ManageSchema {
+                    action: "add".to_string(),
+                    kind: "index".to_string(),
+                    drawer_name: "gem".to_string(),
+                    field_name: "element".to_string(),
+                    payload: json!({"type": "hash"}),
+                },
+                "ManageSchema",
+            ),
+            (
+                Command::ManageUser {
+                    action: "grant_permission".to_string(),
+                    payload: json!({"username": "alice"}),
+                },
+                "ManageUser",
+            ),
+            (
+                Command::ExecuteForTenant {
+                    tenant_id: "tenant".to_string(),
+                    database_name: "db".to_string(),
+                    schema_name: "public".to_string(),
+                    command: Box::new(Command::FindAll {
+                        drawer_name: "gem".to_string(),
+                    }),
+                },
+                "ExecuteForTenant",
+            ),
+            (
+                Command::Execute {
+                    coordinate: StorageCoordinate::new("tenant", "db", "public"),
+                    command: Box::new(Command::Count {
+                        drawer_name: "gem".to_string(),
+                        filter: None,
+                        modifiers: None,
+                    }),
+                },
+                "Execute",
+            ),
+            (
+                Command::ExecuteInScope {
+                    scope: StorageScope::schema("db", "public"),
+                    command: Box::new(Command::DeleteByFilter {
+                        drawer_name: "gem".to_string(),
+                        filter: json!({}),
+                    }),
+                },
+                "ExecuteInScope",
+            ),
+        ];
+
+        for (command, expected_label) in commands {
+            assert_eq!(command_label(&command), expected_label);
+        }
+    }
+
+    #[test]
+    fn connection_pool_and_idle_tracking_cover_permit_lifecycle() {
+        let pool = ConnectionPool::new(1);
+        assert!(pool.is_idle());
+
+        {
+            let _permit = pool.acquire();
+            assert!(!pool.is_idle());
+        }
+
+        assert!(pool.is_idle());
+
+        let mut idle_polls = 0;
+        for _ in 1..nonblocking_idle_poll_limit() {
+            assert!(!listener_is_idle(Some(&pool), &mut idle_polls));
+        }
+        assert!(listener_is_idle(Some(&pool), &mut idle_polls));
+
+        idle_polls = 0;
+        for _ in 1..nonblocking_idle_poll_limit() {
+            assert!(!listener_is_idle(None, &mut idle_polls));
+        }
+        assert!(listener_is_idle(None, &mut idle_polls));
     }
 }

@@ -234,7 +234,7 @@ impl<'a> TransactionCoordinator<'a> {
     pub(crate) fn harden_writer(writer: &mut DatabaseWriter) -> Result<()> {
         let file = writer.file_handle_mut();
         file.flush()?;
-        file.sync_all()
+        file.flush()
     }
 }
 
@@ -689,6 +689,9 @@ fn command_operation(command: &Command) -> Option<WalOperation> {
         | Command::DefineSchema { .. }
         | Command::DefineDrawer { .. }
         | Command::DefineTenantRoute { .. }
+        | Command::DropDatabase { .. }
+        | Command::DropSchema { .. }
+        | Command::DropDrawer { .. }
         | Command::ManageSchema { .. } => Some(WalOperation::Define),
         _ => None,
     }
@@ -918,7 +921,7 @@ fn write_entry_locked(state: &mut WalJournalState, bytes: &[u8]) -> Result<()> {
         .ok_or_else(|| Error::other("Wardrobe WAL file handle is not initialized"))?;
     file.write_all(bytes)?;
     file.flush()?;
-    file.sync_all()?;
+    file.flush()?;
     state.sync_count += 1;
     Ok(())
 }
@@ -938,7 +941,7 @@ fn flush_pending_locked(inner: &WalJournalInner, state: &mut WalJournalState) ->
             file.write_all(&pending_entry.bytes)?;
         }
         file.flush()?;
-        file.sync_all()?;
+        file.flush()?;
         state.sync_count += 1;
         Ok(())
     })();

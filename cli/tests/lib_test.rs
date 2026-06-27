@@ -102,13 +102,13 @@ fn test_cli_config_clean_parsing() {
         "--connection".to_string(),
         "custom_dir".to_string(),
         "--pretty".to_string(),
-        "records".to_string(),
+        "read".to_string(),
         "character".to_string(),
     ];
     let config = CliConfig::from_args(args).unwrap();
     assert_eq!(config.connection, "custom_dir");
     assert!(config.pretty);
-    assert_eq!(config.command_parts, vec!["records", "character"]);
+    assert_eq!(config.command_parts, vec!["read", "character"]);
 }
 
 #[test]
@@ -116,11 +116,12 @@ fn test_cli_config_alternate_flags() {
     let args = vec![
         "--data-dir".to_string(),
         "alt_dir".to_string(),
-        "drawers".to_string(),
+        "status".to_string(),
+        "drawer-names".to_string(),
     ];
     let config = CliConfig::from_args(args).unwrap();
     assert_eq!(config.connection, "alt_dir");
-    assert_eq!(config.command_parts, vec!["drawers"]);
+    assert_eq!(config.command_parts, vec!["status", "drawer-names"]);
 }
 
 #[test]
@@ -132,8 +133,8 @@ fn test_cli_config_missing_target_payload() {
 
 #[test]
 fn test_shell_split_whitespace_handling() {
-    let parts = shell_split("   diagnose    gem   payload_data   ");
-    assert_eq!(parts, vec!["diagnose", "gem", "payload_data"]);
+    let parts = shell_split("   status    path   gem   ");
+    assert_eq!(parts, vec!["status", "path", "gem"]);
 }
 
 #[test]
@@ -166,14 +167,14 @@ fn test_embedded_drawers_and_diagnose_execution() {
     let config = CliConfig {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: false,
-        command_parts: vec!["drawers".to_string()],
+        command_parts: vec!["status".to_string(), "drawer-names".to_string()],
     };
     assert!(run_cli_logic(config).is_ok());
 
     let config_diag = CliConfig {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: false,
-        command_parts: vec!["diagnose".to_string()],
+        command_parts: vec!["status".to_string(), "storage".to_string()],
     };
     assert!(run_cli_logic(config_diag).is_ok());
 
@@ -205,7 +206,7 @@ fn test_embedded_inspect_and_records_execution() {
     let config_records = CliConfig {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: false,
-        command_parts: vec!["records".to_string(), "gem".to_string()],
+        command_parts: vec!["read".to_string(), "gem".to_string()],
     };
     assert!(run_cli_logic(config_records).is_ok());
 
@@ -235,7 +236,7 @@ fn test_network_show_commands_via_library() {
     let config = CliConfig {
         connection: target,
         pretty: false,
-        command_parts: vec!["show-databases".to_string()],
+        command_parts: vec!["status".to_string(), "wardrobes".to_string()],
     };
     assert!(run_cli_logic(config).is_ok());
 }
@@ -250,8 +251,8 @@ fn test_command_routing_guards_and_failures() {
     let res_inspect = run_command(&client, &["inspect".to_string()], false);
     assert!(res_inspect.is_err());
 
-    let res_records = run_command(&client, &["records".to_string()], false);
-    assert!(res_records.is_err());
+    let res_read = run_command(&client, &["read".to_string()], false);
+    assert!(res_read.is_err());
 
     let res_count = run_command(&client, &["count".to_string()], false);
     assert!(res_count.is_err());
@@ -262,8 +263,8 @@ fn test_command_routing_guards_and_failures() {
     let res_restore = run_command(&client, &["restore".to_string()], false);
     assert!(res_restore.is_err());
 
-    let res_add_user = run_command(&client, &["add".to_string(), "user".to_string()], false);
-    assert!(res_add_user.is_err());
+    let res_create_user = run_command(&client, &["create".to_string(), "user".to_string()], false);
+    assert!(res_create_user.is_err());
 
     let res_grant = run_command(&client, &["grant".to_string()], false);
     assert!(res_grant.is_err());
@@ -278,13 +279,17 @@ fn test_command_routing_guards_and_failures() {
     let res_upsert = run_command(&client, &["upsert".to_string()], false);
     assert!(res_upsert.is_err());
 
-    let res_delete = run_command(&client, &["delete-by-id".to_string()], false);
+    let res_delete = run_command(&client, &["delete".to_string()], false);
     assert!(res_delete.is_err());
 
-    let res_schemas = run_command(&client, &["show-schemas".to_string()], false);
+    let res_schemas = run_command(&client, &["status".to_string(), "bays".to_string()], false);
     assert!(res_schemas.is_err());
 
-    let res_drawers = run_command(&client, &["show-drawers".to_string()], false);
+    let res_drawers = run_command(
+        &client,
+        &["status".to_string(), "drawers".to_string()],
+        false,
+    );
     assert!(res_drawers.is_err());
 
     let res_unknown = run_command(&client, &["invalid-cmd-target".to_string()], false);
@@ -316,7 +321,7 @@ fn test_embedded_write_commands_execution_paths() {
     ];
     assert!(run_command(&client, &bad_payload_args, false).is_err());
 
-    let delete_args = vec!["delete-by-id".to_string(), "@gem:lnk_topaz".to_string()];
+    let delete_args = vec!["delete".to_string(), "@gem:lnk_topaz".to_string()];
     assert!(run_command(&client, &delete_args, false).is_ok());
 
     let _ = fs::remove_dir_all(storage_directory);
@@ -328,44 +333,40 @@ fn test_embedded_administrative_setup_commands_execution_paths() {
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
 
     let define_database = vec![
-        "define".to_string(),
-        "database".to_string(),
+        "create".to_string(),
+        "wardrobe".to_string(),
         "admin_db".to_string(),
     ];
     assert!(run_command(&client, &define_database, false).is_ok());
 
     let define_schema = vec![
-        "define".to_string(),
-        "schema".to_string(),
-        "admin_db".to_string(),
-        "public".to_string(),
+        "create".to_string(),
+        "bay".to_string(),
+        "admin_db/public".to_string(),
     ];
     assert!(run_command(&client, &define_schema, false).is_ok());
 
     let define_drawer = vec![
-        "define".to_string(),
+        "create".to_string(),
         "drawer".to_string(),
-        "admin_db".to_string(),
-        "public".to_string(),
-        "gem".to_string(),
+        "admin_db/public/gem".to_string(),
     ];
     assert!(run_command(&client, &define_drawer, true).is_ok());
 
-    let show_databases = vec!["show".to_string(), "databases".to_string()];
+    let show_databases = vec!["status".to_string(), "wardrobes".to_string()];
     assert!(run_command(&client, &show_databases, false).is_ok());
 
     let list_schemas = vec![
-        "list".to_string(),
-        "schemas".to_string(),
+        "status".to_string(),
+        "bays".to_string(),
         "admin_db".to_string(),
     ];
     assert!(run_command(&client, &list_schemas, false).is_ok());
 
     let ls_drawers = vec![
-        "ls".to_string(),
+        "status".to_string(),
         "drawers".to_string(),
-        "admin_db".to_string(),
-        "public".to_string(),
+        "admin_db/public".to_string(),
     ];
     assert!(run_command(&client, &ls_drawers, false).is_ok());
 
@@ -407,23 +408,35 @@ fn test_structural_lifecycle_commands_execution_paths() {
     ];
     assert!(run_command(&client, &create_drawer, false).is_ok());
 
-    let show_wardrobes = vec!["show".to_string(), "wardrobes".to_string()];
+    let show_wardrobes = vec!["status".to_string(), "wardrobes".to_string()];
     assert!(run_command(&client, &show_wardrobes, false).is_ok());
 
-    let show_bays = vec!["show".to_string(), "bays".to_string(), "armory".to_string()];
+    let show_bays = vec![
+        "status".to_string(),
+        "bays".to_string(),
+        "armory".to_string(),
+    ];
     assert!(run_command(&client, &show_bays, false).is_ok());
 
     let show_drawers = vec![
-        "show".to_string(),
+        "status".to_string(),
         "drawers".to_string(),
         "armory/public".to_string(),
     ];
     assert!(run_command(&client, &show_drawers, false).is_ok());
 
-    let check_wardrobe = vec!["check".to_string(), "armory".to_string()];
+    let check_wardrobe = vec![
+        "status".to_string(),
+        "path".to_string(),
+        "armory".to_string(),
+    ];
     assert!(run_command(&client, &check_wardrobe, false).is_ok());
 
-    let check_drawer = vec!["check".to_string(), "armory/public/gem".to_string()];
+    let check_drawer = vec![
+        "status".to_string(),
+        "path".to_string(),
+        "armory/public/gem".to_string(),
+    ];
     assert!(run_command(&client, &check_drawer, false).is_ok());
 
     let upsert = vec![
@@ -433,14 +446,46 @@ fn test_structural_lifecycle_commands_execution_paths() {
     ];
     assert!(run_command(&client, &upsert, false).is_ok());
 
-    let clean_drawer = vec!["clean".to_string(), "armory/public/gem".to_string()];
+    let clean_drawer = vec!["compact".to_string(), "armory/public/gem".to_string()];
     assert!(run_command(&client, &clean_drawer, false).is_ok());
 
-    let clean_bay = vec!["clean".to_string(), "armory/public".to_string()];
+    let clean_bay = vec!["compact".to_string(), "armory/public".to_string()];
     assert!(run_command(&client, &clean_bay, false).is_ok());
 
-    let clean_wardrobe = vec!["clean".to_string(), "armory".to_string()];
+    let clean_wardrobe = vec!["compact".to_string(), "armory".to_string()];
     assert!(run_command(&client, &clean_wardrobe, false).is_ok());
+
+    let drop_drawer = vec![
+        "drop".to_string(),
+        "drawer".to_string(),
+        "armory/public/gem".to_string(),
+    ];
+    assert!(run_command(&client, &drop_drawer, false).is_ok());
+    assert!(
+        !status_drawers(&client, "armory", "public")
+            .iter()
+            .any(|drawer| drawer.name == "gem")
+    );
+
+    let drop_bay = vec![
+        "drop".to_string(),
+        "bay".to_string(),
+        "armory/public".to_string(),
+    ];
+    assert!(run_command(&client, &drop_bay, false).is_ok());
+    assert!(!status_schemas(&client, "armory").contains(&"public".to_string()));
+
+    let drop_wardrobe = vec![
+        "drop".to_string(),
+        "wardrobe".to_string(),
+        "armory".to_string(),
+    ];
+    assert!(run_command(&client, &drop_wardrobe, false).is_ok());
+    assert!(
+        !status_databases(&client)
+            .iter()
+            .any(|db| db.name == "armory")
+    );
 
     let _ = fs::remove_dir_all(storage_directory);
 }
@@ -504,7 +549,7 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
     assert!(
         run_command(
             &client,
-            &["records".to_string(), "armory/public/gem".to_string()],
+            &["read".to_string(), "armory/public/gem".to_string()],
             false
         )
         .is_ok()
@@ -513,7 +558,7 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
         run_command(
             &client,
             &[
-                "records".to_string(),
+                "read".to_string(),
                 "armory/public/gem".to_string(),
                 "{\"power\":42}".to_string()
             ],
@@ -525,7 +570,7 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
         run_command(
             &client,
             &[
-                "find".to_string(),
+                "read".to_string(),
                 "armory/public/gem".to_string(),
                 "{\"element\":\"water\"}".to_string()
             ],
@@ -622,7 +667,7 @@ fn test_document_query_and_inspection_commands_match_help_paths() {
         run_command(
             &client,
             &[
-                "records".to_string(),
+                "read".to_string(),
                 "armory/public/gem".to_string(),
                 "{invalid-json".to_string()
             ],
@@ -650,26 +695,38 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
     }
 
     for args in [
-        vec!["add", "index", "armory/public/user", "tool.type"],
+        vec!["alter", "index", "armory/public/user", "tool.type"],
         vec![
-            "add",
+            "alter",
             "key",
             "armory/public/user",
             "profile_id",
             "secondary",
         ],
-        vec!["add", "constraint", "armory/public/user", "email", "unique"],
-        vec!["add", "constraint", "armory/public/user", "age", "non-null"],
         vec![
-            "add",
+            "alter",
+            "constraint",
+            "armory/public/user",
+            "email",
+            "unique",
+        ],
+        vec![
+            "alter",
+            "constraint",
+            "armory/public/user",
+            "age",
+            "non-null",
+        ],
+        vec![
+            "alter",
             "relationship",
             "armory/public/user",
             "tool_id",
             "armory/public/tool",
         ],
-        vec!["add", "cascade-delete", "armory/public/user", "tool_id"],
+        vec!["alter", "cascade-delete", "armory/public/user", "tool_id"],
         vec![
-            "add",
+            "alter",
             "trigger",
             "armory/public/user",
             "on_upsert",
@@ -721,24 +778,24 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
     );
 
     for args in [
-        vec!["remove", "index", "armory/public/user", "tool.type"],
+        vec!["drop", "index", "armory/public/user", "tool.type"],
         vec![
-            "remove",
+            "drop",
             "constraint",
             "armory/public/user",
             "email",
             "unique",
         ],
         vec![
-            "remove",
+            "drop",
             "constraint",
             "armory/public/user",
             "age",
             "non-null",
         ],
-        vec!["remove", "relationship", "armory/public/user", "tool_id"],
-        vec!["remove", "cascade-delete", "armory/public/user", "tool_id"],
-        vec!["remove", "trigger", "armory/public/user", "on_upsert"],
+        vec!["drop", "relationship", "armory/public/user", "tool_id"],
+        vec!["drop", "cascade-delete", "armory/public/user", "tool_id"],
+        vec!["drop", "trigger", "armory/public/user", "on_upsert"],
     ] {
         let args = args.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
         assert!(run_command(&client, &args, false).is_ok());
@@ -765,7 +822,7 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
     assert!(metadata["schema"]["x-wardrobe-cli"]["triggers"]["on_upsert"].is_null());
 
     let invalid_relationship = vec![
-        "add".to_string(),
+        "alter".to_string(),
         "relationship".to_string(),
         "armory/public/user".to_string(),
         "tool_id".to_string(),
@@ -898,9 +955,9 @@ fn test_schema_creation_rejects_missing_parent_database() {
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
 
     let args = vec![
-        "create-schema".to_string(),
-        "missing_db".to_string(),
-        "public".to_string(),
+        "create".to_string(),
+        "bay".to_string(),
+        "missing_db/public".to_string(),
     ];
     assert!(run_command(&client, &args, false).is_err());
 
@@ -908,7 +965,7 @@ fn test_schema_creation_rejects_missing_parent_database() {
 }
 
 #[test]
-fn test_data_command_aliases_execution_paths() {
+fn test_removed_data_command_aliases_are_rejected() {
     let storage_directory = temp_storage_directory("data_aliases");
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
 
@@ -917,28 +974,28 @@ fn test_data_command_aliases_execution_paths() {
         "gem".to_string(),
         "{\"_id\":\"@gem:lnk_amethyst\",\"power\":88}".to_string(),
     ];
-    assert!(run_command(&client, &insert_args, false).is_ok());
+    assert!(run_command(&client, &insert_args, false).is_err());
 
     let find_args = vec![
         "find".to_string(),
         "gem".to_string(),
         "{\"power\":88}".to_string(),
     ];
-    assert!(run_command(&client, &find_args, false).is_ok());
+    assert!(run_command(&client, &find_args, false).is_err());
 
     let create_alias_args = vec![
         "create".to_string(),
         "gem".to_string(),
         "{\"_id\":\"@gem:lnk_sapphire\",\"power\":99}".to_string(),
     ];
-    assert!(run_command(&client, &create_alias_args, false).is_ok());
+    assert!(run_command(&client, &create_alias_args, false).is_err());
 
     let remove_args = vec![
         "remove".to_string(),
         "gem".to_string(),
         "{\"_id\":\"@gem:amethyst\"}".to_string(),
     ];
-    assert!(run_command(&client, &remove_args, false).is_ok());
+    assert!(run_command(&client, &remove_args, false).is_err());
 
     let _ = fs::remove_dir_all(storage_directory);
 }
@@ -960,7 +1017,11 @@ fn test_network_metadata_commands_routing() {
 
     let client = WardrobeClient::open(&target).unwrap();
 
-    let schema_args = vec!["show-schemas".to_string(), "main_db".to_string()];
+    let schema_args = vec![
+        "status".to_string(),
+        "bays".to_string(),
+        "main_db".to_string(),
+    ];
     assert!(run_command(&client, &schema_args, true).is_ok());
 
     let target_drawers = spawn_protocol_server(|mut stream| {
@@ -983,9 +1044,9 @@ fn test_network_metadata_commands_routing() {
 
     let client_drawers = WardrobeClient::open(&target_drawers).unwrap();
     let drawer_args = vec![
-        "show-drawers".to_string(),
-        "main_db".to_string(),
-        "public".to_string(),
+        "status".to_string(),
+        "drawers".to_string(),
+        "main_db/public".to_string(),
     ];
     assert!(run_command(&client_drawers, &drawer_args, false).is_ok());
 }
@@ -1019,7 +1080,11 @@ fn test_network_administrative_commands_routing() {
     });
 
     let client = WardrobeClient::open(&target).unwrap();
-    let create_db_args = vec!["create-db".to_string(), "admin_db".to_string()];
+    let create_db_args = vec![
+        "create".to_string(),
+        "wardrobe".to_string(),
+        "admin_db".to_string(),
+    ];
     assert!(run_command(&client, &create_db_args, false).is_ok());
 
     let target_manage = spawn_protocol_server(|mut stream| {
@@ -1065,7 +1130,7 @@ fn test_network_administrative_commands_routing() {
 fn test_documented_user_admin_permission_commands_routing() {
     assert_manage_user_command(
         &[
-            "add",
+            "create",
             "user",
             "{\"username\":\"dev_admin\",\"role\":\"operator\"}",
         ],
@@ -1106,59 +1171,34 @@ fn test_documented_user_admin_permission_commands_routing() {
 }
 
 #[test]
-fn test_rbac_aliases_parse_nested_user_payloads() {
-    assert_manage_user_command(
-        &[
-            "auth",
-            "user",
-            "grant",
-            "{\"username\":\"alice\",\"permission_scope\":\"global:rud\",\"scope\":{\"path\":\"global\",\"rights\":\"rud\"}}",
-        ],
-        "grant_permission",
-        json!({
-            "username": "alice",
-            "permission_scope": "global:rud",
-            "scope": {
-                "path": "global",
-                "rights": "rud"
-            }
-        }),
-    );
+fn test_removed_admin_aliases_are_rejected() {
+    let storage_directory = temp_storage_directory("removed_admin_aliases");
+    let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
 
-    assert_manage_user_command(
-        &[
-            "rbac",
-            "user",
-            "revoke",
-            "{\"username\":\"bob\",\"permission_scope\":\"global:d\",\"scope\":{\"path\":\"global\",\"rights\":\"d\"}}",
+    for args in [
+        vec![
+            "auth".to_string(),
+            "user".to_string(),
+            "grant".to_string(),
+            "{\"username\":\"alice\"}".to_string(),
         ],
-        "revoke_permission",
-        json!({
-            "username": "bob",
-            "permission_scope": "global:d",
-            "scope": {
-                "path": "global",
-                "rights": "d"
-            }
-        }),
-    );
+        vec![
+            "rbac".to_string(),
+            "user".to_string(),
+            "revoke".to_string(),
+            "{\"username\":\"bob\"}".to_string(),
+        ],
+        vec![
+            "manage".to_string(),
+            "user".to_string(),
+            "grant".to_string(),
+            "{\"username\":\"carol\"}".to_string(),
+        ],
+    ] {
+        assert!(run_command(&client, &args, false).is_err());
+    }
 
-    assert_manage_user_command(
-        &[
-            "auth",
-            "grant",
-            "{\"username\":\"carol\",\"permission_scope\":\"global:r\",\"scope\":{\"path\":\"global\",\"rights\":\"r\"}}",
-        ],
-        "grant_permission",
-        json!({
-            "username": "carol",
-            "permission_scope": "global:r",
-            "scope": {
-                "path": "global",
-                "rights": "r"
-            }
-        }),
-    );
+    let _ = fs::remove_dir_all(storage_directory);
 }
 
 #[test]
@@ -1183,7 +1223,7 @@ fn test_documented_user_admin_validation_errors() {
     let client = WardrobeClient::open(&storage_directory.to_string_lossy()).unwrap();
 
     let missing_username = vec![
-        "add".to_string(),
+        "create".to_string(),
         "user".to_string(),
         "{\"role\":\"operator\"}".to_string(),
     ];
@@ -1240,7 +1280,14 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
         .expect("write");
     });
     let client_drawers = WardrobeClient::open(&target_drawers).unwrap();
-    assert!(run_command(&client_drawers, &["drawers".to_string()], false).is_ok());
+    assert!(
+        run_command(
+            &client_drawers,
+            &["status".to_string(), "drawer-names".to_string()],
+            false,
+        )
+        .is_ok()
+    );
 
     let target_diagnose = spawn_protocol_server(|mut stream| {
         let request =
@@ -1271,7 +1318,14 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
         .expect("write");
     });
     let client_diagnose = WardrobeClient::open(&target_diagnose).unwrap();
-    assert!(run_command(&client_diagnose, &["diagnose".to_string()], false).is_ok());
+    assert!(
+        run_command(
+            &client_diagnose,
+            &["status".to_string(), "storage".to_string()],
+            false,
+        )
+        .is_ok()
+    );
 
     let target_inspect = spawn_protocol_server(|mut stream| {
         let request =
@@ -1347,7 +1401,11 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
     assert!(
         run_command(
             &client_check,
-            &["check".to_string(), "armory/public/gem".to_string()],
+            &[
+                "status".to_string(),
+                "path".to_string(),
+                "armory/public/gem".to_string()
+            ],
             false,
         )
         .is_ok()

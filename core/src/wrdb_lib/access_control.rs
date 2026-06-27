@@ -263,3 +263,161 @@ fn parse_permission_scope(raw: &str) -> Result<String> {
     }
     Ok(format!("{}:{rights}", segments.join("/")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wardrobe_access_control_{name}_{nanos}"))
+    }
+
+    fn registry_at(root: &Path) -> Value {
+        let bytes = fs::read(root.join(ACCESS_CONTROL_FILE_NAME)).expect("registry should exist");
+        serde_json::from_slice(&bytes).expect("registry should parse")
+    }
+
+    #[test]
+    fn manage_user_canonical_actions_update_access_control_registry() {
+        let root = temp_root("canonical_actions");
+
+        let created = manage_user(
+            &root,
+            "add_user",
+            json!({"user": " alice ", "display_name": "Alice"}),
+        )
+        .expect("user should be created");
+        assert_eq!(created["action"], "add_user");
+        assert_eq!(created["username"], "alice");
+
+        let granted = manage_user(
+            &root,
+            "grant_permission",
+            json!({"username": "alice", "permission_scope": "wardrobe/bay:RuD"}),
+        )
+        .expect("permission should grant");
+        assert_eq!(granted["permission_scope"], "wardrobe/bay:rud");
+
+        manage_user(
+            &root,
+            "grant_permission",
+            json!({"username": "alice", "permission_scope": "wardrobe/bay:rud"}),
+        )
+        .expect("duplicate grant should be idempotent");
+
+        let registry = registry_at(&root);
+        assert_eq!(registry["users"]["alice"]["username"], "alice");
+        assert_eq!(
+            registry["users"]["alice"]["permissions"],
+            json!(["wardrobe/bay:rud"])
+        );
+
+        let revoked = manage_user(
+            &root,
+            "revoke_permission",
+            json!({
+                "username": "alice",
+                "scope": {
+                    "path": "wardrobe/bay",
+                    "rights": "rud"
+                }
+            }),
+        )
+        .expect("permission should revoke");
+        assert_eq!(revoked["action"], "revoke_permission");
+
+        let dropped = manage_user(&root, "drop_user", json!({"username": "alice"}))
+            .expect("user should drop");
+        assert_eq!(dropped["removed"], true);
+
+        let registry = registry_at(&root);
+        assert!(registry["users"].as_object().unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manage_user_unknown_actions_are_logged_for_admin_audit() {
+        let root = temp_root("unknown_action");
+
+        let result = manage_user(
+            &root,
+            "rotate_token",
+            json!({"user": "service-account", "ttl": 60}),
+        )
+        .expect("unknown admin action should still be recorded");
+        assert_eq!(result["action"], "rotate_token");
+        assert_eq!(result["username"], "service-account");
+
+        let registry = registry_at(&root);
+        assert_eq!(registry["operations"][0]["action"], "rotate_token");
+        assert_eq!(registry["operations"][0]["username"], "service-account");
+        assert_eq!(registry["operations"][0]["payload"]["ttl"], 60);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manage_user_rejects_invalid_payloads_and_scopes() {
+        let root = temp_root("invalid_inputs");
+
+        assert_eq!(
+            manage_user(&root, "add_user", json!({"username": "   "}))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            manage_user(
+                &root,
+                "grant_permission",
+                json!({"username": "alice", "permission_scope": "wardrobe/bay/drawer/field:r"}),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            manage_user(
+                &root,
+                "grant_permission",
+                json!({"username": "alice", "permission_scope": "wardrobe:rr"}),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            manage_user(
+                &root,
+                "grant_permission",
+                json!({"username": "alice", "permission_scope": "wardrobe:x"}),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            manage_user(&root, "grant_permission", json!({"username": "alice"}))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+
+        fs::create_dir_all(&root).expect("root should create");
+        fs::write(root.join(ACCESS_CONTROL_FILE_NAME), b"{not-json").expect("registry write");
+        assert_eq!(
+            manage_user(&root, "drop_user", json!({"username": "alice"}))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+}

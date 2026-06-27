@@ -78,11 +78,10 @@ A JSON-like document stored inside a drawer. Record identifiers may be addressed
 
 `NOTES.txt` is the authority for the CLI capability set. The current command families are:
 
-- Structural and lifecycle management: `show`, `create`, `check`, `clean`
-- Document mutations and queries: `upsert`, `count`, `inspect`, `records`, `delete`
-- Schema engine and relationship management: `add`, `remove`
-- Backup and disaster recovery: `backup`, `restore`
-- Server access control and user administration: `add user`, `grant permission`, `revoke permission`
+- Structural and lifecycle management: `create`, `alter`, `drop`
+- Document mutations and queries: `read`, `upsert`, `delete`, `inspect`, `count`
+- Maintenance: `compact`, `backup`, `restore`
+- Server access control and runtime status: `create user`, `drop user`, `grant permission`, `revoke permission`, `status`
 
 These are not CLI-only concepts. They map onto the same engine and protocol operations used by `WardrobeClient`, `WardrobeEngine`, and `wardrobe-server`.
 
@@ -183,7 +182,7 @@ The current administrative surface can attach or remove:
 - relationships
 - cascade-delete rules
 
-Those mutations flow through `manage_schema` in the Rust API and the `add` / `remove` command families in the CLI.
+Those mutations flow through `alter` and `drop` in the Rust API and the matching CLI command families.
 
 Nested JSON objects containing `_id` values still participate in relationship-aware graph processing:
 
@@ -207,7 +206,8 @@ Remote mode currently exposes built-in server-side authorization management thro
 
 The supported administrative operations are:
 
-- add user
+- create user
+- drop user
 - grant permission
 - revoke permission
 
@@ -236,19 +236,22 @@ Wardrobe supports explicit discovery and provisioning.
 
 Discovery surfaces:
 
-- `show_tenants`
-- `show_databases`
-- `show_schemas`
-- `show_drawers`
+- `status(StatusRequest::tenants())`
+- `status(StatusRequest::databases())`
+- `status(StatusRequest::schemas(...))`
+- `status(StatusRequest::drawers(...))`
 
 Lifecycle surfaces:
 
-- `create_database`
-- `create_schema`
-- `create_drawer`
+- `create(CreateRequest::database(...))`
+- `create(CreateRequest::schema(...))`
+- `create(CreateRequest::drawer(...))`
+- `drop(DropRequest::database(...))`
+- `drop(DropRequest::schema(...))`
+- `drop(DropRequest::drawer(...))`
 - `register_tenant_route`
 
-The CLI presents these as `show` and `create` across wardrobes, bays, drawers, and tenants. The Rust API keeps the database/schema naming but executes the same structural intent.
+The CLI presents these as `status`, `create`, and `drop` across wardrobes, bays, drawers, and tenants. The Rust API keeps the database/schema naming but executes the same structural intent.
 
 ---
 

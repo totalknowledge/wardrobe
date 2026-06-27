@@ -193,7 +193,7 @@ Useful server flags:
 
 ## CLI Usage
 
-`NOTES.txt` and `wardrobe-cli --help` are the authority for the CLI capability set. The current binary accepts the connection context through `--target`, `--connection`, or `--data-dir`, then runs the canonical command families from the help output.
+`NOTES.txt` and `wardrobe --help` are the authority for the CLI capability set. The package crate remains `wardrobe-cli`, while the installed binary is `wardrobe`. The binary accepts the connection context through `--target`, `--connection`, or `--data-dir`, then runs the canonical command families from the help output.
 
 Run a single command:
 
@@ -206,45 +206,44 @@ If no command is supplied, the CLI enters an interactive REPL. If standard input
 Examples:
 
 - Embedded structural discovery:
-  `cargo run -p wardrobe-cli -- --target ./data show wardrobes`
+  `cargo run -p wardrobe-cli -- --target ./data status wardrobes`
 - Remote drawer listing:
-  `cargo run -p wardrobe-cli -- --target "wardrobe://127.0.0.1:24842" show drawers inventory/public`
+  `cargo run -p wardrobe-cli -- --target "wardrobe://127.0.0.1:24842" status drawers inventory/public`
 - Backup a bay:
   `cargo run -p wardrobe-cli -- --target ./data backup inventory/public ./backups/public.wrb`
 
 Canonical command families:
 
-- Structural and lifecycle management
-  - `show <type> <?parent_path>`
+- Structural management
   - `create <type> <path>`
-  - `check <path>`
-  - `clean <path>`
-- Document mutations and queries (RUDI)
-  - `upsert <path> <json_payload>`
-  - `count <path> <?json_filter>`
-  - `inspect <path>`
-  - `records <path> <?json_filter>`
+  - `alter <type> <path> <target_field> <?extra_args>`
+  - `drop <type> <path> <?target_field> <?extra_args>`
+- Document mutations and queries (RUDIC)
+  - `read <path> <?json_filter> <?json_options>`
+  - `upsert <path> <json_payload> <?json_filter> <?json_options>`
   - `delete <path> <json_filter_or_id>`
-- Schema engine and relationship management
-  - `add <type> <path> <target_field> <?extra_args>`
-  - `remove <type> <path> <target_field> <?extra_args>`
+  - `inspect <path> <?json_filter> <?json_options>`
+  - `count <path> <?json_filter> <?json_options>`
 - Backup and disaster recovery
+  - `compact <path>`
   - `backup <source_path> <destination_archive_path>`
   - `restore <destination_path> <source_archive_path>`
 - Server access control and user administration
-  - `add user <json_user_payload>`
+  - `create user <json_user_payload>`
+  - `drop user <username>`
   - `grant permission <username> <path:rights>`
   - `revoke permission <username> <path:rights>`
+  - `status <type> <?path>`
 
 Behavior notes:
 
-- `show wardrobes` and `create wardrobe` map to the Rust `database` lifecycle APIs
-- `show bays` and `create bay` map to the Rust `schema` lifecycle APIs
-- `add user`, `grant permission`, and `revoke permission` require a remote server-backed target; `WardrobeClient` rejects them for embedded connections
-- `clean` can target a wardrobe, a bay, or a single drawer and fans out to the relevant `compact` calls
+- `status wardrobes` and `create wardrobe` map to the Rust `database` lifecycle APIs
+- `status bays` and `create bay` map to the Rust `schema` lifecycle APIs
+- `create user`, `grant permission`, and `revoke permission` require a remote server-backed target; `WardrobeClient` rejects them for embedded connections
+- `compact` can target a wardrobe, a bay, or a single drawer and fans out to the relevant compaction calls
 - `backup` and `restore` operate at wardrobe, bay, or drawer scope
 
-Compatibility aliases remain available for older workflows, including `list`, `ls`, `find`, `get`, `query`, `insert`, `drawers`, `diagnose`, `show-databases`, `show-schemas`, `show-drawers`, `delete-by-id`, `define`, `manage`, `auth`, and `rbac`.
+Compatibility aliases are intentionally not provided for the canonical CLI vocabulary.
 
 ## Current Capabilities
 
@@ -257,7 +256,7 @@ Compatibility aliases remain available for older workflows, including `list`, `l
 - Scoped routing across tenant, database, schema, and drawer boundaries
 - Write-ahead log verification and recovery for incomplete operations
 - Explicit drawer vacuuming and migration workflows
-- Structural inspection and sanity checking through `inspect`, `check`, and `diagnose` surfaces
+- Structural inspection and sanity checking through `inspect` and `status` surfaces
 - Archive-based backup and restore at wardrobe, bay, or drawer scope
 - Remote access-control administration persisted in `_wardrobe_access_control.json`
 - Bounded drawer caching for embedded engine usage
@@ -282,13 +281,13 @@ cargo run -p basic-usage
 Run the shell script sample to drive the CLI through the library workflow:
 
 ```text
-bash ./samples/cli-script/wardrobe-cli-demo.sh
+bash ./utilities/scripts/wardrobe-cli-demo.sh
 ```
 
 Pass a server connection string to exercise the same workflow remotely:
 
 ```text
-bash ./samples/cli-script/wardrobe-cli-demo.sh wardrobe://localhost:24842
+bash ./utilities/scripts/wardrobe-cli-demo.sh wardrobe://localhost:24842
 ```
 
 ## Testing

@@ -3,6 +3,7 @@ use crate::wrdb_lib::command::Command;
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::storage::StorageInventory;
+use serde_json::{Value, json};
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
@@ -164,6 +165,158 @@ where
     }
 
     discovery::storage_inventory(tenant_id.to_string(), &route_path)
+}
+
+pub(crate) fn drop_database<F>(
+    root_directory: &Path,
+    registry_lock: &RwLock<CatalogRegistry>,
+    database_name: &str,
+    append_wal: F,
+) -> Result<Value>
+where
+    F: FnOnce(&Command) -> Result<()>,
+{
+    catalog_validation::validate_database_name(database_name)?;
+    let command = Command::DropDatabase {
+        database_name: database_name.to_string(),
+    };
+    append_wal(&command)?;
+
+    let database_path = catalog_validation::database_path_from_name(root_directory, database_name)?;
+    let removed_storage = remove_dir_if_exists(&database_path)?;
+    let removed_catalog = {
+        let mut registry = write_registry(registry_lock)?;
+        let removed = registry.unregister_database(database_name);
+        registry.persist_to_root(root_directory)?;
+        removed
+    };
+
+    Ok(json!({
+        "ok": true,
+        "action": "drop_wardrobe",
+        "wardrobe": database_name,
+        "removed": removed_storage || removed_catalog,
+    }))
+}
+
+pub(crate) fn drop_schema<F>(
+    root_directory: &Path,
+    registry_lock: &RwLock<CatalogRegistry>,
+    database_name: &str,
+    schema_name: &str,
+    append_wal: F,
+) -> Result<Value>
+where
+    F: FnOnce(&Command) -> Result<()>,
+{
+    catalog_validation::validate_database_name(database_name)?;
+    catalog_validation::validate_schema_name(schema_name)?;
+    let command = Command::DropSchema {
+        database_name: database_name.to_string(),
+        schema_name: schema_name.to_string(),
+    };
+    append_wal(&command)?;
+
+    let schema_path = catalog_validation::database_path_from_name(root_directory, database_name)?
+        .join(schema_name);
+    let removed_storage = remove_dir_if_exists(&schema_path)?;
+    let removed_catalog = {
+        let mut registry = write_registry(registry_lock)?;
+        let removed = registry.unregister_schema(database_name, schema_name);
+        registry.persist_to_root(root_directory)?;
+        removed
+    };
+
+    Ok(json!({
+        "ok": true,
+        "action": "drop_bay",
+        "wardrobe": database_name,
+        "bay": schema_name,
+        "removed": removed_storage || removed_catalog,
+    }))
+}
+
+pub(crate) fn drop_drawer<F>(
+    root_directory: &Path,
+    registry_lock: &RwLock<CatalogRegistry>,
+    database_name: &str,
+    schema_name: &str,
+    drawer_name: &str,
+    append_wal: F,
+) -> Result<Value>
+where
+    F: FnOnce(&Command) -> Result<()>,
+{
+    catalog_validation::validate_database_name(database_name)?;
+    catalog_validation::validate_schema_name(schema_name)?;
+    catalog_validation::validate_drawer_name(drawer_name)?;
+    let command = Command::DropDrawer {
+        database_name: database_name.to_string(),
+        schema_name: schema_name.to_string(),
+        drawer_name: drawer_name.to_string(),
+    };
+    append_wal(&command)?;
+
+    let schema_path = catalog_validation::database_path_from_name(root_directory, database_name)?
+        .join(schema_name);
+    let removed_storage = remove_drawer_files(&schema_path, drawer_name)?;
+    let removed_catalog = {
+        let mut registry = write_registry(registry_lock)?;
+        let removed = registry.unregister_drawer(database_name, schema_name, drawer_name);
+        registry.persist_to_root(root_directory)?;
+        removed
+    };
+
+    Ok(json!({
+        "ok": true,
+        "action": "drop_drawer",
+        "wardrobe": database_name,
+        "bay": schema_name,
+        "drawer": drawer_name,
+        "removed": removed_storage || removed_catalog,
+    }))
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(path)?;
+    Ok(true)
+}
+
+fn remove_drawer_files(schema_path: &Path, drawer_name: &str) -> Result<bool> {
+    let mut removed = remove_file_if_exists(&schema_path.join(format!("{drawer_name}.drw")))?;
+    removed |= remove_file_if_exists(&schema_path.join(format!("{drawer_name}_index.drw")))?;
+    removed |= remove_file_if_exists(&schema_path.join(format!("{drawer_name}_meta.drw")))?;
+
+    if schema_path.is_dir() {
+        for entry in fs::read_dir(schema_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(&format!("{drawer_name}.")) && name.ends_with(".drw")
+                    })
+            {
+                fs::remove_file(path)?;
+                removed = true;
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    Ok(true)
 }
 
 fn read_registry(lock: &RwLock<CatalogRegistry>) -> Result<RwLockReadGuard<'_, CatalogRegistry>> {

@@ -129,3 +129,132 @@ impl WardrobeClient {
         self.driver.status(request.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CompactMode, OrderDirection, QueryModifiers, ReturnShape};
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(test_name: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("wardrobe_client_unit_{test_name}_{nanos}"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn client_wrappers_delegate_to_embedded_driver() {
+        let path = temp_path("wrappers");
+        let client = WardrobeClient::open(&path).expect("client should open");
+
+        assert!(client.requires_embedded_engine());
+        assert!(!client.uses_socket_transport());
+
+        let pointers = client
+            .upsert(
+                json!({"_id": "ruby", "power": 42}),
+                OperationFilter::drawer("gem"),
+                OperationOptions::new().atomic(true),
+            )
+            .expect("upsert should work")
+            .into_pointers();
+        assert_eq!(pointers, vec!["@gem:ruby".to_string()]);
+
+        let read = client
+            .read(
+                OperationFilter::query_in("gem", json!({"power": 42})),
+                OperationOptions::new()
+                    .return_shape(ReturnShape::Pointers)
+                    .limit(1)
+                    .offset(0)
+                    .order_by("power")
+                    .order_direction(OrderDirection::Descending),
+            )
+            .expect("read should work");
+        assert_eq!(read, ReadResult::Pointers(vec!["@gem:ruby".to_string()]));
+
+        assert_eq!(
+            client
+                .count(
+                    OperationFilter::drawer("gem"),
+                    OperationOptions::from(QueryModifiers {
+                        limit: Some(1),
+                        offset: None,
+                        order_by: None,
+                        order_direction: None,
+                    }),
+                )
+                .expect("count should work"),
+            1
+        );
+
+        assert!(matches!(
+            client
+                .inspect(OperationFilter::drawer("gem"), ())
+                .expect("inspect should work"),
+            InspectResult::Drawer(_)
+        ));
+        assert!(client.compact("gem").is_ok());
+        assert!(
+            client
+                .compact(CompactRequest::drawer_with_mode(
+                    "gem",
+                    CompactMode::Migrate
+                ))
+                .is_ok()
+        );
+        assert_eq!(
+            client
+                .delete(OperationFilter::pointer("@gem:ruby"), ())
+                .expect("delete should work")
+                .deleted,
+            1
+        );
+        assert!(matches!(
+            client
+                .create(CreateRequest::database("wardrobe"))
+                .expect("create should work"),
+            CreateResult::StorageInventory(_)
+        ));
+        assert!(
+            client
+                .alter(AlterRequest::schema_rule(
+                    "gem",
+                    "add",
+                    "index",
+                    "power",
+                    json!({"kind": "index"}),
+                ))
+                .is_ok()
+        );
+        assert!(
+            client
+                .drop(DropRequest::schema_rule("gem", "index", "power", json!({})))
+                .is_ok()
+        );
+        assert!(
+            client
+                .status(StatusRequest::cached_drawer_count())
+                .expect("status should work")
+                .eq(&StatusResult::CachedDrawerCount(1))
+        );
+        assert!(
+            client
+                .grant(PermissionRequest::new("alice", "armory:r"))
+                .is_err()
+        );
+        assert!(
+            client
+                .revoke(PermissionRequest::new("alice", "armory:r"))
+                .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+}

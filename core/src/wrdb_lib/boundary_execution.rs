@@ -213,6 +213,66 @@ pub(super) fn register_tenant_route(
     )
 }
 
+pub(super) fn drop_database(engine: &WardrobeEngine, database_name: &str) -> Result<Value> {
+    catalog_lifecycle::drop_database(
+        &engine.root_directory,
+        &engine.registry,
+        database_name,
+        |command| {
+            wal::append_command(
+                &engine.root_directory,
+                None,
+                command,
+                engine.durability_policy.clone(),
+            )
+        },
+    )
+}
+
+pub(super) fn drop_schema(
+    engine: &WardrobeEngine,
+    database_name: &str,
+    schema_name: &str,
+) -> Result<Value> {
+    catalog_lifecycle::drop_schema(
+        &engine.root_directory,
+        &engine.registry,
+        database_name,
+        schema_name,
+        |command| {
+            wal::append_command(
+                &engine.root_directory,
+                None,
+                command,
+                engine.durability_policy.clone(),
+            )
+        },
+    )
+}
+
+pub(super) fn drop_drawer(
+    engine: &WardrobeEngine,
+    database_name: &str,
+    schema_name: &str,
+    drawer_name: &str,
+) -> Result<Value> {
+    catalog_lifecycle::drop_drawer(
+        &engine.root_directory,
+        &engine.registry,
+        database_name,
+        schema_name,
+        drawer_name,
+        |command| {
+            wal::append_command(
+                &engine.root_directory,
+                None,
+                command,
+                engine.durability_policy.clone(),
+            )
+        },
+    )
+}
+
 pub(super) fn execute_for_tenant(
     engine: &WardrobeEngine,
     tenant_id: &str,
@@ -333,6 +393,23 @@ impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
         location: &str,
     ) -> Result<StorageInventory> {
         WardrobeEngine::register_tenant_route(self, tenant_id, database_name, location)
+    }
+
+    fn drop_database(&self, database_name: &str) -> Result<Value> {
+        WardrobeEngine::drop_database(self, database_name)
+    }
+
+    fn drop_schema(&self, database_name: &str, schema_name: &str) -> Result<Value> {
+        WardrobeEngine::drop_schema(self, database_name, schema_name)
+    }
+
+    fn drop_drawer(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+        drawer_name: &str,
+    ) -> Result<Value> {
+        WardrobeEngine::drop_drawer(self, database_name, schema_name, drawer_name)
     }
 
     fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics> {

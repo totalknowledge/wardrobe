@@ -656,6 +656,18 @@ impl AlterRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DropRequest {
+    Database {
+        database_name: String,
+    },
+    Schema {
+        database_name: String,
+        schema_name: String,
+    },
+    Drawer {
+        database_name: String,
+        schema_name: String,
+        drawer_name: String,
+    },
     SchemaRule {
         drawer_name: String,
         kind: String,
@@ -668,6 +680,31 @@ pub enum DropRequest {
 }
 
 impl DropRequest {
+    pub fn database(database_name: impl Into<String>) -> Self {
+        Self::Database {
+            database_name: database_name.into(),
+        }
+    }
+
+    pub fn schema(database_name: impl Into<String>, schema_name: impl Into<String>) -> Self {
+        Self::Schema {
+            database_name: database_name.into(),
+            schema_name: schema_name.into(),
+        }
+    }
+
+    pub fn drawer(
+        database_name: impl Into<String>,
+        schema_name: impl Into<String>,
+        drawer_name: impl Into<String>,
+    ) -> Self {
+        Self::Drawer {
+            database_name: database_name.into(),
+            schema_name: schema_name.into(),
+            drawer_name: drawer_name.into(),
+        }
+    }
+
     pub fn schema_rule(
         drawer_name: impl Into<String>,
         kind: impl Into<String>,
@@ -901,6 +938,18 @@ pub enum Command {
         schema_name: String,
         drawer_name: String,
     },
+    DropDatabase {
+        database_name: String,
+    },
+    DropSchema {
+        database_name: String,
+        schema_name: String,
+    },
+    DropDrawer {
+        database_name: String,
+        schema_name: String,
+        drawer_name: String,
+    },
     DefineTenantRoute {
         tenant_id: String,
         database_name: String,
@@ -961,6 +1010,7 @@ pub enum CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn storage_diagnosis_defaults_missing_storage_bytes_for_older_payloads() {
@@ -985,5 +1035,321 @@ mod tests {
         assert_eq!(diagnosis.drawer_count, 0);
         assert_eq!(diagnosis.status, "empty");
         assert!(diagnosis.drawers.is_empty());
+    }
+
+    #[test]
+    fn canonical_operation_filters_normalize_supported_inputs() {
+        assert_eq!(OperationFilter::none(), OperationFilter::None);
+        assert_eq!(
+            OperationFilter::drawer("@gem"),
+            OperationFilter::Drawer("gem".to_string())
+        );
+        assert_eq!(
+            OperationFilter::pointer("@gem"),
+            OperationFilter::Drawer("gem".to_string())
+        );
+        assert_eq!(
+            OperationFilter::pointer("@gem:ruby"),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+        assert_eq!(OperationFilter::query(json!({})), OperationFilter::None);
+        assert_eq!(
+            OperationFilter::query_in("gem", json!({"color": "red"})),
+            OperationFilter::Many(vec![
+                OperationFilter::Drawer("gem".to_string()),
+                OperationFilter::Query(json!({"color": "red"})),
+            ])
+        );
+        assert_eq!(OperationFilter::many(Vec::new()), OperationFilter::None);
+        assert_eq!(OperationFilter::from(()), OperationFilter::None);
+        assert_eq!(
+            OperationFilter::from(Some(OperationFilter::drawer("gem"))),
+            OperationFilter::Drawer("gem".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from("@gem:ruby"),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from("gem".to_string()),
+            OperationFilter::Drawer("gem".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from(&"gem".to_string()),
+            OperationFilter::Drawer("gem".to_string())
+        );
+        assert_eq!(OperationFilter::from(Value::Null), OperationFilter::None);
+        assert_eq!(
+            OperationFilter::from(json!("@gem:ruby")),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from(json!(["gem", {"color": "red"}])),
+            OperationFilter::Many(vec![
+                OperationFilter::Drawer("gem".to_string()),
+                OperationFilter::Query(json!({"color": "red"})),
+            ])
+        );
+        assert_eq!(
+            OperationFilter::from(json!({"_id": "@gem:ruby"})),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from(json!({"drawer": "@gem"})),
+            OperationFilter::Drawer("gem".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from(StorageLocator::Explicit {
+                drawer: "@gem".to_string(),
+                id: "lnk_ruby".to_string(),
+            }),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from(("gem", "ruby")),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+        assert_eq!(
+            OperationFilter::from(("gem".to_string(), "ruby".to_string())),
+            OperationFilter::Pointer("@gem:ruby".to_string())
+        );
+    }
+
+    #[test]
+    fn operation_options_parse_builders_and_validation_paths() {
+        let options = OperationOptions::new()
+            .multi(true)
+            .atomic(false)
+            .create_if_missing(false)
+            .return_shape(ReturnShape::Pointers)
+            .hydrate(false)
+            .limit(10)
+            .offset(2)
+            .order_by("power")
+            .order_direction(OrderDirection::Descending)
+            .include_diagnostics(true);
+
+        assert_eq!(options.multi, Some(true));
+        assert_eq!(options.atomic_enabled(), false);
+        assert_eq!(
+            options.query_modifiers().expect("modifiers").limit,
+            Some(10)
+        );
+
+        let parsed = OperationOptions::from_json(json!({
+            "multi": true,
+            "atomic": false,
+            "create_if_missing": true,
+            "return_shape": "record",
+            "hydrate": true,
+            "limit": 3,
+            "offset": 1,
+            "order_by": "name",
+            "order_direction": "asc",
+            "include_diagnostics": false
+        }))
+        .expect("options parse");
+        assert_eq!(parsed.return_shape, Some(ReturnShape::Record));
+        assert_eq!(parsed.order_direction, Some(OrderDirection::Ascending));
+
+        let from_modifiers = OperationOptions::from(QueryModifiers {
+            limit: Some(1),
+            offset: Some(0),
+            order_by: Some("name".to_string()),
+            order_direction: Some(OrderDirection::Ascending),
+        });
+        assert_eq!(from_modifiers.limit, Some(1));
+        assert_eq!(OperationOptions::from(()), OperationOptions::default());
+        assert_eq!(
+            OperationOptions::from(Some(OperationOptions::new().multi(true))).multi,
+            Some(true)
+        );
+
+        for invalid in [
+            json!(true),
+            json!({"multi": "yes"}),
+            json!({"return_shape": "bag"}),
+            json!({"order_direction": "sideways"}),
+            json!({"limit": -1}),
+            json!({"unknown": true}),
+        ] {
+            assert!(OperationOptions::from_json(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn canonical_request_constructors_cover_all_variants() {
+        assert_eq!(
+            CompactRequest::drawer("gem"),
+            CompactRequest::Drawer {
+                drawer_name: "gem".to_string(),
+                mode: CompactMode::Vacuum
+            }
+        );
+        assert_eq!(
+            CompactRequest::drawer_with_mode("gem", CompactMode::Migrate),
+            CompactRequest::Drawer {
+                drawer_name: "gem".to_string(),
+                mode: CompactMode::Migrate
+            }
+        );
+        assert_eq!(CompactRequest::from("gem"), CompactRequest::drawer("gem"));
+        assert_eq!(
+            CompactRequest::from("gem".to_string()),
+            CompactRequest::drawer("gem")
+        );
+
+        assert_eq!(
+            CreateRequest::database("wardrobe"),
+            CreateRequest::Database {
+                database_name: "wardrobe".to_string()
+            }
+        );
+        assert_eq!(
+            CreateRequest::schema("wardrobe", "bay"),
+            CreateRequest::Schema {
+                database_name: "wardrobe".to_string(),
+                schema_name: "bay".to_string()
+            }
+        );
+        assert_eq!(
+            CreateRequest::drawer("wardrobe", "bay", "drawer"),
+            CreateRequest::Drawer {
+                database_name: "wardrobe".to_string(),
+                schema_name: "bay".to_string(),
+                drawer_name: "drawer".to_string()
+            }
+        );
+        assert_eq!(
+            CreateRequest::tenant_route("tenant", "wardrobe", "wardrobe/bay"),
+            CreateRequest::TenantRoute {
+                tenant_id: "tenant".to_string(),
+                database_name: "wardrobe".to_string(),
+                location: "wardrobe/bay".to_string()
+            }
+        );
+        assert_eq!(
+            CreateRequest::user(json!({"username": "alice"})),
+            CreateRequest::User {
+                payload: json!({"username": "alice"})
+            }
+        );
+
+        assert_eq!(
+            AlterRequest::schema_rule("w/b/d", "add", "index", "field", json!({"x": true})),
+            AlterRequest::SchemaRule {
+                drawer_name: "w/b/d".to_string(),
+                action: "add".to_string(),
+                kind: "index".to_string(),
+                field_name: "field".to_string(),
+                payload: json!({"x": true})
+            }
+        );
+
+        assert_eq!(
+            DropRequest::database("wardrobe"),
+            DropRequest::Database {
+                database_name: "wardrobe".to_string()
+            }
+        );
+        assert_eq!(
+            DropRequest::schema("wardrobe", "bay"),
+            DropRequest::Schema {
+                database_name: "wardrobe".to_string(),
+                schema_name: "bay".to_string()
+            }
+        );
+        assert_eq!(
+            DropRequest::drawer("wardrobe", "bay", "drawer"),
+            DropRequest::Drawer {
+                database_name: "wardrobe".to_string(),
+                schema_name: "bay".to_string(),
+                drawer_name: "drawer".to_string()
+            }
+        );
+        assert_eq!(
+            DropRequest::schema_rule("w/b/d", "index", "field", json!({})),
+            DropRequest::SchemaRule {
+                drawer_name: "w/b/d".to_string(),
+                kind: "index".to_string(),
+                field_name: "field".to_string(),
+                payload: json!({})
+            }
+        );
+        assert_eq!(
+            DropRequest::user("alice"),
+            DropRequest::User {
+                username: "alice".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_results_permissions_and_status_helpers_round_trip() {
+        let result = UpsertResult::Pointers(vec!["@gem:ruby".to_string()]);
+        assert_eq!(result.pointers(), &["@gem:ruby".to_string()]);
+        assert_eq!(*result, ["@gem:ruby".to_string()]);
+        assert_eq!(result.clone(), vec!["@gem:ruby".to_string()]);
+        assert_eq!(vec!["@gem:ruby".to_string()], result.clone());
+        assert_eq!(result.into_pointers(), vec!["@gem:ruby".to_string()]);
+
+        let deleted = DeleteResult { deleted: 2 };
+        assert_eq!(deleted.to_string(), "2");
+        assert_eq!(usize::from(deleted.clone()), 2);
+        assert_eq!(deleted, 2);
+        assert_eq!(2, deleted);
+
+        assert_eq!(
+            PermissionRequest::new("alice", "wardrobe:read").into_payload(),
+            json!({"username": "alice", "permission_scope": "wardrobe:read"})
+        );
+        assert_eq!(
+            PermissionRequest::with_scope("alice", "scoped", "w/b", "rud").into_payload(),
+            json!({
+                "username": "alice",
+                "permission_scope": "scoped",
+                "scope": {"path": "w/b", "rights": "rud"}
+            })
+        );
+
+        assert_eq!(StatusRequest::tenants(), StatusRequest::Tenants);
+        assert_eq!(StatusRequest::databases(), StatusRequest::Databases);
+        assert_eq!(
+            StatusRequest::schemas("wardrobe"),
+            StatusRequest::Schemas {
+                database_name: "wardrobe".to_string()
+            }
+        );
+        assert_eq!(
+            StatusRequest::drawers("wardrobe", "bay"),
+            StatusRequest::Drawers {
+                database_name: "wardrobe".to_string(),
+                schema_name: "bay".to_string()
+            }
+        );
+        assert_eq!(
+            StatusRequest::wal(Some("wardrobe")),
+            StatusRequest::Wal {
+                database_name: Some("wardrobe".to_string())
+            }
+        );
+        assert_eq!(
+            StatusRequest::wal(None::<String>),
+            StatusRequest::Wal {
+                database_name: None
+            }
+        );
+        assert_eq!(StatusRequest::storage(), StatusRequest::Storage);
+        assert_eq!(
+            StatusRequest::path("wardrobe/bay"),
+            StatusRequest::Path {
+                path: "wardrobe/bay".to_string()
+            }
+        );
+        assert_eq!(StatusRequest::drawer_names(), StatusRequest::DrawerNames);
+        assert_eq!(
+            StatusRequest::cached_drawer_count(),
+            StatusRequest::CachedDrawerCount
+        );
     }
 }

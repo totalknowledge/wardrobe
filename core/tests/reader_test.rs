@@ -63,7 +63,7 @@ fn us_071_reader_reuses_handle_for_successive_reads_and_closes_cleanly() {
         .expect("write should succeed");
     file.write_all(&second_payload)
         .expect("write should succeed");
-    file.sync_all().expect("sync should succeed");
+    file.flush().expect("sync should succeed");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let first_raw = reader
@@ -107,7 +107,7 @@ fn read_records_at_offsets_batches_ordered_live_reads() {
         .expect("tombstone write should succeed");
     file.write_all(&second_payload)
         .expect("second write should succeed");
-    file.sync_all().expect("sync should succeed");
+    file.flush().expect("sync should succeed");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let records = reader
@@ -151,7 +151,7 @@ fn reader_handles_truncated_frame_gracefully() {
     let file_path = temp_file_path("reader_trunc_graceful");
     let mut file = fs::File::create(&file_path).expect("create");
     file.write_all(b"WRDB\x00\x00\x00\x40data").expect("write");
-    file.sync_all().expect("sync");
+    file.flush().expect("sync");
 
     if let Ok(reader) = DatabaseReader::open_drawer(&file_path) {
         assert!(reader.read_raw_bytes_at_offset(0).is_err());

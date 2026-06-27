@@ -101,8 +101,8 @@ The server supports the same command surface as the embedded engine, including:
 - ordinary CRUD operations
 - filtering and counting
 - scoped execution through tenant/database/schema routing
-- maintenance commands such as vacuum and migration
-- discovery commands such as tenants, databases, schemas, and drawers
+- maintenance commands such as compaction and migration
+- status commands such as tenants, wardrobes, bays, and drawers
 
 If your application needs multi-tenant routing, build those requests through the core command types and route them through the client or server protocol.
 
@@ -118,25 +118,25 @@ Most users should not work with raw frames directly unless they are writing a cu
 
 ## CLI And Server
 
-Today, the CLI and the server are separate concerns.
+The CLI and the server share the same canonical command vocabulary.
 
 - `wardrobe-server` hosts the shared daemon
-- `wardrobe-cli` currently focuses on local inspection and diagnostics
+- `wardrobe` can target embedded paths or remote `wardrobe://` connections
 
-That means the CLI is not yet the primary remote administration surface for the server daemon. For server-backed access today, the stable path is the API client layer in `wardrobe-core`.
+For application code, the stable path remains `WardrobeClient` in `wardrobe-core`.
 
 ## Typical Workflow
 
 1. Start the server with a chosen storage root.
 2. Connect from your application using `WardrobeClient::open("wardrobe://host:24842")`.
 3. Issue CRUD or scoped commands through the client API.
-4. Use the local CLI for file-level inspection and diagnostics when needed.
+4. Use `wardrobe --target wardrobe://host:24842 ...` for operational CLI workflows when needed.
 
 ## Related Crates
 
 - `wardrobe-core`: embedded engine, client API, command types, protocol types
 - `wardrobe-server`: standalone daemon
-- `wardrobe-cli`: local diagnostics and inspection tooling
+- `wardrobe-cli`: package crate that installs the `wardrobe` operational CLI
 
 ## Current Direction
 

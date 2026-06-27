@@ -411,6 +411,25 @@ impl ClientDriver {
         match self {
             Self::Embedded(engine) => engine.drop(request),
             _ => match request {
+                DropRequest::Database { database_name } => result_expectations::admin(
+                    self.execute_transport(Command::DropDatabase { database_name })?,
+                ),
+                DropRequest::Schema {
+                    database_name,
+                    schema_name,
+                } => result_expectations::admin(self.execute_transport(Command::DropSchema {
+                    database_name,
+                    schema_name,
+                })?),
+                DropRequest::Drawer {
+                    database_name,
+                    schema_name,
+                    drawer_name,
+                } => result_expectations::admin(self.execute_transport(Command::DropDrawer {
+                    database_name,
+                    schema_name,
+                    drawer_name,
+                })?),
                 DropRequest::SchemaRule {
                     drawer_name,
                     kind,

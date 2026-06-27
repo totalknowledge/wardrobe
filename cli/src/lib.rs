@@ -61,7 +61,7 @@ impl CliConfig {
     }
 }
 
-const HELP_TEXT: &str = r#"wardrobe-cli:
+const HELP_TEXT: &str = r#"wardrobe:
     -h, --help                  Show this message and exit
     -v, --version               Show the version and exit
 
@@ -75,80 +75,80 @@ const HELP_TEXT: &str = r#"wardrobe-cli:
     - Default Bay fallback:              "default"
 
     ===========================================================================
-    STRUCTURAL & LIFECYCLE MANAGEMENT
+    STRUCTURAL COMMANDS
     ===========================================================================
-    show <type> <?parent_path>
-        List structural elements. <type> must be one of: wardrobes, bays, drawers, tenants.
-        Example: show bays my_wardrobe
+    status <type> <?parent_path>
+        Show structural and runtime status information. <type> must be one of: wardrobes, bays, drawers, tenants, wal, storage, path, drawer-names, cached-drawer-count, server, config.
+        Example: status bays my_wardrobe
 
     create <type> <path>
-        Provision a new structural resource. <type> must be one of: wardrobe, bay, drawer.
+        Provision a new structural resource. <type> must be one of: wardrobe, bay, drawer, user.
         Example: create drawer my_wardrobe/my_bay/user
 
-    check <path>
-        Run physical presence and sanity verification checks on a structural layer.
-        Example: check my_wardrobe/my_bay/user
+    drop <type> <path>
+        Drop a structural resource. <type> must be one of: wardrobe, bay, drawer, user.
+        Example: drop drawer my_wardrobe/my_bay/user
 
-    clean <path>
+    compact <path>
         Execute a space-reclaiming vacuum process on a drawer or group of drawers.
-        Example: clean my_wardrobe/my_bay (cleans all drawers in bay)
+        Example: compact my_wardrobe/my_bay (compacts all drawers in bay)
 
     ===========================================================================
-    DOCUMENT MUTATIONS & QUERIES (RUDI)
+    DOCUMENT MUTATIONS & QUERIES (RUDIC)
     ===========================================================================
-    upsert <path> <json_payload>
+    upsert <path> <json_payload> <?json_filter> <?json_options>
         Insert a new document or completely overwrite an existing document by its _id.
         Example: upsert my_wardrobe/my_bay/user '{"_id": "user-01", "name": "Marcus"}'
 
-    count <path> <?json_filter>
+    count <path> <?json_filter> <?json_options>
         Count documents matching an optional criteria filter.
         Example: count my_wardrobe/my_bay/user '{"tool.type": "Hammer"}'
 
-    inspect <path>
+    inspect <path> <?json_filter> <?json_options>
         Expose raw storage metrics (sizes, record counts, tombstone fragmentation percentages).
-        Does not output data records.
+        Does not output documents.
         Example: inspect my_wardrobe/my_bay/user
 
-    records <path> <?json_filter>
-        Retrieve a list of documents matching an optional criteria filter.
-        Example: records my_wardrobe/my_bay/user '{"tool._id": "298234789328923489"}'
-        Example: records my_wardrobe/my_bay/user '{"_id": "@tool:298234789328923489"}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type": "Hammer"}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$in": ["Hammer", "Sword"]}}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$nin": ["Hammer", "Sword"]}}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$exists": true}}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$exists": false}}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type": {"$regex": ".*Sword.*"}}'
-        Example: records my_wardrobe/my_bay/user '{"tool.type.owner": "@user:8723478929234786234"}'
+    read <path> <?json_filter> <?json_options>
+        Retrieve documents matching an optional criteria filter.
+        Example: read my_wardrobe/my_bay/user '{"tool._id": "298234789328923489"}'
+        Example: read my_wardrobe/my_bay/user '{"_id": "@tool:298234789328923489"}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type": "Hammer"}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type": {"$in": ["Hammer", "Sword"]}}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type": {"$nin": ["Hammer", "Sword"]}}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type": {"$exists": true}}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type": {"$exists": false}}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type": {"$regex": ".*Sword.*"}}'
+        Example: read my_wardrobe/my_bay/user '{"tool.type.owner": "@user:8723478929234786234"}'
 
     delete <path> <json_filter_or_id>
-        Remove documents from a drawer matching a specific structural ID or JSON filter criteria.
+        Delete documents from a drawer matching a specific structural ID or JSON filter criteria.
         Example: delete my_wardrobe/my_bay/user '{"_id": "user-02"}'
 
     ===========================================================================
     SCHEMA ENGINE & RELATIONSHIP MANAGEMENT
     ===========================================================================
-    add <type> <path> <target_field> <?extra_args>
+    alter <type> <path> <target_field> <?extra_args>
         Attach a structural modifier, index, rule, or side-effect routine to a field.
         <type> must be one of: index, key, constraint, trigger, relationship, cascade-delete.
 
         Examples:
-        add index my_wardrobe/my_bay/user tool.type
-        add key my_wardrobe/my_bay/user profile_id secondary
-        add constraint my_wardrobe/my_bay/user email unique
-        add constraint my_wardrobe/my_bay/user age non-null
-        add relationship my_wardrobe/my_bay/user tool_id my_wardrobe/my_bay/tool
-        add cascade-delete my_wardrobe/my_bay/user tool_id
-        add trigger my_wardrobe/my_bay/user on_upsert ./scripts/sync_profile.sh
+        alter index my_wardrobe/my_bay/user tool.type
+        alter key my_wardrobe/my_bay/user profile_id secondary
+        alter constraint my_wardrobe/my_bay/user email unique
+        alter constraint my_wardrobe/my_bay/user age non-null
+        alter relationship my_wardrobe/my_bay/user tool_id my_wardrobe/my_bay/tool
+        alter cascade-delete my_wardrobe/my_bay/user tool_id
+        alter trigger my_wardrobe/my_bay/user on_upsert ./scripts/sync_profile.sh
 
-    remove <type> <path> <target_field> <?extra_args>
+    drop <type> <path> <target_field> <?extra_args>
         Detach or drop an active modifier, index, rule, or routine from a field context.
         <type> must be one of: index, key, constraint, trigger, relationship, cascade-delete.
 
         Examples:
-        remove index my_wardrobe/my_bay/user tool.type
-        remove constraint my_wardrobe/my_bay/user email unique
-        remove cascade-delete my_wardrobe/my_bay/user tool_id
+        drop index my_wardrobe/my_bay/user tool.type
+        drop constraint my_wardrobe/my_bay/user email unique
+        drop cascade-delete my_wardrobe/my_bay/user tool_id
 
     ===========================================================================
     BACKUP & DISASTER RECOVERY
@@ -164,9 +164,13 @@ const HELP_TEXT: &str = r#"wardrobe-cli:
     ===========================================================================
     SERVER ACCESS CONTROL & USER ADMINISTRATION
     ===========================================================================
-    add user <json_user_payload>
+    create user <json_user_payload>
         Register an authorized administrative or client identity with the Wardrobe instance.
-        Example: add user '{"username": "dev_admin", "role": "operator"}'
+        Example: create user '{"username": "dev_admin", "role": "operator"}'
+
+    drop user <username>
+        Remove an authorized administrative or client identity from the Wardrobe instance.
+        Example: drop user dev_admin
 
     grant permission <username> <permission_scope>
         Delegate functional access rights (Read, Update, Delete, Inspect) across a path scope.
@@ -212,7 +216,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println!("wardrobe-cli {}", env!("CARGO_PKG_VERSION"));
+    println!("wardrobe {}", env!("CARGO_PKG_VERSION"));
 }
 
 pub fn run_cli_logic(config: CliConfig) -> io::Result<()> {
@@ -364,30 +368,21 @@ fn drawer_query_filter(drawer_name: impl Into<String>, query: Value) -> Operatio
     OperationFilter::query_in(drawer_name, query)
 }
 
-fn read_records(
-    client: &WardrobeClient,
-    filter: OperationFilter,
-    options: impl Into<OperationOptions>,
-) -> io::Result<Vec<Value>> {
-    match client.read(filter, options.into()).map_err(client_error)? {
-        ReadResult::Records(records) => Ok(records),
-        other => unexpected_read_result("records", other),
+fn operation_filter(path: &str, filter: Option<Value>) -> OperationFilter {
+    match filter {
+        Some(filter) => OperationFilter::many(vec![
+            OperationFilter::from(path.to_string()),
+            OperationFilter::from(filter),
+        ]),
+        None => OperationFilter::from(path.to_string()),
     }
 }
 
-fn inspect_metrics(
-    client: &WardrobeClient,
-    filter: OperationFilter,
-) -> io::Result<wardrobe_core::DrawerInspectionMetrics> {
-    match client
-        .inspect(filter, None::<OperationOptions>)
-        .map_err(client_error)?
-    {
-        InspectResult::Drawer(metrics) => Ok(metrics),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("Expected drawer inspection metrics, got {other:?}"),
-        )),
+fn operation_options(parts: &[String], index: usize, label: &str) -> io::Result<OperationOptions> {
+    if let Some(raw_options) = parts.get(index) {
+        OperationOptions::from_json(parse_json_arg(raw_options, label)?)
+    } else {
+        Ok(OperationOptions::default())
     }
 }
 
@@ -399,7 +394,7 @@ fn alter_schema_rule(
     field_name: &str,
     payload: Value,
 ) -> io::Result<Value> {
-    if action == "remove" {
+    if action == "drop" {
         client
             .drop(DropRequest::schema_rule(
                 drawer_path,
@@ -412,7 +407,7 @@ fn alter_schema_rule(
         client
             .alter(AlterRequest::schema_rule(
                 drawer_path,
-                action,
+                "add",
                 kind,
                 field_name,
                 payload,
@@ -512,49 +507,17 @@ fn unexpected_create_result<T>(expected: &str, actual: CreateResult) -> io::Resu
     ))
 }
 
-fn unexpected_read_result<T>(expected: &str, actual: ReadResult) -> io::Result<T> {
-    Err(Error::new(
-        ErrorKind::InvalidData,
-        format!("expected {expected}, got {actual:?}"),
-    ))
-}
-
 pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.is_empty() {
         return Ok(());
     }
 
     match parts[0].as_str() {
-        "drawers" => {
-            let drawers = status_drawer_names(client)?;
-            for drawer in drawers {
-                println!("{drawer}");
-            }
-            Ok(())
-        }
-        "diagnose" => {
-            let diagnosis = status_storage(client)?;
-            println!("Storage directory: {}", diagnosis.storage_directory);
-            println!("Storage bytes: {}", diagnosis.storage_bytes);
-            println!("Drawer count: {}", diagnosis.drawer_count);
-            if diagnosis.drawers.is_empty() {
-                println!("Status: {}", diagnosis.status);
-            } else {
-                for drawer in diagnosis.drawers {
-                    println!("- {drawer}");
-                }
-            }
-            Ok(())
-        }
+        "status" => run_status_command(client, parts, pretty),
         "inspect" => run_inspect_command(client, parts, pretty),
-        "records" => run_records_command(client, parts, pretty, false),
-        "find" | "get" | "query" => run_records_command(client, parts, pretty, true),
+        "read" => run_read_command(client, parts, pretty),
         "count" => run_count_command(client, parts, pretty),
-        "upsert" | "insert" => run_upsert_command(client, parts),
-        "add" if parts.get(1).map(String::as_str) == Some("user") => {
-            run_add_user_command(client, parts, pretty)
-        }
-        "add" => run_schema_management_command(client, parts, pretty),
+        "upsert" => run_upsert_command(client, parts, pretty),
         "create" => {
             if parts
                 .get(1)
@@ -562,100 +525,22 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
                 .unwrap_or(false)
             {
                 run_create_command(client, parts, pretty)
+            } else if parts.get(1).map(String::as_str) == Some("user") {
+                run_create_user_command(client, parts, pretty)
             } else {
-                run_upsert_command(client, parts)
-            }
-        }
-        "delete-by-id" => {
-            if parts.len() < 2 {
-                return Err(Error::new(
+                Err(Error::new(
                     ErrorKind::InvalidInput,
-                    "delete-by-id requires a pointer",
-                ));
+                    "create requires a structural type or user payload; use upsert for documents",
+                ))
             }
-            let deleted = client
-                .delete(
-                    OperationFilter::pointer(&parts[1]),
-                    None::<OperationOptions>,
-                )
-                .map_err(client_error)?;
-            println!("deleted: {}", deleted.deleted);
-            Ok(())
         }
-        "remove"
-            if parts
-                .get(1)
-                .is_some_and(|kind| is_schema_management_type(kind)) =>
-        {
-            run_schema_management_command(client, parts, pretty)
-        }
-        "delete" | "remove" => run_delete_command(client, parts),
-        "define" => run_define_command(client, parts, pretty),
-        "create-db" => {
-            if parts.len() < 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "create-db requires a database name",
-                ));
-            }
-            let inventory = create_inventory(client, CreateRequest::database(&parts[1]))?;
-            print_json(&inventory, pretty)
-        }
-        "create-schema" => {
-            if parts.len() < 3 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "create-schema requires <database> <schema>",
-                ));
-            }
-            let inventory = create_inventory(client, CreateRequest::schema(&parts[1], &parts[2]))?;
-            print_json(&inventory, pretty)
-        }
-        "create-drawer" => {
-            if parts.len() < 4 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "create-drawer requires <database> <schema> <drawer>",
-                ));
-            }
-            let inventory = create_inventory(
-                client,
-                CreateRequest::drawer(&parts[1], &parts[2], &parts[3]),
-            )?;
-            print_json(&inventory, pretty)
-        }
-        "manage" => run_manage_user_command(client, parts, pretty),
-        "auth" | "rbac" => run_manage_user_alias(client, parts, pretty),
+        "alter" => run_schema_management_command(client, parts, pretty),
+        "drop" => run_drop_command(client, parts, pretty),
+        "delete" => run_delete_command(client, parts),
         "grant" | "revoke" => run_permission_command(client, parts, pretty),
-        "show" | "ls" | "list" => run_show_command(client, parts, pretty),
-        "check" => run_check_command(client, parts),
-        "clean" => run_clean_command(client, parts, pretty),
+        "compact" => run_compact_command(client, parts, pretty),
         "backup" => run_backup_command(client, parts, pretty),
         "restore" => run_restore_command(client, parts, pretty),
-        "show-databases" => {
-            let dbs = status_databases(client)?;
-            print_json(&dbs, pretty)
-        }
-        "show-schemas" => {
-            if parts.len() < 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "show-schemas requires a database name",
-                ));
-            }
-            let schemas = status_schemas(client, &parts[1])?;
-            print_json(&schemas, pretty)
-        }
-        "show-drawers" => {
-            if parts.len() < 3 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "show-drawers requires <database> <schema>",
-                ));
-            }
-            let drawers = status_drawers(client, &parts[1], &parts[2])?;
-            print_json(&drawers, pretty)
-        }
         _ => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("Unknown command: {}", parts[0]),
@@ -663,26 +548,34 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
     }
 }
 
-fn run_upsert_command(client: &WardrobeClient, parts: &[String]) -> io::Result<()> {
+fn run_upsert_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.len() < 3 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            format!("{} requires a drawer name and JSON payload", parts[0]),
+            "upsert requires <path> <json_payload> <?json_filter> <?json_options>",
+        ));
+    }
+    if parts.len() > 5 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "upsert accepts at most <path> <json_payload> <json_filter> <json_options>",
         ));
     }
     let payload = parse_json_arg(&parts[2], "payload")?;
+    let filter = if parts.len() >= 4 {
+        Some(parse_json_arg(&parts[3], "upsert filter")?)
+    } else {
+        None
+    };
+    let options = operation_options(parts, 4, "upsert options")?;
     let pointers = client
-        .upsert(
-            payload,
-            OperationFilter::drawer(&parts[1]),
-            None::<OperationOptions>,
-        )
+        .upsert(payload, operation_filter(&parts[1], filter), options)
         .map_err(client_error)?
         .into_pointers();
     if pointers.len() == 1 {
         println!("{}", pointers[0]);
     } else {
-        print_json(&pointers, false)?;
+        print_json(&pointers, pretty)?;
     }
     Ok(())
 }
@@ -694,53 +587,58 @@ fn run_count_command(client: &WardrobeClient, parts: &[String], pretty: bool) ->
             "count requires a drawer path",
         ));
     }
+    if parts.len() > 4 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "count accepts at most <path> <json_filter> <json_options>",
+        ));
+    }
 
     let filter = if parts.len() >= 3 {
-        drawer_query_filter(&parts[1], parse_json_arg(&parts[2], "count filter")?)
+        operation_filter(&parts[1], Some(parse_json_arg(&parts[2], "count filter")?))
     } else {
-        OperationFilter::drawer(&parts[1])
+        operation_filter(&parts[1], None)
     };
-    let count = client
-        .count(filter, None::<OperationOptions>)
-        .map_err(client_error)?;
+    let options = operation_options(parts, 3, "count options")?;
+    let count = client.count(filter, options).map_err(client_error)?;
     print_json(&count, pretty)
 }
 
-fn run_records_command(
-    client: &WardrobeClient,
-    parts: &[String],
-    pretty: bool,
-    require_filter: bool,
-) -> io::Result<()> {
+fn run_read_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.len() < 2 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!("{} requires a drawer path", parts[0]),
         ));
     }
-    if require_filter && parts.len() < 3 {
+    if parts.len() > 4 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            format!("{} requires a drawer path and JSON filter", parts[0]),
+            "read accepts at most <path> <json_filter> <json_options>",
         ));
     }
 
-    let mut records = if parts.len() >= 3 {
-        let filter = parse_json_arg(&parts[2], "query filter")?;
-        read_records(
-            client,
-            drawer_query_filter(&parts[1], filter),
-            None::<OperationOptions>,
-        )?
+    let filter = if parts.len() >= 3 {
+        operation_filter(&parts[1], Some(parse_json_arg(&parts[2], "query filter")?))
     } else {
-        read_records(
-            client,
-            OperationFilter::drawer(&parts[1]),
-            None::<OperationOptions>,
-        )?
+        operation_filter(&parts[1], None)
     };
-    pub_normalize_record_ids(&mut records);
-    print_json(&records, pretty)
+    let options = operation_options(parts, 3, "read options")?;
+
+    match client.read(filter, options).map_err(client_error)? {
+        ReadResult::Records(mut records) => {
+            pub_normalize_record_ids(&mut records);
+            print_json(&records, pretty)
+        }
+        ReadResult::Record(Some(record)) => {
+            let mut records = vec![record];
+            pub_normalize_record_ids(&mut records);
+            print_json(&records.remove(0), pretty)
+        }
+        ReadResult::Record(None) => print_json(&Value::Null, pretty),
+        ReadResult::Pointers(pointers) => print_json(&pointers, pretty),
+        ReadResult::Exists(exists) => print_json(&exists, pretty),
+    }
 }
 
 fn run_inspect_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
@@ -750,10 +648,26 @@ fn run_inspect_command(client: &WardrobeClient, parts: &[String], pretty: bool) 
             "inspect requires a drawer path",
         ));
     }
+    if parts.len() > 4 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "inspect accepts at most <path> <json_filter> <json_options>",
+        ));
+    }
 
-    let drawer_path = parts[1..].join("/");
-    let metrics = inspect_metrics(client, OperationFilter::drawer(&drawer_path))?;
-    print_json(&metrics, pretty)
+    let filter = if parts.len() >= 3 {
+        operation_filter(
+            &parts[1],
+            Some(parse_json_arg(&parts[2], "inspect filter")?),
+        )
+    } else {
+        operation_filter(&parts[1], None)
+    };
+    let options = operation_options(parts, 3, "inspect options")?;
+    match client.inspect(filter, options).map_err(client_error)? {
+        InspectResult::Drawer(metrics) => print_json(&metrics, pretty),
+        other => print_json(&other, pretty),
+    }
 }
 
 enum DeleteTarget {
@@ -771,6 +685,12 @@ fn run_delete_command(client: &WardrobeClient, parts: &[String]) -> io::Result<(
             ),
         ));
     }
+    if parts.len() > 4 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "delete accepts at most <pointer> or <path> <json_filter_or_id> <json_options>",
+        ));
+    }
 
     if parts.len() == 2 {
         let deleted = client
@@ -785,14 +705,20 @@ fn run_delete_command(client: &WardrobeClient, parts: &[String]) -> io::Result<(
 
     match parse_delete_target(&parts[2])? {
         DeleteTarget::Id(record_id) => {
+            let options = operation_options(parts, 3, "delete options")?;
             let pointer = pointer_from_record_id(&parts[1], &record_id);
             let deleted = client
-                .delete(OperationFilter::pointer(&pointer), None::<OperationOptions>)
+                .delete(OperationFilter::pointer(&pointer), options)
                 .map_err(client_error)?;
             println!("deleted: {}", deleted.deleted);
         }
         DeleteTarget::Filter(filter) => {
-            let (matched, deleted) = delete_by_filter(client, &parts[1], filter)?;
+            let options = if parts.len() >= 4 {
+                operation_options(parts, 3, "delete options")?
+            } else {
+                OperationOptions::new().multi(true)
+            };
+            let (matched, deleted) = delete_by_filter(client, &parts[1], filter, options)?;
             println!("matched: {matched}");
             println!("deleted: {deleted}");
         }
@@ -828,13 +754,14 @@ fn delete_by_filter(
     client: &WardrobeClient,
     drawer_name: &str,
     filter: Value,
+    options: OperationOptions,
 ) -> io::Result<(usize, usize)> {
     let operation_filter = drawer_query_filter(drawer_name, filter);
     let matched = client
         .count(operation_filter.clone(), None::<OperationOptions>)
         .map_err(client_error)?;
     let deleted = client
-        .delete(operation_filter, OperationOptions::new().multi(true))
+        .delete(operation_filter, options)
         .map_err(client_error)?
         .deleted;
 
@@ -932,7 +859,7 @@ fn schema_management_payload(
             Ok(json!({ "constraint": constraint }))
         }
         "trigger" => {
-            if action == "add" && parts.len() < 5 {
+            if action == "alter" && parts.len() < 5 {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     "trigger requires a script path or command",
@@ -944,7 +871,7 @@ fn schema_management_payload(
             }))
         }
         "relationship" => {
-            if action == "remove" && parts.len() < 5 {
+            if action == "drop" && parts.len() < 5 {
                 return Ok(json!({}));
             }
             let Some(target_path) = parts.get(4) else {
@@ -974,68 +901,6 @@ fn schema_management_payload(
         _ => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("Unknown schema command type: {kind}"),
-        )),
-    }
-}
-
-fn run_define_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
-    if parts.len() < 2 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "define requires database, schema, or drawer",
-        ));
-    }
-
-    match parts[1].as_str() {
-        "database" => {
-            if parts.len() < 3 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "define database requires a database name",
-                ));
-            }
-            let inventory = create_inventory(client, CreateRequest::database(&parts[2]))?;
-            print_json(&inventory, pretty)
-        }
-        "schema" => {
-            if parts.len() < 4 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "define schema requires <database> <schema>",
-                ));
-            }
-            let inventory = create_inventory(client, CreateRequest::schema(&parts[2], &parts[3]))?;
-            print_json(&inventory, pretty)
-        }
-        "drawer" => {
-            if parts.len() < 5 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "define drawer requires <database> <schema> <drawer>",
-                ));
-            }
-            let inventory = create_inventory(
-                client,
-                CreateRequest::drawer(&parts[2], &parts[3], &parts[4]),
-            )?;
-            print_json(&inventory, pretty)
-        }
-        "tenant-route" => {
-            if parts.len() < 5 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "define tenant-route requires <tenant> <database> <location>",
-                ));
-            }
-            let inventory = create_inventory(
-                client,
-                CreateRequest::tenant_route(&parts[2], &parts[3], &parts[4]),
-            )?;
-            print_json(&inventory, pretty)
-        }
-        other => Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("Unknown define target: {other}"),
         )),
     }
 }
@@ -1072,14 +937,88 @@ fn run_create_command(client: &WardrobeClient, parts: &[String], pretty: bool) -
     }
 }
 
-fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+fn run_drop_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.len() < 2 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            format!(
-                "{} requires tenants, databases, schemas, or drawers",
-                parts[0]
-            ),
+            "drop requires <type> <path>",
+        ));
+    }
+
+    if is_schema_management_type(&parts[1]) {
+        return run_schema_management_command(client, parts, pretty);
+    }
+
+    match parts[1].as_str() {
+        "user" | "users" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drop user requires <username> or <json_user_payload>",
+                ));
+            }
+            let username = if parts[2].trim_start().starts_with('{') {
+                let raw_payload = parts[2..].join(" ");
+                payload_username(&parse_json_arg(&raw_payload, "user admin payload")?)?
+            } else {
+                validate_permission_username(&parts[2])?
+            };
+            let response = client
+                .drop(DropRequest::user(username))
+                .map_err(client_error)?;
+            print_json(&response, pretty)
+        }
+        "wardrobe" | "wardrobes" | "database" | "databases" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drop wardrobe requires <path>",
+                ));
+            }
+            let (wardrobe, _, _) = parse_structural_path(&parts[2], 1, "wardrobe path")?;
+            let response = client
+                .drop(DropRequest::database(wardrobe))
+                .map_err(client_error)?;
+            print_json(&response, pretty)
+        }
+        "bay" | "bays" | "schema" | "schemas" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drop bay requires <wardrobe>/<bay>",
+                ));
+            }
+            let (wardrobe, bay, _) = parse_structural_path(&parts[2], 2, "bay path")?;
+            let response = client
+                .drop(DropRequest::schema(wardrobe, bay))
+                .map_err(client_error)?;
+            print_json(&response, pretty)
+        }
+        "drawer" | "drawers" => {
+            if parts.len() < 3 {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drop drawer requires <wardrobe>/<bay>/<drawer>",
+                ));
+            }
+            let (wardrobe, bay, drawer) = parse_structural_path(&parts[2], 3, "drawer path")?;
+            let response = client
+                .drop(DropRequest::drawer(wardrobe, bay, drawer))
+                .map_err(client_error)?;
+            print_json(&response, pretty)
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown drop target: {other}"),
+        )),
+    }
+}
+
+fn run_status_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+    if parts.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "status requires tenants, wardrobes, bays, drawers, wal, storage, path, drawer-names, cached-drawer-count, server, or config",
         ));
     }
 
@@ -1096,7 +1035,7 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
             if parts.len() < 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    format!("{} bays requires a wardrobe path", parts[0]),
+                    "status bays requires a wardrobe path",
                 ));
             }
             let (wardrobe, _, _) = parse_structural_path(&parts[2], 1, "wardrobe path")?;
@@ -1107,7 +1046,7 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
             if parts.len() < 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    format!("{} drawers requires a bay path", parts[0]),
+                    "status drawers requires a bay path",
                 ));
             }
             let (wardrobe, bay) = if parts.len() >= 4 && !has_path_separator(&parts[2]) {
@@ -1119,56 +1058,84 @@ fn run_show_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
             let drawers = status_drawers(client, &wardrobe, &bay)?;
             print_json(&drawers, pretty)
         }
+        "wal" => {
+            let database_name = parts.get(2).cloned();
+            let status = client
+                .status(StatusRequest::wal(database_name))
+                .map_err(client_error)?;
+            print_json(&status, pretty)
+        }
+        "storage" => {
+            let storage = status_storage(client)?;
+            print_json(&storage, pretty)
+        }
+        "path" => {
+            let Some(path) = parts.get(2) else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "status path requires <path>",
+                ));
+            };
+            let report = status_check(client, path)?;
+            print_json(&report, pretty)
+        }
+        "drawer-names" | "drawer_names" => {
+            let drawers = status_drawer_names(client)?;
+            print_json(&drawers, pretty)
+        }
+        "cached-drawer-count" | "cached_drawer_count" => {
+            let status = client
+                .status(StatusRequest::cached_drawer_count())
+                .map_err(client_error)?;
+            print_json(&status, pretty)
+        }
+        "server" => print_json(
+            &json!({
+                "target": format_target(client.connection_target()),
+                "status": "available"
+            }),
+            pretty,
+        ),
+        "config" => print_json(
+            &json!({
+                "target": format_target(client.connection_target())
+            }),
+            pretty,
+        ),
         other => Err(Error::new(
             ErrorKind::InvalidInput,
-            format!("Unknown show target: {other}"),
+            format!("Unknown status target: {other}"),
         )),
     }
 }
 
-fn run_check_command(client: &WardrobeClient, parts: &[String]) -> io::Result<()> {
-    if parts.len() < 2 {
-        return Err(Error::new(ErrorKind::InvalidInput, "check requires <path>"));
-    }
-
-    let report = status_check(client, &parts[1])?;
-    println!("Path: {}", report.path);
-    println!("Type: {}", report.kind);
-    for entry in report.entries {
-        match (entry.exists, entry.bytes) {
-            (true, Some(bytes)) => println!("{}: present ({bytes} bytes)", entry.label),
-            (true, None) => println!("{}: present", entry.label),
-            (false, _) => println!("{}: missing", entry.label),
-        }
-    }
-
-    Ok(())
-}
-
 #[derive(serde::Serialize)]
-struct CleanResult {
+struct CompactCommandResult {
     path: String,
     report: VacuumReport,
 }
 
-fn run_clean_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+fn run_compact_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
     if parts.len() < 2 {
-        return Err(Error::new(ErrorKind::InvalidInput, "clean requires <path>"));
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "compact requires <path>",
+        ));
     }
 
-    let targets = clean_targets(client, &parts[1])?;
+    let targets = compact_targets(client, &parts[1])?;
     let mut results = Vec::new();
     for path in targets {
         let report = client
             .compact(CompactRequest::drawer(&path))
             .map_err(client_error)?;
-        results.push(CleanResult { path, report });
+        results.push(CompactCommandResult { path, report });
     }
     print_json(&results, pretty)
 }
 
-fn clean_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<String>> {
-    let segments = split_structural_path(raw_path, "clean path")?;
+fn compact_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<String>> {
+    let segments = split_structural_path(raw_path, "compact path")?;
     match segments.len() {
         1 => {
             let wardrobe = &segments[0];
@@ -1193,7 +1160,7 @@ fn clean_targets(client: &WardrobeClient, raw_path: &str) -> io::Result<Vec<Stri
         3 => Ok(vec![segments.join("/")]),
         _ => Err(Error::new(
             ErrorKind::InvalidInput,
-            "clean path must identify a wardrobe, bay, or drawer",
+            "compact path must identify a wardrobe, bay, or drawer",
         )),
     }
 }
@@ -1315,17 +1282,21 @@ struct PermissionScope {
     rights: String,
 }
 
-fn run_add_user_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
+fn run_create_user_command(
+    client: &WardrobeClient,
+    parts: &[String],
+    pretty: bool,
+) -> io::Result<()> {
     if parts.len() < 3 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            "add user requires <json_user_payload>",
+            "create user requires <json_user_payload>",
         ));
     }
 
     let raw_payload = parts[2..].join(" ");
     let payload = parse_user_admin_payload(&raw_payload)?;
-    let response = administer_user_action(client, "add_user", payload)?;
+    let response = administer_user_action(client, "create_user", payload)?;
     print_json(&response, pretty)
 }
 
@@ -1359,54 +1330,6 @@ fn run_permission_command(
         "revoke" => client.revoke(request).map_err(client_error)?,
         _ => unreachable!("permission command only routes grant or revoke"),
     };
-    print_json(&response, pretty)
-}
-
-fn run_manage_user_command(
-    client: &WardrobeClient,
-    parts: &[String],
-    pretty: bool,
-) -> io::Result<()> {
-    if parts.len() < 2 || parts[1] != "user" {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "manage requires user <action> <json>",
-        ));
-    }
-    if parts.len() < 4 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "manage user requires <action> <json>",
-        ));
-    }
-
-    let raw_payload = parts[3..].join(" ");
-    let payload = parse_json_arg(&raw_payload, "user admin payload")?;
-    let response = administer_user_action(client, &parts[2], payload)?;
-    print_json(&response, pretty)
-}
-
-fn run_manage_user_alias(
-    client: &WardrobeClient,
-    parts: &[String],
-    pretty: bool,
-) -> io::Result<()> {
-    let (action_index, payload_index) = if parts.get(1).map(String::as_str) == Some("user") {
-        (2, 3)
-    } else {
-        (1, 2)
-    };
-
-    if parts.len() <= payload_index {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{} requires <action> <json>", parts[0]),
-        ));
-    }
-
-    let raw_payload = parts[payload_index..].join(" ");
-    let payload = parse_json_arg(&raw_payload, "user admin payload")?;
-    let response = administer_user_action(client, &parts[action_index], payload)?;
     print_json(&response, pretty)
 }
 
@@ -1758,6 +1681,16 @@ struct DrawerFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wardrobe_cli_unit_{test_name}_{nanos}"))
+    }
 
     #[test]
     fn inspect_target_splits_structured_reference() {
@@ -1785,5 +1718,287 @@ mod tests {
         assert_eq!(target.data_dir, root.join("basic-usage").join("public"));
         assert_eq!(target.drawer_name, "user");
         assert_eq!(target.label, "basic-usage/public/user");
+    }
+
+    #[test]
+    fn canonical_parser_helpers_cover_filter_options_and_targets() {
+        assert_eq!(
+            operation_filter("armory/public/gem", None),
+            OperationFilter::Drawer("armory/public/gem".to_string())
+        );
+        assert_eq!(
+            operation_filter("armory/public/gem", Some(json!({"power": 42}))),
+            OperationFilter::Many(vec![
+                OperationFilter::Drawer("armory/public/gem".to_string()),
+                OperationFilter::Query(json!({"power": 42})),
+            ])
+        );
+
+        let parts = vec![
+            "read".to_string(),
+            "armory/public/gem".to_string(),
+            "{}".to_string(),
+            r#"{"limit":2,"offset":1,"order_by":"power","order_direction":"desc"}"#.to_string(),
+        ];
+        let options = operation_options(&parts, 3, "read options").expect("options parse");
+        assert_eq!(options.limit, Some(2));
+        assert_eq!(options.offset, Some(1));
+        assert_eq!(options.order_by.as_deref(), Some("power"));
+        assert_eq!(
+            options.order_direction,
+            Some(wardrobe_core::OrderDirection::Descending)
+        );
+        assert!(operation_options(&parts, 99, "missing options").is_ok());
+
+        match parse_delete_target("ruby").expect("id target") {
+            DeleteTarget::Id(id) => assert_eq!(id, "ruby"),
+            DeleteTarget::Filter(_) => panic!("expected id target"),
+        }
+        match parse_delete_target(r#""sapphire""#).expect("string target") {
+            DeleteTarget::Id(id) => assert_eq!(id, "sapphire"),
+            DeleteTarget::Filter(_) => panic!("expected id target"),
+        }
+        match parse_delete_target(r#"{"_id":"emerald"}"#).expect("object id target") {
+            DeleteTarget::Id(id) => assert_eq!(id, "emerald"),
+            DeleteTarget::Filter(_) => panic!("expected id target"),
+        }
+        match parse_delete_target(r#"{"power":42}"#).expect("filter target") {
+            DeleteTarget::Filter(filter) => assert_eq!(filter, json!({"power": 42})),
+            DeleteTarget::Id(_) => panic!("expected filter target"),
+        }
+        assert!(parse_delete_target("[1,2]").is_err());
+
+        assert_eq!(pointer_from_record_id("gem", "@gem:ruby"), "@gem:ruby");
+        assert_eq!(pointer_from_record_id("gem", "lnk_ruby"), "@gem:ruby");
+        assert_eq!(pointer_from_record_id("@gem", "ruby"), "@gem:ruby");
+    }
+
+    #[test]
+    fn schema_and_structural_helpers_validate_canonical_forms() {
+        assert!(is_schema_management_type("index"));
+        assert!(is_schema_management_type("cascade-delete"));
+        assert_eq!(normalize_schema_command_type("indexes").unwrap(), "index");
+        assert_eq!(normalize_schema_command_type("keys").unwrap(), "key");
+        assert_eq!(
+            normalize_schema_command_type("constraints").unwrap(),
+            "constraint"
+        );
+        assert_eq!(
+            normalize_schema_command_type("triggers").unwrap(),
+            "trigger"
+        );
+        assert_eq!(
+            normalize_schema_command_type("relationships").unwrap(),
+            "relationship"
+        );
+        assert_eq!(
+            normalize_schema_command_type("cascade_delete").unwrap(),
+            "cascade-delete"
+        );
+        assert!(normalize_schema_command_type("unknown").is_err());
+
+        assert_eq!(
+            normalize_drawer_path("armory/public/gem", "drawer").unwrap(),
+            "armory/public/gem"
+        );
+        assert!(normalize_drawer_path("armory/public", "drawer").is_err());
+
+        assert_eq!(
+            parse_structural_path("armory", 1, "wardrobe").unwrap(),
+            ("armory".to_string(), String::new(), String::new())
+        );
+        assert_eq!(
+            parse_structural_path("armory/public", 2, "bay").unwrap(),
+            ("armory".to_string(), "public".to_string(), String::new())
+        );
+        assert_eq!(
+            parse_structural_path("armory/public/gem", 3, "drawer").unwrap(),
+            (
+                "armory".to_string(),
+                "public".to_string(),
+                "gem".to_string()
+            )
+        );
+        assert!(split_structural_path("armory//gem", "bad").is_err());
+        assert!(split_structural_path("../gem", "bad").is_err());
+        assert!(parse_structural_path("armory/public/gem", 2, "bay").is_err());
+
+        let index_payload =
+            schema_management_payload("add", "index", "tool.type", &Vec::new()).unwrap();
+        assert_eq!(index_payload, json!({"kind": "index"}));
+        let key_parts = vec![
+            "alter".to_string(),
+            "key".to_string(),
+            "armory/public/gem".to_string(),
+            "id".to_string(),
+            "primary".to_string(),
+        ];
+        assert_eq!(
+            schema_management_payload("add", "key", "id", &key_parts).unwrap(),
+            json!({"key_type": "primary"})
+        );
+        assert!(schema_management_payload("add", "key", "id", &vec!["".to_string(); 5]).is_err());
+        assert!(schema_management_payload("add", "index", "", &Vec::new()).is_err());
+
+        let constraint_parts = vec![
+            "alter".to_string(),
+            "constraint".to_string(),
+            "armory/public/gem".to_string(),
+            "email".to_string(),
+            "unique".to_string(),
+        ];
+        assert_eq!(
+            schema_management_payload("add", "constraint", "email", &constraint_parts).unwrap(),
+            json!({"constraint": "unique"})
+        );
+        assert!(schema_management_payload("add", "constraint", "email", &Vec::new()).is_err());
+
+        let trigger_parts = vec![
+            "alter".to_string(),
+            "trigger".to_string(),
+            "armory/public/gem".to_string(),
+            "on_upsert".to_string(),
+            "script.sh".to_string(),
+        ];
+        assert_eq!(
+            schema_management_payload("add", "trigger", "on_upsert", &trigger_parts).unwrap(),
+            json!({"event": "on_upsert", "command": "script.sh"})
+        );
+        assert!(schema_management_payload("alter", "trigger", "on_upsert", &Vec::new()).is_err());
+
+        let relationship_parts = vec![
+            "alter".to_string(),
+            "relationship".to_string(),
+            "armory/public/user".to_string(),
+            "tool_id".to_string(),
+            "armory/public/tool".to_string(),
+            "1:M".to_string(),
+            "owner_id".to_string(),
+        ];
+        assert_eq!(
+            schema_management_payload("add", "relationship", "tool_id", &relationship_parts)
+                .unwrap(),
+            json!({
+                "type": "1:M",
+                "target_drawer": "armory/public/tool",
+                "mapped_by": "owner_id"
+            })
+        );
+        assert!(
+            schema_management_payload("add", "relationship", "tool_id", &relationship_parts[..6])
+                .is_err()
+        );
+        assert_eq!(
+            schema_management_payload("add", "cascade-delete", "tool_id", &Vec::new()).unwrap(),
+            json!({"action": "Cascade"})
+        );
+        assert!(schema_management_payload("add", "unknown", "field", &Vec::new()).is_err());
+    }
+
+    #[test]
+    fn permission_and_user_payload_helpers_cover_validation_paths() {
+        assert_eq!(
+            payload_username(&json!({"username": " alice "})).unwrap(),
+            "alice"
+        );
+        assert_eq!(payload_username(&json!({"user": "bob"})).unwrap(), "bob");
+        assert!(payload_username(&json!({"username": ""})).is_err());
+
+        assert_eq!(
+            permission_request_from_payload(json!({
+                "username": "alice",
+                "permission_scope": "armory/public:rud"
+            }))
+            .unwrap()
+            .into_payload(),
+            json!({"username": "alice", "permission_scope": "armory/public:rud"})
+        );
+        assert_eq!(
+            permission_request_from_payload(json!({
+                "username": "alice",
+                "permission_scope": "scoped",
+                "scope": {"path": "armory/public", "rights": "rw"}
+            }))
+            .unwrap()
+            .into_payload(),
+            json!({
+                "username": "alice",
+                "permission_scope": "scoped",
+                "scope": {"path": "armory/public", "rights": "rw"}
+            })
+        );
+        assert!(permission_request_from_payload(json!({"username": "alice"})).is_err());
+        assert!(
+            permission_request_from_payload(
+                json!({"username":"alice","permission_scope":"x","scope":{"rights":"r"}})
+            )
+            .is_err()
+        );
+        assert!(
+            permission_request_from_payload(
+                json!({"username":"alice","permission_scope":"x","scope":{"path":"armory"}})
+            )
+            .is_err()
+        );
+
+        assert_eq!(validate_permission_username(" alice ").unwrap(), "alice");
+        assert!(validate_permission_username("").is_err());
+        assert!(validate_permission_username("alice bob").is_err());
+
+        let scope = parse_permission_scope("armory/public/gem:rud").unwrap();
+        assert_eq!(scope.normalized, "armory/public/gem:rud");
+        assert_eq!(scope.path, "armory/public/gem");
+        assert_eq!(scope.rights, "rud");
+        assert!(parse_permission_scope("armory/public/gem").is_err());
+        assert!(parse_permission_scope("armory/public/gem:rx").is_err());
+        assert!(parse_permission_scope("armory/public/gem/extra:r").is_err());
+
+        assert_eq!(
+            parse_user_admin_payload(r#"{"username":"alice","role":"operator"}"#).unwrap(),
+            json!({"username":"alice","role":"operator"})
+        );
+        assert!(parse_user_admin_payload("alice").is_err());
+        assert!(parse_user_admin_payload(r#"{"role":"operator"}"#).is_err());
+    }
+
+    #[test]
+    fn status_and_filesystem_helpers_cover_canonical_runtime_paths() {
+        let storage = temp_dir("status_and_files");
+        let client = WardrobeClient::open(&storage.to_string_lossy()).expect("client open");
+
+        assert!(run_command(&client, &["status".into(), "server".into()], false).is_ok());
+        assert!(run_command(&client, &["status".into(), "config".into()], true).is_ok());
+        assert!(run_command(&client, &["status".into(), "tenants".into()], false).is_ok());
+        assert!(run_command(&client, &["status".into(), "wal".into()], false).is_ok());
+        assert!(
+            run_command(
+                &client,
+                &["status".into(), "wal".into(), "default".into()],
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            run_command(
+                &client,
+                &["status".into(), "cached-drawer-count".into()],
+                false
+            )
+            .is_ok()
+        );
+        assert!(run_command(&client, &["status".into()], false).is_err());
+        assert!(run_command(&client, &["status".into(), "path".into()], false).is_err());
+        assert!(run_command(&client, &["status".into(), "unknown".into()], false).is_err());
+
+        fs::write(storage.join("gem.drw"), b"data").expect("write data");
+        assert_eq!(drawer_files(&storage, "gem").data, storage.join("gem.drw"));
+        assert!(print_file_status("data", &storage.join("gem.drw")).is_ok());
+        assert!(print_file_status("meta", &storage.join("gem_meta.drw")).is_ok());
+        assert!(load_drawer_names(&storage).is_ok());
+        assert!(diagnose(&storage).is_ok());
+        assert!(inspect_drawer(&storage, "gem").is_ok());
+        assert!(resolve_inspect_target(&storage, &[String::from("../bad")]).is_err());
+
+        let _ = fs::remove_dir_all(storage);
     }
 }

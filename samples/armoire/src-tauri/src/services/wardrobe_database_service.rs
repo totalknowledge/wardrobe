@@ -228,3 +228,126 @@ fn unexpected_status_result(expected: &str, actual: StatusResult) -> io::Error {
         format!("expected {expected}, got {actual:?}"),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct FakeStatusSource {
+        databases: StatusResult,
+        schemas: StatusResult,
+        drawers: StatusResult,
+    }
+
+    impl StatusSource for FakeStatusSource {
+        fn status_databases(&self) -> io::Result<StatusResult> {
+            Ok(self.databases.clone())
+        }
+
+        fn status_schemas(&self, _database_name: &str) -> io::Result<StatusResult> {
+            Ok(self.schemas.clone())
+        }
+
+        fn status_drawers(
+            &self,
+            _database_name: &str,
+            _schema_name: &str,
+        ) -> io::Result<StatusResult> {
+            Ok(self.drawers.clone())
+        }
+    }
+
+    fn temp_path(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("armoire_service_unit_{test_name}_{nanos}"))
+    }
+
+    #[test]
+    fn path_resolution_and_storage_detection_cover_edge_cases() {
+        let root = temp_path("storage_detection");
+        let nested = root.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&nested).expect("nested directory should create");
+
+        assert!(!WardrobeDatabaseService::contains_wardrobe_storage(&root).unwrap());
+
+        fs::write(nested.join(".catalog.drw"), b"catalog").expect("catalog should write");
+        assert!(!WardrobeDatabaseService::contains_wardrobe_storage(&root).unwrap());
+
+        fs::write(nested.join("gem.drw"), b"drawer").expect("drawer should write");
+        assert!(WardrobeDatabaseService::contains_wardrobe_storage(&root).unwrap());
+
+        let absolute = WardrobeDatabaseService::resolve_source_location(&root.to_string_lossy());
+        assert_eq!(absolute, root);
+        assert!(
+            WardrobeDatabaseService::resolve_database_directory(&root.to_string_lossy()).is_ok()
+        );
+
+        let missing = temp_path("missing_resolution");
+        assert_eq!(
+            WardrobeDatabaseService::resolve_database_directory(&missing.to_string_lossy())
+                .expect("absolute paths are accepted as-is"),
+            missing
+        );
+        let relative_missing = format!(
+            "armoire_service_missing_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        assert!(WardrobeDatabaseService::resolve_database_directory(&relative_missing).is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_helpers_accept_expected_shapes_and_reject_mismatches() {
+        let inventory = StorageInventory {
+            name: "wardrobe".to_string(),
+            record_count: 1,
+            disk_size_bytes: 10,
+            register_file_count: 1,
+        };
+        let source = FakeStatusSource {
+            databases: StatusResult::Databases(vec![inventory.clone()]),
+            schemas: StatusResult::Schemas(vec!["public".to_string()]),
+            drawers: StatusResult::Drawers(vec![inventory]),
+        };
+
+        assert_eq!(status_databases(&source).unwrap()[0].name, "wardrobe");
+        assert_eq!(status_schemas(&source, "wardrobe").unwrap(), vec!["public"]);
+        assert_eq!(
+            status_drawers(&source, "wardrobe", "public").unwrap()[0].record_count,
+            1
+        );
+
+        let mismatched = FakeStatusSource {
+            databases: StatusResult::Tenants(Vec::new()),
+            schemas: StatusResult::Tenants(Vec::new()),
+            drawers: StatusResult::Tenants(Vec::new()),
+        };
+        assert_eq!(
+            status_databases(&mismatched).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            status_schemas(&mismatched, "wardrobe").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            status_drawers(&mismatched, "wardrobe", "public")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(
+            unexpected_status_result("drawers", StatusResult::Tenants(Vec::new()))
+                .to_string()
+                .contains("expected drawers")
+        );
+    }
+}

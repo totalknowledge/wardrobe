@@ -95,8 +95,8 @@ mkdir -p "$BACKUP_DIR"
 printf 'Using connection: %s\n' "$CONNECTION"
 
 section "Discovery before setup"
-run_cli show tenants
-run_cli show wardrobes
+run_cli status tenants
+run_cli status wardrobes
 
 section "Create the wardrobe library"
 run_cli create wardrobe wardrobe
@@ -105,16 +105,16 @@ run_cli create drawer wardrobe/library/people
 run_cli create drawer wardrobe/library/book
 
 section "Verify structure"
-run_cli show databases
-run_cli show bays wardrobe
-run_cli show drawers wardrobe/library
-run_cli check wardrobe/library/book
+run_cli status wardrobes
+run_cli status bays wardrobe
+run_cli status drawers wardrobe/library
+run_cli status path wardrobe/library/book
 
 section "Schema and relationship setup"
-run_cli add index wardrobe/library/book title
-run_cli remove index wardrobe/library/book title
-run_cli add relationship wardrobe/library/book author_id wardrobe/library/people M:1
-run_cli add relationship wardrobe/library/book editor_id wardrobe/library/people M:1
+run_cli alter index wardrobe/library/book title
+run_cli drop index wardrobe/library/book title
+run_cli alter relationship wardrobe/library/book author_id wardrobe/library/people M:1
+run_cli alter relationship wardrobe/library/book editor_id wardrobe/library/people M:1
 
 section "People and branch listings"
 run_cli upsert wardrobe/library/people "$AUTHOR_PAYLOAD"
@@ -124,26 +124,26 @@ run_cli upsert wardrobe/library/book "$BOOK_UPTOWN_PAYLOAD"
 run_cli upsert wardrobe/library/book "$BOOK_DRAFT_PAYLOAD"
 run_cli count wardrobe/library/book '{"branch":"downtown"}'
 run_cli count wardrobe/library/book '{"branch":"uptown"}'
-run_cli records wardrobe/library/book '{"branch":"downtown"}'
-run_cli records wardrobe/library/book '{"branch":"uptown"}'
+run_cli read wardrobe/library/book '{"branch":"downtown"}'
+run_cli read wardrobe/library/book '{"branch":"uptown"}'
 run_cli inspect wardrobe/library/book
 run_cli delete wardrobe/library/book '{"_id":"book-draft"}'
 run_cli count wardrobe/library/book
 
 section "Maintenance"
-run_cli clean wardrobe/library
+run_cli compact wardrobe/library
 
 section "Backup and restore"
 run_cli backup wardrobe/library "$BACKUP_FILE"
 run_cli restore wardrobe/library-archive "$BACKUP_FILE"
-run_cli show schemas wardrobe
-run_cli show drawers wardrobe/library-archive
+run_cli status bays wardrobe
+run_cli status drawers wardrobe/library-archive
 run_cli count wardrobe/library-archive/book '{"branch":"downtown"}'
 run_cli count wardrobe/library-archive/book '{"branch":"uptown"}'
-run_cli records wardrobe/library-archive/book '{"branch":"downtown"}'
-run_cli records wardrobe/library-archive/book '{"branch":"uptown"}'
+run_cli read wardrobe/library-archive/book '{"branch":"downtown"}'
+run_cli read wardrobe/library-archive/book '{"branch":"uptown"}'
 
 section "User administration"
-run_cli add user "$ADMIN_PAYLOAD"
+run_cli create user "$ADMIN_PAYLOAD"
 run_cli grant permission branch_admin wardrobe/library:rud
 run_cli revoke permission branch_admin wardrobe/library:d

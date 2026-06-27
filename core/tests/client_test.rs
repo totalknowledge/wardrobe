@@ -6,10 +6,12 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::thread::{self, JoinHandle};
 use wardrobe_core::{
-    Command, CommandResult, CompactMode, CompactRequest, ConnectionTarget, CreateRequest,
-    CreateResult, DriverKind, OperationFilter, OperationOptions, OrderDirection, PermissionRequest,
-    ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult, StatusRequest, StatusResult,
-    StorageInventory, StorageLocator, VacuumReport, WardrobeClient,
+    AlterRequest, BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command,
+    CommandResult, CompactMode, CompactRequest, ConnectionTarget, CreateRequest, CreateResult,
+    DriverKind, DropRequest, InspectResult, OperationFilter, OperationOptions, OrderDirection,
+    PermissionRequest, ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult, RestoreReport,
+    StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageLocator, VacuumReport,
+    WalVerification, WardrobeClient,
 };
 
 #[cfg(unix)]
@@ -801,6 +803,269 @@ fn client_admin_setup_commands_route_over_network() {
             .grant(PermissionRequest::new("alice", "global:rud"))
             .expect("manage user"),
         json!({"ok": true})
+    );
+
+    handle.join().expect("join failed");
+}
+
+#[test]
+fn client_remote_canonical_admin_maintenance_and_status_paths() {
+    let archive = BackupArchive {
+        format: "wardrobe-backup-v1".to_string(),
+        source_path: "source".to_string(),
+        scope: "directory".to_string(),
+        files: vec![BackupArchiveFile {
+            path: "gem.drw".to_string(),
+            bytes_hex: "00".to_string(),
+        }],
+    };
+    let restore_report = RestoreReport {
+        destination_path: "destination".to_string(),
+        scope: "directory".to_string(),
+        file_count: 1,
+        byte_count: 1,
+    };
+    let wal = WalVerification {
+        path: "admin_db/.wal".to_string(),
+        entry_count: 2,
+        last_sequence: Some(7),
+    };
+    let diagnosis = StorageDiagnosis {
+        storage_directory: "root".to_string(),
+        storage_bytes: 10,
+        data_bytes: 3,
+        index_bytes: 2,
+        metadata_bytes: 1,
+        logical_wal_bytes: 4,
+        transaction_wal_bytes: 0,
+        other_bytes: 0,
+        drawer_count: 1,
+        status: "ok".to_string(),
+        drawers: vec!["admin_db/public/gem".to_string()],
+    };
+    let check = CheckReport {
+        path: "admin_db/public/gem".to_string(),
+        kind: "drawer".to_string(),
+        entries: vec![CheckEntry {
+            label: "data".to_string(),
+            path: "gem.drw".to_string(),
+            exists: true,
+            bytes: Some(3),
+        }],
+    };
+    let inspection = wardrobe_core::DrawerInspectionMetrics {
+        path: "admin_db/public/gem".to_string(),
+        data_bytes: 3,
+        index_bytes: 2,
+        meta_bytes: 1,
+        total_bytes: 6,
+        record_count: 1,
+        register_file_count: 3,
+        tombstone_fragmentation_percent: Some(0.0),
+    };
+
+    let (connection, handle) = spawn_tcp_protocol_server(vec![
+        (
+            Command::ManageUser {
+                action: "add_user".to_string(),
+                payload: json!({"username": "alice"}),
+            },
+            CommandResult::Admin(json!({"ok": true, "action": "add_user"})),
+        ),
+        (
+            Command::ManageSchema {
+                action: "add".to_string(),
+                kind: "index".to_string(),
+                drawer_name: "admin_db/public/gem".to_string(),
+                field_name: "element".to_string(),
+                payload: json!({"type": "hash"}),
+            },
+            CommandResult::Admin(json!({"ok": true, "action": "add"})),
+        ),
+        (
+            Command::ManageSchema {
+                action: "remove".to_string(),
+                kind: "index".to_string(),
+                drawer_name: "admin_db/public/gem".to_string(),
+                field_name: "element".to_string(),
+                payload: json!({}),
+            },
+            CommandResult::Admin(json!({"ok": true, "action": "remove"})),
+        ),
+        (
+            Command::DropDrawer {
+                database_name: "admin_db".to_string(),
+                schema_name: "public".to_string(),
+                drawer_name: "gem".to_string(),
+            },
+            CommandResult::Admin(json!({"ok": true, "dropped": "drawer"})),
+        ),
+        (
+            Command::DropSchema {
+                database_name: "admin_db".to_string(),
+                schema_name: "public".to_string(),
+            },
+            CommandResult::Admin(json!({"ok": true, "dropped": "schema"})),
+        ),
+        (
+            Command::DropDatabase {
+                database_name: "admin_db".to_string(),
+            },
+            CommandResult::Admin(json!({"ok": true, "dropped": "database"})),
+        ),
+        (
+            Command::ManageUser {
+                action: "drop_user".to_string(),
+                payload: json!({"username": "alice"}),
+            },
+            CommandResult::Admin(json!({"ok": true, "action": "drop_user"})),
+        ),
+        (
+            Command::ManageUser {
+                action: "revoke_permission".to_string(),
+                payload: json!({"username": "alice", "permission_scope": "admin_db:rud"}),
+            },
+            CommandResult::Admin(json!({"ok": true, "action": "revoke_permission"})),
+        ),
+        (
+            Command::VerifyWal {
+                database_name: Some("admin_db".to_string()),
+            },
+            CommandResult::WalVerification(wal.clone()),
+        ),
+        (
+            Command::Diagnose,
+            CommandResult::Diagnosis(diagnosis.clone()),
+        ),
+        (
+            Command::Check {
+                path: "admin_db/public/gem".to_string(),
+            },
+            CommandResult::Check(check.clone()),
+        ),
+        (
+            Command::ListDrawers,
+            CommandResult::DrawerNames(vec!["admin_db/public/gem".to_string()]),
+        ),
+        (
+            Command::Inspect {
+                drawer_name: "admin_db/public/gem".to_string(),
+            },
+            CommandResult::Inspection(inspection.clone()),
+        ),
+        (
+            Command::Backup {
+                source_path: "source".to_string(),
+            },
+            CommandResult::Backup(archive.clone()),
+        ),
+        (
+            Command::Restore {
+                destination_path: "destination".to_string(),
+                archive: archive.clone(),
+            },
+            CommandResult::Restored(restore_report.clone()),
+        ),
+    ]);
+
+    let client = WardrobeClient::open(connection).expect("open failed");
+
+    assert_eq!(
+        client
+            .create(CreateRequest::user(json!({"username": "alice"})))
+            .expect("create user"),
+        CreateResult::Admin(json!({"ok": true, "action": "add_user"}))
+    );
+    assert_eq!(
+        client
+            .alter(AlterRequest::schema_rule(
+                "admin_db/public/gem",
+                "add",
+                "index",
+                "element",
+                json!({"type": "hash"}),
+            ))
+            .expect("alter schema rule"),
+        json!({"ok": true, "action": "add"})
+    );
+    assert_eq!(
+        client
+            .drop(DropRequest::schema_rule(
+                "admin_db/public/gem",
+                "index",
+                "element",
+                json!({}),
+            ))
+            .expect("drop schema rule"),
+        json!({"ok": true, "action": "remove"})
+    );
+    assert_eq!(
+        client
+            .drop(DropRequest::drawer("admin_db", "public", "gem"))
+            .expect("drop drawer"),
+        json!({"ok": true, "dropped": "drawer"})
+    );
+    assert_eq!(
+        client
+            .drop(DropRequest::schema("admin_db", "public"))
+            .expect("drop schema"),
+        json!({"ok": true, "dropped": "schema"})
+    );
+    assert_eq!(
+        client
+            .drop(DropRequest::database("admin_db"))
+            .expect("drop database"),
+        json!({"ok": true, "dropped": "database"})
+    );
+    assert_eq!(
+        client.drop(DropRequest::user("alice")).expect("drop user"),
+        json!({"ok": true, "action": "drop_user"})
+    );
+    assert_eq!(
+        client
+            .revoke(PermissionRequest::new("alice", "admin_db:rud"))
+            .expect("revoke"),
+        json!({"ok": true, "action": "revoke_permission"})
+    );
+    assert_eq!(
+        client.status(StatusRequest::wal(Some("admin_db"))).unwrap(),
+        StatusResult::Wal(wal)
+    );
+    assert_eq!(
+        client.status(StatusRequest::storage()).unwrap(),
+        StatusResult::Storage(diagnosis)
+    );
+    assert_eq!(
+        client
+            .status(StatusRequest::path("admin_db/public/gem"))
+            .unwrap(),
+        StatusResult::Check(check)
+    );
+    assert_eq!(
+        client.status(StatusRequest::drawer_names()).unwrap(),
+        StatusResult::DrawerNames(vec!["admin_db/public/gem".to_string()])
+    );
+    assert_eq!(
+        client
+            .inspect(
+                OperationFilter::drawer("admin_db/public/gem"),
+                None::<OperationOptions>,
+            )
+            .expect("inspect"),
+        InspectResult::Drawer(inspection)
+    );
+    assert_eq!(client.backup("source").expect("backup"), archive);
+    assert_eq!(
+        client
+            .restore("destination", archive.clone())
+            .expect("restore"),
+        restore_report
+    );
+    let cached_count = client.status(StatusRequest::cached_drawer_count());
+    assert!(cached_count.is_err());
+    assert_eq!(
+        cached_count.unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
     );
 
     handle.join().expect("join failed");

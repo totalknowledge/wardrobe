@@ -772,6 +772,18 @@ impl WardrobeEngine {
         D: Into<DropRequest>,
     {
         match request.into() {
+            DropRequest::Database { database_name } => {
+                boundary_execution::drop_database(self, &database_name)
+            }
+            DropRequest::Schema {
+                database_name,
+                schema_name,
+            } => boundary_execution::drop_schema(self, &database_name, &schema_name),
+            DropRequest::Drawer {
+                database_name,
+                schema_name,
+                drawer_name,
+            } => boundary_execution::drop_drawer(self, &database_name, &schema_name, &drawer_name),
             DropRequest::SchemaRule {
                 drawer_name,
                 kind,
@@ -950,6 +962,23 @@ impl WardrobeEngine {
         boundary_execution::register_tenant_route(self, tenant_id, database_name, location)
     }
 
+    pub(crate) fn drop_database(&self, database_name: &str) -> Result<Value> {
+        boundary_execution::drop_database(self, database_name)
+    }
+
+    pub(crate) fn drop_schema(&self, database_name: &str, schema_name: &str) -> Result<Value> {
+        boundary_execution::drop_schema(self, database_name, schema_name)
+    }
+
+    pub(crate) fn drop_drawer(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+        drawer_name: &str,
+    ) -> Result<Value> {
+        boundary_execution::drop_drawer(self, database_name, schema_name, drawer_name)
+    }
+
     pub fn execute_for_tenant(
         &self,
         tenant_id: &str,
@@ -962,5 +991,199 @@ impl WardrobeEngine {
 
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
         boundary_execution::execute_command(self, command)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn operation_selection_merges_drawers_queries_and_pointers() {
+        let selection = OperationSelection::from_filter(OperationFilter::many(vec![
+            OperationFilter::drawer("@gem"),
+            OperationFilter::pointer("ruby"),
+            OperationFilter::query(json!({"power": 42})),
+        ]))
+        .expect("selection should merge");
+
+        assert_eq!(selection.required_drawer("read").unwrap(), "gem");
+        assert_eq!(selection.query, Some(json!({"power": 42})));
+        assert_eq!(
+            selection.resolved_pointers().unwrap(),
+            vec!["@gem:ruby".to_string()]
+        );
+
+        let full_pointer =
+            OperationSelection::from_filter(OperationFilter::pointer("@tool:hammer"))
+                .expect("full pointer should merge");
+        assert_eq!(full_pointer.required_drawer("read").unwrap(), "tool");
+        assert_eq!(
+            full_pointer.resolved_pointers().unwrap(),
+            vec!["@tool:hammer".to_string()]
+        );
+
+        let empty_query =
+            OperationSelection::from_filter(OperationFilter::query(json!({}))).unwrap();
+        assert!(empty_query.query.is_none());
+        assert!(
+            OperationSelection::from_filter(OperationFilter::query(Value::Null))
+                .unwrap()
+                .query
+                .is_none()
+        );
+
+        assert!(
+            OperationSelection::from_filter(OperationFilter::many(vec![
+                OperationFilter::drawer("gem"),
+                OperationFilter::drawer("tool"),
+            ]))
+            .is_err()
+        );
+        assert!(
+            OperationSelection::from_filter(OperationFilter::many(vec![
+                OperationFilter::query(json!({"a": 1})),
+                OperationFilter::query(json!({"b": 2})),
+            ]))
+            .is_err()
+        );
+        assert!(
+            OperationSelection::default()
+                .required_drawer("read")
+                .is_err()
+        );
+        assert!(
+            OperationSelection::from_filter(OperationFilter::pointer("ruby"))
+                .unwrap()
+                .resolved_pointers()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn upsert_context_and_record_target_cover_pointer_and_error_paths() {
+        let context = UpsertContext::from_filter(OperationFilter::many(vec![
+            OperationFilter::drawer("gem"),
+            OperationFilter::query(json!({"power": 42})),
+        ]))
+        .expect("context should build");
+        assert_eq!(context.drawer_name(), Some("gem"));
+        assert_eq!(context.query, Some(json!({"power": 42})));
+
+        assert!(
+            UpsertContext::from_filter(OperationFilter::many(vec![
+                OperationFilter::pointer("@gem:ruby"),
+                OperationFilter::pointer("@gem:sapphire"),
+            ]))
+            .is_err()
+        );
+
+        let pointer_context =
+            UpsertContext::from_filter(OperationFilter::pointer("@gem:ruby")).unwrap();
+        let (drawer, payload) = upsert_record_target(json!({"power": 42}), &pointer_context)
+            .expect("pointer target should inject id");
+        assert_eq!(drawer, "gem");
+        assert_eq!(payload["_id"], "ruby");
+
+        let drawer_context = UpsertContext::from_filter(OperationFilter::drawer("gem")).unwrap();
+        let no_filter_context = UpsertContext {
+            drawer_name: None,
+            pointer: None,
+            query: None,
+        };
+        let (drawer, payload) = upsert_record_target(json!({"_id": "@tool"}), &no_filter_context)
+            .expect("drawer-only id should provide drawer");
+        assert_eq!(drawer, "tool");
+        assert!(payload.get("_id").is_none());
+        assert!(upsert_record_target(json!({"_id": "@tool"}), &drawer_context).is_err());
+
+        let (drawer, payload) =
+            upsert_record_target(json!({"_id": "@tool:hammer"}), &no_filter_context)
+                .expect("full pointer id should provide drawer");
+        assert_eq!(drawer, "tool");
+        assert_eq!(payload["_id"], "@tool:hammer");
+
+        assert!(upsert_record_target(json!(["not", "object"]), &drawer_context).is_err());
+        assert!(
+            upsert_record_target(
+                json!({"_id": "@tool:hammer"}),
+                &UpsertContext {
+                    drawer_name: Some("gem".to_string()),
+                    pointer: None,
+                    query: None,
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            upsert_record_target(
+                json!({"power": 42}),
+                &UpsertContext {
+                    drawer_name: None,
+                    pointer: None,
+                    query: None,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn read_shape_record_pointer_and_merge_helpers_cover_branches() {
+        let pointer_selection =
+            OperationSelection::from_filter(OperationFilter::pointer("@gem:ruby")).unwrap();
+        assert!(matches!(
+            resolve_read_shape(None, &pointer_selection),
+            ReturnShapeResolution::Record
+        ));
+        assert!(matches!(
+            resolve_read_shape(Some(ReturnShape::Pointers), &pointer_selection),
+            ReturnShapeResolution::Pointers
+        ));
+        assert!(matches!(
+            resolve_read_shape(Some(ReturnShape::Exists), &pointer_selection),
+            ReturnShapeResolution::Exists
+        ));
+        assert!(matches!(
+            resolve_read_shape(Some(ReturnShape::Record), &pointer_selection),
+            ReturnShapeResolution::Record
+        ));
+
+        let query_selection = OperationSelection::from_filter(OperationFilter::many(vec![
+            OperationFilter::drawer("gem"),
+            OperationFilter::query(json!({"power": 42})),
+        ]))
+        .unwrap();
+        assert!(matches!(
+            resolve_read_shape(Some(ReturnShape::Default), &query_selection),
+            ReturnShapeResolution::Records
+        ));
+        assert!(matches!(
+            resolve_read_shape(Some(ReturnShape::Diagnostics), &query_selection),
+            ReturnShapeResolution::Records
+        ));
+        assert!(matches!(
+            resolve_read_shape(Some(ReturnShape::Records), &query_selection),
+            ReturnShapeResolution::Records
+        ));
+
+        assert_eq!(
+            record_pointer(&json!({"_id": "@gem:lnk_ruby"}), None),
+            Some("@gem:ruby".to_string())
+        );
+        assert_eq!(
+            record_pointer(&json!({"_id": "ruby"}), Some("gem")),
+            Some("@gem:ruby".to_string())
+        );
+        assert_eq!(record_pointer(&json!({"name": "ruby"}), Some("gem")), None);
+        assert_eq!(record_pointer(&json!({"_id": 7}), Some("gem")), None);
+
+        let mut existing = json!({"_id": "ruby", "power": 1, "keep": true});
+        merge_payload_into_record(&mut existing, &json!({"_id": "ignored", "power": 99}))
+            .expect("merge should succeed");
+        assert_eq!(existing, json!({"_id": "ruby", "power": 99, "keep": true}));
+        assert!(merge_payload_into_record(&mut json!(null), &json!({})).is_err());
+        assert!(merge_payload_into_record(&mut existing, &json!(null)).is_err());
     }
 }

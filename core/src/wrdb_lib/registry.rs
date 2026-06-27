@@ -122,6 +122,40 @@ impl CatalogRegistry {
             .insert(Self::entry_key(database, schema, drawer), entry);
     }
 
+    pub fn unregister_database(&mut self, database: &str) -> bool {
+        let removed_database = self.databases.remove(database);
+        let schemas_before = self.schemas.len();
+        let entries_before = self.entries.len();
+        let routes_before = self.tenant_routes.len();
+
+        self.schemas
+            .retain(|schema_key| !schema_key.starts_with(&format!("{database}\u{1e}")));
+        self.entries.retain(|_, entry| entry.database != database);
+        self.tenant_routes
+            .retain(|_, route| route.database != database);
+
+        removed_database
+            || schemas_before != self.schemas.len()
+            || entries_before != self.entries.len()
+            || routes_before != self.tenant_routes.len()
+    }
+
+    pub fn unregister_schema(&mut self, database: &str, schema: &str) -> bool {
+        let removed_schema = self.schemas.remove(&Self::schema_key(database, schema));
+        let entries_before = self.entries.len();
+
+        self.entries
+            .retain(|_, entry| entry.database != database || entry.schema != schema);
+
+        removed_schema || entries_before != self.entries.len()
+    }
+
+    pub fn unregister_drawer(&mut self, database: &str, schema: &str, drawer: &str) -> bool {
+        self.entries
+            .remove(&Self::entry_key(database, schema, drawer))
+            .is_some()
+    }
+
     pub fn contains_database(&self, database: &str) -> bool {
         self.databases.contains(database)
             || self

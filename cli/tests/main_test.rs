@@ -12,7 +12,7 @@ fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
 }
 
 fn run_cli(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_wardrobe-cli"))
+    Command::new(env!("CARGO_BIN_EXE_wardrobe"))
         .args(args)
         .output()
         .expect("cli binary should run")
@@ -23,23 +23,27 @@ fn binary_help_flag_exits_successfully() {
     let output = run_cli(&["--help"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("wardrobe-cli:"));
+    assert!(stdout.contains("wardrobe:"));
     assert!(stdout.contains("-h, --help"));
     assert!(stdout.contains("-v, --version"));
     assert!(
         stdout.contains("The first argument to the CLI is always the target connection context.")
     );
-    assert!(stdout.contains("STRUCTURAL & LIFECYCLE MANAGEMENT"));
-    assert!(stdout.contains("DOCUMENT MUTATIONS & QUERIES (RUDI)"));
+    assert!(stdout.contains("STRUCTURAL COMMANDS"));
+    assert!(stdout.contains("DOCUMENT MUTATIONS & QUERIES (RUDIC)"));
     assert!(stdout.contains("SCHEMA ENGINE & RELATIONSHIP MANAGEMENT"));
     assert!(stdout.contains("BACKUP & DISASTER RECOVERY"));
     assert!(stdout.contains("SERVER ACCESS CONTROL & USER ADMINISTRATION"));
     assert!(stdout.contains("CORE ARCHITECTURAL RULES"));
     assert!(stdout.contains("Example: create drawer my_wardrobe/my_bay/user"));
     assert!(stdout.contains("Example: backup my_wardrobe/my_bay ./backups/bay_snapshot.wrb"));
-    assert!(stdout.contains("add user <json_user_payload>"));
+    assert!(stdout.contains("create user <json_user_payload>"));
+    assert!(stdout.contains("drop user <username>"));
     assert!(stdout.contains("grant permission <username> <permission_scope>"));
     assert!(stdout.contains("revoke permission <username> <permission_scope>"));
+    assert!(!stdout.contains("records <path>"));
+    assert!(!stdout.contains("clean <path>"));
+    assert!(!stdout.contains("show <type>"));
 }
 
 #[test]
@@ -55,7 +59,7 @@ fn binary_version_flags_exit_successfully() {
     let long_output = run_cli(&["--version"]);
     assert!(long_output.status.success());
     let stdout = String::from_utf8_lossy(&long_output.stdout);
-    assert!(stdout.contains("wardrobe-cli"));
+    assert!(stdout.contains("wardrobe"));
     assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 
     let short_output = run_cli(&["-v"]);
@@ -86,26 +90,26 @@ fn binary_missing_command_arguments_validation_guards() {
     let inspect_out = run_cli(&["--target", &target, "inspect"]);
     assert!(!inspect_out.status.success());
 
-    let records_out = run_cli(&["--target", &target, "records"]);
-    assert!(!records_out.status.success());
+    let read_out = run_cli(&["--target", &target, "read"]);
+    assert!(!read_out.status.success());
 
     let upsert_out = run_cli(&["--target", &target, "upsert"]);
     assert!(!upsert_out.status.success());
 
-    let show_schemas_out = run_cli(&["--target", &target, "show-schemas"]);
-    assert!(!show_schemas_out.status.success());
+    let status_bays_out = run_cli(&["--target", &target, "status", "bays"]);
+    assert!(!status_bays_out.status.success());
 
-    let show_drawers_out = run_cli(&["--target", &target, "show-drawers"]);
-    assert!(!show_drawers_out.status.success());
+    let status_drawers_out = run_cli(&["--target", &target, "status", "drawers"]);
+    assert!(!status_drawers_out.status.success());
 
-    let define_out = run_cli(&["--target", &target, "define"]);
-    assert!(!define_out.status.success());
+    let compact_out = run_cli(&["--target", &target, "compact"]);
+    assert!(!compact_out.status.success());
 
-    let create_schema_out = run_cli(&["--target", &target, "create-schema"]);
-    assert!(!create_schema_out.status.success());
+    let create_bay_out = run_cli(&["--target", &target, "create", "bay"]);
+    assert!(!create_bay_out.status.success());
 
-    let manage_user_out = run_cli(&["--target", &target, "manage", "user"]);
-    assert!(!manage_user_out.status.success());
+    let create_user_out = run_cli(&["--target", &target, "create", "user"]);
+    assert!(!create_user_out.status.success());
 
     let _ = fs::remove_dir_all(tmp);
 }
@@ -115,7 +119,7 @@ fn binary_piped_stdin_stream_execution() {
     let tmp = temp_storage_directory("binary_stdin");
     let _ = fs::create_dir_all(&tmp);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wardrobe-cli"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wardrobe"))
         .args(&["--target", &tmp.to_string_lossy()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -124,7 +128,7 @@ fn binary_piped_stdin_stream_execution() {
 
     {
         let mut stdin = child.stdin.take().expect("stdin");
-        stdin.write_all(b"drawers\n").expect("write");
+        stdin.write_all(b"status drawer-names\n").expect("write");
     }
 
     let output = child.wait_with_output().expect("wait");

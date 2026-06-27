@@ -102,7 +102,7 @@ impl DrawerMetadata {
         let mut temporary_file = File::create(&temporary_path)?;
         temporary_file.write_all(&serialized)?;
         temporary_file.flush()?;
-        temporary_file.sync_all()?;
+        temporary_file.flush()?;
 
         if path.exists() {
             std::fs::remove_file(path)?;
@@ -2666,5 +2666,352 @@ impl Drawer {
         TransactionCoordinator::harden_writer(&mut self.index_writer)?;
         self.flush_metadata_if_dirty()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wardrobe_drawer_{name}_{nanos}"))
+    }
+
+    #[test]
+    fn metadata_crc_and_index_helpers_cover_round_trips() {
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+
+        let metadata_path = temp_dir("metadata").join("gem_meta.drw");
+        assert!(
+            DrawerMetadata::load(&metadata_path)
+                .expect("missing metadata should load")
+                .is_none()
+        );
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).expect("dir should create");
+        std::fs::write(&metadata_path, "   ").expect("empty metadata should write");
+        assert!(
+            DrawerMetadata::load(&metadata_path)
+                .expect("empty metadata should load")
+                .is_none()
+        );
+        std::fs::write(&metadata_path, "{bad-json").expect("invalid metadata should write");
+        assert!(
+            DrawerMetadata::load(&metadata_path)
+                .expect("invalid metadata should be ignored")
+                .is_none()
+        );
+
+        let metadata = DrawerMetadata::from_configuration(
+            "_id",
+            2,
+            &["slug".to_string()],
+            BTreeMap::from([("owner".to_string(), json!({"type": "N:1"}))]),
+            BTreeMap::from([("owner".to_string(), json!({"action": "Cascade"}))]),
+            BTreeMap::from([("owner".to_string(), true)]),
+            Some(json!({"type": "object"})),
+            3,
+            BTreeMap::from([("element".to_string(), 3)]),
+        );
+        metadata.persist(&metadata_path).expect("metadata persists");
+        let loaded = DrawerMetadata::load(&metadata_path)
+            .expect("metadata should load")
+            .expect("metadata should exist");
+        assert_eq!(loaded.primary_key, "_id");
+        assert_eq!(loaded.record_count, 2);
+        assert_eq!(loaded.materialized_secondary_indexes["element"], 3);
+
+        let block = DataBlockIndexEntry::live(b"payload", 16);
+        let index_entry =
+            Drawer::index_entry_value("element", "Fire", Value::from(42_u64), Some(block));
+        let (offset, parsed_block) =
+            DataBlockIndexEntry::from_index_entry(&index_entry).expect("index should parse");
+        assert_eq!(offset, 42);
+        assert_eq!(parsed_block.payload_len, 7);
+        assert_eq!(parsed_block.size_class, 16);
+        assert_eq!(parsed_block.status, DATA_BLOCK_STATUS_LIVE);
+        assert!(DataBlockIndexEntry::from_index_entry(&json!({"o": 1})).is_none());
+
+        let mut compact_payload = Vec::new();
+        assert_eq!(
+            Drawer::append_compact_payload(&mut compact_payload, b"abc"),
+            0
+        );
+        assert_eq!(
+            Drawer::append_compact_payload(&mut compact_payload, b"def"),
+            3
+        );
+        let compact_index_start = compact_payload.len();
+        let (index_offset, index_len) =
+            Drawer::append_compact_index_entry(&mut compact_payload, &index_entry)
+                .expect("compact index entry should append");
+        assert_eq!(index_offset, compact_index_start as u64);
+        assert!(index_len > 0);
+
+        assert_eq!(Drawer::offsets_index_value(&[1, 3, 5]), json!([1, 3, 5]));
+        assert_eq!(
+            Drawer::intersect_sorted_offsets(vec![1, 2, 4, 7], vec![2, 3, 4, 8]),
+            vec![2, 4]
+        );
+
+        let _ = std::fs::remove_dir_all(metadata_path.parent().unwrap());
+    }
+
+    #[test]
+    fn schema_normalization_validation_and_index_key_helpers_cover_edges() {
+        assert_eq!(Drawer::normalize_schema_kind("indexes").unwrap(), "index");
+        assert_eq!(Drawer::normalize_schema_kind("keys").unwrap(), "key");
+        assert_eq!(
+            Drawer::normalize_schema_kind("constraints").unwrap(),
+            "constraint"
+        );
+        assert_eq!(
+            Drawer::normalize_schema_kind("triggers").unwrap(),
+            "trigger"
+        );
+        assert_eq!(
+            Drawer::normalize_schema_kind("delete-rules").unwrap(),
+            "cascade-delete"
+        );
+        assert!(Drawer::normalize_schema_kind("unknown").is_err());
+
+        assert!(Drawer::validate_schema_field("field").is_ok());
+        assert!(Drawer::validate_schema_field("  ").is_err());
+        assert_eq!(
+            Drawer::constraint_type(&json!({"constraint": "unique"})).unwrap(),
+            "unique"
+        );
+        assert_eq!(
+            Drawer::constraint_type(&json!({"constraint_type": "required"})).unwrap(),
+            "required"
+        );
+        assert_eq!(
+            Drawer::constraint_type(&json!({"type": "non-null"})).unwrap(),
+            "non-null"
+        );
+        assert!(Drawer::constraint_type(&json!({})).is_err());
+        assert!(Drawer::is_unique_constraint("UNIQUE"));
+        assert!(Drawer::is_required_constraint("non_null"));
+        assert!(Drawer::is_required_constraint("required"));
+        assert!(!Drawer::is_required_constraint("unique"));
+
+        assert_eq!(
+            Drawer::secondary_index_key(&Value::String("Fire".to_string())),
+            Some("Fire".to_string())
+        );
+        assert_eq!(
+            Drawer::secondary_index_key(&Value::from(7)),
+            Some("7".to_string())
+        );
+        assert_eq!(
+            Drawer::secondary_index_key(&Value::Bool(true)),
+            Some("true".to_string())
+        );
+        assert_eq!(Drawer::secondary_index_key(&Value::Null), None);
+        assert_eq!(
+            Drawer::equality_filter_index_key(&Value::String("Water".to_string())),
+            Some("Water".to_string())
+        );
+        assert_eq!(
+            Drawer::equality_filter_index_key(&Value::String("Wa%".to_string())),
+            None
+        );
+        assert_eq!(
+            Drawer::equality_filter_index_key(&Value::Bool(false)),
+            Some("false".to_string())
+        );
+
+        assert!(Drawer::value_matches_type(&json!([]), "array"));
+        assert!(Drawer::value_matches_type(&json!(true), "boolean"));
+        assert!(Drawer::value_matches_type(&json!(7), "integer"));
+        assert!(Drawer::value_matches_type(&Value::Null, "null"));
+        assert!(Drawer::value_matches_type(&json!(7.5), "number"));
+        assert!(Drawer::value_matches_type(&json!({}), "object"));
+        assert!(Drawer::value_matches_type(&json!("x"), "string"));
+        assert!(!Drawer::value_matches_type(&json!("x"), "integer"));
+
+        assert!(Drawer::validate_type_rule(&json!("x"), &json!("string"), "$").is_ok());
+        assert!(Drawer::validate_type_rule(&json!("x"), &json!("integer"), "$").is_err());
+        assert!(Drawer::validate_type_rule(&json!(1), &json!(["string", "integer"]), "$").is_ok());
+        assert!(
+            Drawer::validate_type_rule(&json!(true), &json!(["string", "integer"]), "$").is_err()
+        );
+
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "minLength": 2, "maxLength": 4},
+                "age": {"type": "integer", "minimum": 0, "maximum": 120},
+                "element": {"enum": ["Fire", "Water"]}
+            },
+            "additionalProperties": false
+        });
+        assert!(
+            Drawer::validate_value_against_schema(
+                &json!({"name": "Ava", "age": 42, "element": "Fire"}),
+                &schema,
+                "$",
+            )
+            .is_ok()
+        );
+        assert!(Drawer::validate_value_against_schema(&json!({"age": 42}), &schema, "$").is_err());
+        assert!(
+            Drawer::validate_value_against_schema(&json!({"name": "A"}), &schema, "$").is_err()
+        );
+        assert!(
+            Drawer::validate_value_against_schema(&json!({"name": "Avery"}), &schema, "$").is_err()
+        );
+        assert!(
+            Drawer::validate_value_against_schema(&json!({"name": "Ava", "age": -1}), &schema, "$")
+                .is_err()
+        );
+        assert!(
+            Drawer::validate_value_against_schema(
+                &json!({"name": "Ava", "element": "Air"}),
+                &schema,
+                "$",
+            )
+            .is_err()
+        );
+        assert!(
+            Drawer::validate_value_against_schema(
+                &json!({"name": "Ava", "extra": true}),
+                &schema,
+                "$",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relationship_legacy_and_delete_rule_helpers_cover_validation_paths() {
+        let owner_rule = json!({"type": "N:1", "target_drawer": "owner"});
+        assert_eq!(Drawer::relationship_type(&owner_rule), Some("N:1"));
+        assert_eq!(
+            Drawer::relationship_target_drawer(&owner_rule),
+            Some("owner")
+        );
+        assert_eq!(
+            Drawer::pointer_drawer_name("@team_owner:lnk_1"),
+            Some("team_owner")
+        );
+        assert!(Drawer::pointer_drawer_name("@owner:bad:extra").is_none());
+        assert!(Drawer::pointer_matches_target_drawer("team_owner", "owner"));
+        assert!(!Drawer::pointer_matches_target_drawer("teamowner", "owner"));
+
+        assert!(
+            Drawer::validate_reference_field("owner", &json!("@team_owner:lnk_1"), &owner_rule)
+                .is_none()
+        );
+        assert!(
+            Drawer::validate_reference_field("owner", &json!(42), &owner_rule)
+                .expect("non-string should fail")
+                .contains("pointer string")
+        );
+        assert!(
+            Drawer::validate_reference_field("owner", &json!("@team_role:1"), &owner_rule)
+                .expect("wrong target should fail")
+                .contains("expected target drawer")
+        );
+
+        assert!(
+            Drawer::validate_many_to_many_field(
+                "links",
+                &json!(["@team_owner:1", "@owner:2"]),
+                &owner_rule,
+            )
+            .is_none()
+        );
+        assert!(
+            Drawer::validate_many_to_many_field("links", &json!("@owner:1"), &owner_rule)
+                .expect("non-array should fail")
+                .contains("must be an array")
+        );
+        assert!(
+            Drawer::validate_many_to_many_field("links", &json!([42]), &owner_rule)
+                .expect("non-string array item should fail")
+                .contains("only pointer strings")
+        );
+
+        assert!(Drawer::delete_rule_is_cascade(&json!("Cascade")));
+        assert!(Drawer::delete_rule_is_cascade(
+            &json!({"action": "Cascade"})
+        ));
+        assert!(!Drawer::delete_rule_is_cascade(
+            &json!({"action": "Restrict"})
+        ));
+
+        assert_eq!(
+            Drawer::try_parse_legacy_pointer("@gem:lnk_fire"),
+            Some(("gem".to_string(), "fire".to_string()))
+        );
+        assert!(Drawer::try_parse_legacy_pointer("gem:fire").is_none());
+        assert_eq!(Drawer::clean_legacy_identifier("@gem:lnk_fire"), "fire");
+        assert_eq!(Drawer::clean_legacy_identifier("@lnk_water"), "water");
+        assert_eq!(
+            Drawer::format_legacy_pointer("@gem", "lnk_fire"),
+            "@gem:fire"
+        );
+
+        let mut record = json!({
+            "_id": "@gem:lnk_fire",
+            "owner": "@owner:lnk_alice",
+            "nested": {
+                "pointer": "@owner:lnk_bob",
+                "_id": "lnk_inner"
+            },
+            "links": ["@owner:lnk_cara", "unchanged"]
+        });
+        assert!(Drawer::migrate_legacy_value(&mut record, None));
+        assert_eq!(record["_id"], "fire");
+        assert_eq!(record["owner"], "@owner:alice");
+        assert_eq!(record["nested"]["pointer"], "@owner:bob");
+        assert_eq!(record["nested"]["_id"], "inner");
+        assert_eq!(record["links"][0], "@owner:cara");
+        assert!(!Drawer::migrate_legacy_value(
+            &mut json!({"stable": true}),
+            None
+        ));
+    }
+
+    #[test]
+    fn drawer_schema_extension_helpers_update_schema_state() {
+        let path = temp_dir("schema_extension");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer = Drawer::open(&path, "gem", "_id", Vec::new()).expect("drawer opens");
+
+        drawer.add_required_field("element");
+        drawer.add_required_field("element");
+        assert_eq!(
+            drawer.schema.as_ref().unwrap()["required"],
+            json!(["element"])
+        );
+        drawer.remove_required_field("missing");
+        drawer.remove_required_field("element");
+        assert_eq!(drawer.schema.as_ref().unwrap()["required"], json!([]));
+
+        drawer.record_schema_extension("indexes", "element", json!({"type": "hash"}));
+        drawer.record_schema_extension("triggers", "on_upsert", json!({"command": "hook"}));
+        assert!(drawer.schema_has_index("element"));
+        assert_eq!(
+            Drawer::schema_extension_fields(drawer.schema.as_ref(), "triggers"),
+            vec!["on_upsert".to_string()]
+        );
+        drawer.remove_schema_extension("indexes", "element");
+        assert!(!drawer.schema_has_index("element"));
+
+        drawer.schema = Some(Value::String("not-an-object".to_string()));
+        drawer
+            .ensure_schema_object()
+            .insert("type".to_string(), Value::String("object".to_string()));
+        assert_eq!(drawer.schema.as_ref().unwrap()["type"], "object");
+
+        let _ = std::fs::remove_dir_all(path);
     }
 }

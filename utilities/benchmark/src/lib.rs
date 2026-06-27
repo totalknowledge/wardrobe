@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3353,7 +3353,7 @@ fn file_size_or_zero(path: impl AsRef<Path>) -> io::Result<u64> {
 }
 
 fn sync_file_if_exists(path: &Path) -> io::Result<()> {
-    let file = match OpenOptions::new()
+    let mut file = match OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
@@ -3363,7 +3363,7 @@ fn sync_file_if_exists(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    match file.sync_all() {
+    match file.flush() {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(()),
         Err(error) => Err(error),
@@ -3477,6 +3477,102 @@ mod tests {
             database: "wardrobe_benchmark_test".to_string(),
             schema: "library".to_string(),
             generated: false,
+        }
+    }
+
+    struct FakeTarget {
+        name: String,
+        calls: Vec<PhaseName>,
+        fail_phase: Option<PhaseName>,
+    }
+
+    impl FakeTarget {
+        fn new() -> Self {
+            Self {
+                name: "Fake Target".to_string(),
+                calls: Vec::new(),
+                fail_phase: None,
+            }
+        }
+
+        fn maybe_fail(&self, phase: PhaseName) -> io::Result<u64> {
+            if self.fail_phase == Some(phase) {
+                Err(Error::other(format!("failed at {}", phase.label())))
+            } else {
+                Ok(1)
+            }
+        }
+    }
+
+    impl BenchmarkTarget for FakeTarget {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn provision_schema(
+            &mut self,
+            _profile: &LibraryProfile,
+            _progress: &ProgressReporter,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn massive_ingestion(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::MassiveIngestion);
+            self.maybe_fail(PhaseName::MassiveIngestion)
+        }
+
+        fn index_mutation(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::IndexMutation);
+            self.maybe_fail(PhaseName::IndexMutation)
+        }
+
+        fn complex_traversal(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::ComplexTraversal);
+            self.maybe_fail(PhaseName::ComplexTraversal)
+        }
+
+        fn targeted_purge(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::TargetedPurge);
+            self.maybe_fail(PhaseName::TargetedPurge)
+        }
+
+        fn compaction(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::Compaction);
+            self.maybe_fail(PhaseName::Compaction)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn storage_footprint_bytes(&mut self) -> io::Result<u64> {
+            Ok(123)
         }
     }
 
@@ -3936,6 +4032,185 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         );
         sync_file_if_exists(&root.join("missing.bin")).expect("missing sync should be ok");
         fsync_tree(&root).expect("fsync tree should complete");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn common_benchmark_runner_and_reporting_paths_are_exercised() {
+        print_help();
+
+        assert_eq!(
+            TargetSpec::WardrobeEmbedded.label(),
+            "Wardrobe (Embedded Flat-File Mode)"
+        );
+        assert_eq!(
+            TargetSpec::WardrobeRemote.label(),
+            "Wardrobe (Remote TCP Server Mode)"
+        );
+        assert_eq!(TargetSpec::Sqlite.label(), "SQLite (Local WAL File Mode)");
+        assert_eq!(
+            TargetSpec::MongoDb.label(),
+            "MongoDB (Document Store Base Comparison)"
+        );
+        assert_eq!(
+            TargetSpec::MySql.label(),
+            "MySQL / MariaDB (Relational Pointer Base Comparison)"
+        );
+        assert_eq!(
+            TargetSpec::Neo4j.label(),
+            "Neo4j (Graph Database Base Comparison)"
+        );
+
+        assert_eq!(PhaseName::MassiveIngestion.label(), "Massive Ingestion");
+        assert_eq!(PhaseName::IndexMutation.label(), "Index Mutation");
+        assert_eq!(PhaseName::ComplexTraversal.label(), "Complex Traversal");
+        assert_eq!(PhaseName::TargetedPurge.label(), "Targeted Purge");
+        assert_eq!(PhaseName::Compaction.label(), "Compaction");
+
+        let progress = ProgressReporter::new(true);
+        progress.log("coverage progress log");
+        report_record_progress(&progress, "records", 0, 0);
+        report_record_progress(&progress, "records", 1, 2);
+        report_record_progress(&progress, "records", 2, 2);
+
+        let mut target = FakeTarget::new();
+        let report = run_target(&mut target, &tiny_profile(), &ProgressReporter::new(false))
+            .expect("fake target should run");
+        assert_eq!(report.name, "Fake Target");
+        assert_eq!(report.phases.len(), 5);
+        assert_eq!(report.storage_bytes, 123);
+        assert_eq!(
+            target.calls,
+            vec![
+                PhaseName::MassiveIngestion,
+                PhaseName::IndexMutation,
+                PhaseName::ComplexTraversal,
+                PhaseName::TargetedPurge,
+                PhaseName::Compaction,
+            ]
+        );
+
+        let mut failing_target = FakeTarget::new();
+        failing_target.fail_phase = Some(PhaseName::ComplexTraversal);
+        let error = run_target(
+            &mut failing_target,
+            &tiny_profile(),
+            &ProgressReporter::new(false),
+        )
+        .expect_err("fake target should fail");
+        assert!(error.to_string().contains("Complex Traversal"));
+
+        let unavailable = unavailable_target_report("Unavailable DB", "connection refused".into());
+        assert_eq!(unavailable.name, "Unavailable DB");
+        assert_eq!(
+            unavailable.unavailable_reason.as_deref(),
+            Some("connection refused")
+        );
+
+        let report = BenchmarkReport {
+            profile: tiny_profile(),
+            run_dir: PathBuf::from("target/fake"),
+            targets: vec![unavailable],
+        };
+        let markdown = report.to_markdown();
+        assert!(markdown.contains("Unavailable DB"));
+        assert!(markdown.contains("Storage Diagnostics"));
+        assert!(markdown.contains("Unavailable: connection refused"));
+    }
+
+    #[test]
+    fn parsing_and_small_helpers_cover_error_and_default_branches() {
+        assert_eq!(parse_positive_u64("--window", "17").unwrap(), 17);
+        assert!(parse_positive_u64("--window", "bad").is_err());
+        assert!(parse_positive_u64("--window", "0").is_err());
+        assert!(parse_positive_usize("--size", "bad").is_err());
+
+        assert_eq!(
+            parse_wardrobe_durability_policy("strict").unwrap(),
+            DurabilityPolicy::Strict
+        );
+        assert_eq!(
+            parse_wardrobe_durability_policy("grouped").unwrap(),
+            DurabilityPolicy::Grouped {
+                commit_window_ms: DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS,
+                max_batch_size: DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH
+            }
+        );
+        assert!(parse_wardrobe_durability_policy("eventual").is_err());
+        assert_eq!(
+            default_grouped_durability_policy(),
+            DurabilityPolicy::Grouped {
+                commit_window_ms: DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS,
+                max_batch_size: DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH
+            }
+        );
+        assert_eq!(
+            update_group_commit_window(DurabilityPolicy::Strict, 22),
+            DurabilityPolicy::Grouped {
+                commit_window_ms: 22,
+                max_batch_size: DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH
+            }
+        );
+        assert_eq!(
+            update_group_commit_max_batch(DurabilityPolicy::Strict, 33),
+            DurabilityPolicy::Grouped {
+                commit_window_ms: DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS,
+                max_batch_size: 33
+            }
+        );
+
+        assert_eq!(identifier_fragment("///"), "run");
+        assert_eq!(identifier_fragment("run 123!"), "run_123");
+        assert_eq!(optional_count(Some(7)), "7");
+        assert_eq!(optional_count(None), "unavailable");
+        assert_eq!(to_io_error("boom").to_string(), "boom");
+        assert!(read_default_mysql_credentials().is_ok());
+        assert!(read_default_neo4j_credentials().is_ok());
+        assert_eq!(
+            read_credentials_file(
+                "target/wardrobe-benchmark/missing-credentials.env",
+                "USER",
+                "PASSWORD",
+            )
+            .expect("missing credentials file should be ok"),
+            ServiceCredentials::default()
+        );
+        assert_eq!(
+            parse_credentials("USER=alice\nPASSWORD=secret\n", "USER", "PASSWORD"),
+            ServiceCredentials {
+                user: Some("alice".to_string()),
+                password: Some("secret".to_string())
+            }
+        );
+        assert_eq!(weighted_percentile(&[], 0.95), 0.0);
+
+        let mut recorder = PhaseRecorder::new(PhaseName::Compaction);
+        assert!(recorder.measure(0, || Ok(())).is_err());
+        assert!(
+            recorder
+                .measure(1, || Err::<(), _>(Error::other("nope")))
+                .is_err()
+        );
+        let metrics = recorder.finish();
+        assert_eq!(metrics.operations, 0);
+        assert_eq!(metrics.ops_per_second, 0.0);
+        assert_eq!(metrics.mean_micros, 0.0);
+    }
+
+    #[test]
+    fn filesystem_sync_helpers_cover_file_and_missing_tree_paths() {
+        let root = env::temp_dir().join(format!(
+            "wardrobe_benchmark_sync_helpers_{}",
+            unix_timestamp_micros()
+        ));
+        fs::create_dir_all(&root).expect("root should create");
+        let file = root.join("data.bin");
+        fs::write(&file, b"data").expect("file should write");
+
+        fsync_tree(&file).expect("file fsync should work");
+        fsync_tree(&root.join("missing")).expect("missing fsync tree should be ok");
+        assert_eq!(directory_size(root.join("missing")).unwrap(), 0);
 
         let _ = fs::remove_dir_all(root);
     }
