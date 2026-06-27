@@ -428,6 +428,10 @@ impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
         WardrobeEngine::list_drawer_names(self)
     }
 
+    fn cached_drawer_count(&self) -> Result<usize> {
+        WardrobeEngine::cached_drawer_count(self)
+    }
+
     fn backup_archive(&self, source_path: &str) -> Result<BackupArchive> {
         WardrobeEngine::backup_archive(self, source_path)
     }

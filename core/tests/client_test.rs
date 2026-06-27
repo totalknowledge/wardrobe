@@ -8,10 +8,10 @@ use std::thread::{self, JoinHandle};
 use wardrobe_core::{
     AlterRequest, BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command,
     CommandResult, CompactMode, CompactRequest, ConnectionTarget, CreateRequest, CreateResult,
-    DriverKind, DropRequest, InspectResult, OperationFilter, OperationOptions, OrderDirection,
-    PermissionRequest, ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult, RestoreReport,
-    StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageLocator, VacuumReport,
-    WalVerification, WardrobeClient,
+    DeleteResult, DriverKind, DropRequest, InspectResult, OperationFilter, OperationOptions,
+    OrderDirection, PermissionRequest, ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult,
+    RestoreReport, StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageLocator,
+    UpsertResult, VacuumReport, WalVerification, WardrobeClient,
 };
 
 #[cfg(unix)]
@@ -157,6 +157,45 @@ fn unexpected_status(result: StatusResult) -> std::io::Error {
         std::io::ErrorKind::InvalidData,
         format!("unexpected status result {result:?}"),
     )
+}
+
+fn upsert_command(payload: serde_json::Value, filter: impl Into<OperationFilter>) -> Command {
+    Command::Upsert {
+        payload,
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn read_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Read {
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn count_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Count {
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn delete_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Delete {
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn upsert_result(pointers: Vec<&str>) -> CommandResult {
+    CommandResult::Upsert(UpsertResult::Pointers(
+        pointers.into_iter().map(str::to_string).collect(),
+    ))
+}
+
+fn read_records_result(records: Vec<serde_json::Value>) -> CommandResult {
+    CommandResult::Read(ReadResult::Records(records))
 }
 
 #[test]
@@ -312,10 +351,8 @@ fn client_network_driver_does_not_initialize_local_storage() {
     let accidental_path = Path::new("localhost:24842");
     assert!(!accidental_path.exists());
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::FindAll {
-            drawer_name: "gem".to_string(),
-        },
-        CommandResult::Records(Vec::new()),
+        read_command(OperationFilter::drawer("gem")),
+        read_records_result(Vec::new()),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -348,115 +385,92 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
     };
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (
-            Command::Upsert {
-                drawer_name: "gem".to_string(),
-                payload: json!({"_id": "network_fire", "element": "Fire"}),
-            },
-            CommandResult::Pointer("@gem:network_fire".to_string()),
+            upsert_command(
+                json!({"_id": "network_fire", "element": "Fire"}),
+                OperationFilter::drawer("gem"),
+            ),
+            upsert_result(vec!["@gem:network_fire"]),
         ),
         (
-            Command::BulkUpsert {
-                drawer_name: "gem".to_string(),
-                records: vec![
+            upsert_command(
+                json!([
                     json!({"_id": "network_water", "element": "Water"}),
                     json!({"_id": "network_earth", "element": "Earth"}),
-                ],
-                atomic: true,
-            },
-            CommandResult::Pointers(vec![
-                "@gem:network_water".to_string(),
-                "@gem:network_earth".to_string(),
-            ]),
+                ]),
+                OperationFilter::drawer("gem"),
+            ),
+            upsert_result(vec!["@gem:network_water", "@gem:network_earth"]),
         ),
         (
-            Command::FindAll {
-                drawer_name: "gem".to_string(),
-            },
-            CommandResult::Records(vec![json!({"element": "Fire"})]),
+            read_command(OperationFilter::drawer("gem")),
+            read_records_result(vec![json!({"element": "Fire"})]),
         ),
         (
-            Command::FindByFilter {
-                drawer_name: "gem".to_string(),
-                filter: json!({"element": "F%"}),
-                modifiers: None,
+            Command::Read {
+                filter: OperationFilter::query_in("gem", json!({"element": "F%"})),
+                options: OperationOptions::from(modifiers.clone()),
             },
-            CommandResult::Records(vec![json!({"element": "Fire"})]),
+            read_records_result(vec![json!({"element": "Fire"})]),
         ),
         (
-            Command::Count {
-                drawer_name: "gem".to_string(),
-                filter: Some(json!({"element": "F%"})),
-                modifiers: None,
-            },
+            count_command(OperationFilter::query_in("gem", json!({"element": "F%"}))),
             CommandResult::Count(1),
         ),
         (
-            Command::FindById {
-                pointer: "@gem:network_fire".to_string(),
-            },
-            CommandResult::Record(Some(json!({"element": "Fire"}))),
+            read_command(OperationFilter::pointer("@gem:network_fire")),
+            CommandResult::Read(ReadResult::Record(Some(json!({"element": "Fire"})))),
+        ),
+        (
+            delete_command(OperationFilter::pointer("@gem:network_fire")),
+            CommandResult::Delete(DeleteResult { deleted: 1 }),
+        ),
+        (
+            delete_command(OperationFilter::pointer("@gem:explicit_delete")),
+            CommandResult::Delete(DeleteResult { deleted: 1 }),
         ),
         (
             Command::Delete {
-                pointer: "@gem:network_fire".to_string(),
+                filter: OperationFilter::query_in("gem", json!({"element": "Water"})),
+                options: OperationOptions::new().multi(true),
             },
-            CommandResult::Deleted(true),
+            CommandResult::Delete(DeleteResult { deleted: 1 }),
         ),
         (
-            Command::Delete {
-                pointer: "@gem:explicit_delete".to_string(),
-            },
-            CommandResult::Deleted(true),
+            Command::Compact(CompactRequest::drawer("gem")),
+            CommandResult::Compact(report.clone()),
         ),
         (
-            Command::DeleteByFilter {
-                drawer_name: "gem".to_string(),
-                filter: json!({"element": "Water"}),
-            },
-            CommandResult::Count(1),
+            Command::Compact(CompactRequest::drawer_with_mode(
+                "gem",
+                CompactMode::Migrate,
+            )),
+            CommandResult::Compact(report.clone()),
         ),
         (
-            Command::Vacuum {
-                drawer_name: "gem".to_string(),
-            },
-            CommandResult::Vacuumed(report.clone()),
+            Command::Status(StatusRequest::tenants()),
+            CommandResult::Status(StatusResult::Tenants(vec!["tenant_alpha".to_string()])),
         ),
         (
-            Command::Migrate {
-                drawer_name: "gem".to_string(),
-            },
-            CommandResult::Migrated(report.clone()),
-        ),
-        (
-            Command::ShowTenants,
-            CommandResult::Tenants(vec!["tenant_alpha".to_string()]),
-        ),
-        (
-            Command::ShowDatabases,
-            CommandResult::Databases(vec![StorageInventory {
+            Command::Status(StatusRequest::databases()),
+            CommandResult::Status(StatusResult::Databases(vec![StorageInventory {
                 name: "main_db".to_string(),
                 record_count: 3,
                 disk_size_bytes: 4096,
                 register_file_count: 7,
-            }]),
+            }])),
         ),
         (
-            Command::ShowSchemas {
-                database_name: "main_db".to_string(),
-            },
-            CommandResult::Schemas(vec!["tenant_schema".to_string()]),
+            Command::Status(StatusRequest::schemas("main_db")),
+            CommandResult::Status(StatusResult::Schemas(vec!["tenant_schema".to_string()])),
         ),
         (
-            Command::ShowDrawers {
-                database_name: "main_db".to_string(),
-                schema_name: "tenant_schema".to_string(),
-            },
-            CommandResult::Drawers(vec![StorageInventory {
+            Command::Status(StatusRequest::drawers("main_db", "tenant_schema")),
+            CommandResult::Status(StatusResult::Drawers(vec![StorageInventory {
                 name: "gem".to_string(),
                 record_count: 2,
                 disk_size_bytes: 2048,
                 register_file_count: 3,
-            }]),
+            }])),
         ),
     ]);
 
@@ -617,11 +631,7 @@ fn client_unix_socket_driver_sends_command_frames() {
         run_protocol_script(
             &mut stream,
             vec![(
-                Command::Count {
-                    drawer_name: "gem".to_string(),
-                    filter: None,
-                    modifiers: None,
-                },
+                count_command(OperationFilter::drawer("gem")),
                 CommandResult::Count(7),
             )],
         );
@@ -645,12 +655,8 @@ fn client_unix_socket_driver_sends_command_frames() {
 #[test]
 fn client_unexpected_result_paths_return_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Count {
-            drawer_name: "gem".to_string(),
-            filter: None,
-            modifiers: None,
-        },
-        CommandResult::Pointer("@gem:wrong".to_string()),
+        count_command(OperationFilter::drawer("gem")),
+        upsert_result(vec!["@gem:wrong"]),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -670,8 +676,8 @@ fn opening_unsupported_scheme_returns_error() {
 #[test]
 fn client_show_databases_unexpected_result_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::ShowDatabases,
-        CommandResult::Pointer("@gem:bad".to_string()),
+        Command::Status(StatusRequest::databases()),
+        upsert_result(vec!["@gem:bad"]),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -685,11 +691,8 @@ fn client_show_databases_unexpected_result_returns_invaliddata() {
 #[test]
 fn client_show_drawers_unexpected_result_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::ShowDrawers {
-            database_name: "db".to_string(),
-            schema_name: "schema".to_string(),
-        },
-        CommandResult::Pointer("@gem:bad".to_string()),
+        Command::Status(StatusRequest::drawers("db", "schema")),
+        upsert_result(vec!["@gem:bad"]),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -723,40 +726,28 @@ fn client_admin_setup_commands_route_over_network() {
 
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (
-            Command::DefineDatabase {
-                database_name: "admin_db".to_string(),
-            },
-            CommandResult::StorageInventory(database_inventory.clone()),
+            Command::Create(CreateRequest::database("admin_db")),
+            CommandResult::Create(CreateResult::StorageInventory(database_inventory.clone())),
         ),
         (
-            Command::DefineSchema {
-                database_name: "admin_db".to_string(),
-                schema_name: "public".to_string(),
-            },
-            CommandResult::StorageInventory(schema_inventory.clone()),
+            Command::Create(CreateRequest::schema("admin_db", "public")),
+            CommandResult::Create(CreateResult::StorageInventory(schema_inventory.clone())),
         ),
         (
-            Command::DefineDrawer {
-                database_name: "admin_db".to_string(),
-                schema_name: "public".to_string(),
-                drawer_name: "gem".to_string(),
-            },
-            CommandResult::StorageInventory(drawer_inventory.clone()),
+            Command::Create(CreateRequest::drawer("admin_db", "public", "gem")),
+            CommandResult::Create(CreateResult::StorageInventory(drawer_inventory.clone())),
         ),
         (
-            Command::DefineTenantRoute {
-                tenant_id: "tenant_a".to_string(),
-                database_name: "admin_db".to_string(),
-                location: "tenant_a/admin_db/public".to_string(),
-            },
-            CommandResult::StorageInventory(database_inventory.clone()),
+            Command::Create(CreateRequest::tenant_route(
+                "tenant_a",
+                "admin_db",
+                "tenant_a/admin_db/public",
+            )),
+            CommandResult::Create(CreateResult::StorageInventory(database_inventory.clone())),
         ),
         (
-            Command::ManageUser {
-                action: "grant_permission".to_string(),
-                payload: json!({"username": "alice", "permission_scope": "global:rud"}),
-            },
-            CommandResult::Admin(json!({"ok": true})),
+            Command::Grant(PermissionRequest::new("alice", "global:rud")),
+            CommandResult::Grant(json!({"ok": true})),
         ),
     ]);
 
@@ -866,92 +857,74 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
 
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (
-            Command::ManageUser {
-                action: "add_user".to_string(),
-                payload: json!({"username": "alice"}),
-            },
-            CommandResult::Admin(json!({"ok": true, "action": "add_user"})),
+            Command::Create(CreateRequest::user(json!({"username": "alice"}))),
+            CommandResult::Create(CreateResult::Admin(
+                json!({"ok": true, "action": "add_user"}),
+            )),
         ),
         (
-            Command::ManageSchema {
-                action: "add".to_string(),
-                kind: "index".to_string(),
-                drawer_name: "admin_db/public/gem".to_string(),
-                field_name: "element".to_string(),
-                payload: json!({"type": "hash"}),
-            },
-            CommandResult::Admin(json!({"ok": true, "action": "add"})),
+            Command::Alter(AlterRequest::schema_rule(
+                "admin_db/public/gem",
+                "add",
+                "index",
+                "element",
+                json!({"type": "hash"}),
+            )),
+            CommandResult::Alter(json!({"ok": true, "action": "add"})),
         ),
         (
-            Command::ManageSchema {
-                action: "remove".to_string(),
-                kind: "index".to_string(),
-                drawer_name: "admin_db/public/gem".to_string(),
-                field_name: "element".to_string(),
-                payload: json!({}),
-            },
-            CommandResult::Admin(json!({"ok": true, "action": "remove"})),
+            Command::Drop(DropRequest::schema_rule(
+                "admin_db/public/gem",
+                "index",
+                "element",
+                json!({}),
+            )),
+            CommandResult::Drop(json!({"ok": true, "action": "remove"})),
         ),
         (
-            Command::DropDrawer {
-                database_name: "admin_db".to_string(),
-                schema_name: "public".to_string(),
-                drawer_name: "gem".to_string(),
-            },
-            CommandResult::Admin(json!({"ok": true, "dropped": "drawer"})),
+            Command::Drop(DropRequest::drawer("admin_db", "public", "gem")),
+            CommandResult::Drop(json!({"ok": true, "dropped": "drawer"})),
         ),
         (
-            Command::DropSchema {
-                database_name: "admin_db".to_string(),
-                schema_name: "public".to_string(),
-            },
-            CommandResult::Admin(json!({"ok": true, "dropped": "schema"})),
+            Command::Drop(DropRequest::schema("admin_db", "public")),
+            CommandResult::Drop(json!({"ok": true, "dropped": "schema"})),
         ),
         (
-            Command::DropDatabase {
-                database_name: "admin_db".to_string(),
-            },
-            CommandResult::Admin(json!({"ok": true, "dropped": "database"})),
+            Command::Drop(DropRequest::database("admin_db")),
+            CommandResult::Drop(json!({"ok": true, "dropped": "database"})),
         ),
         (
-            Command::ManageUser {
-                action: "drop_user".to_string(),
-                payload: json!({"username": "alice"}),
-            },
-            CommandResult::Admin(json!({"ok": true, "action": "drop_user"})),
+            Command::Drop(DropRequest::user("alice")),
+            CommandResult::Drop(json!({"ok": true, "action": "drop_user"})),
         ),
         (
-            Command::ManageUser {
-                action: "revoke_permission".to_string(),
-                payload: json!({"username": "alice", "permission_scope": "admin_db:rud"}),
-            },
-            CommandResult::Admin(json!({"ok": true, "action": "revoke_permission"})),
+            Command::Revoke(PermissionRequest::new("alice", "admin_db:rud")),
+            CommandResult::Revoke(json!({"ok": true, "action": "revoke_permission"})),
         ),
         (
-            Command::VerifyWal {
-                database_name: Some("admin_db".to_string()),
-            },
-            CommandResult::WalVerification(wal.clone()),
+            Command::Status(StatusRequest::wal(Some("admin_db"))),
+            CommandResult::Status(StatusResult::Wal(wal.clone())),
         ),
         (
-            Command::Diagnose,
-            CommandResult::Diagnosis(diagnosis.clone()),
+            Command::Status(StatusRequest::storage()),
+            CommandResult::Status(StatusResult::Storage(diagnosis.clone())),
         ),
         (
-            Command::Check {
-                path: "admin_db/public/gem".to_string(),
-            },
-            CommandResult::Check(check.clone()),
+            Command::Status(StatusRequest::path("admin_db/public/gem")),
+            CommandResult::Status(StatusResult::Check(check.clone())),
         ),
         (
-            Command::ListDrawers,
-            CommandResult::DrawerNames(vec!["admin_db/public/gem".to_string()]),
+            Command::Status(StatusRequest::drawer_names()),
+            CommandResult::Status(StatusResult::DrawerNames(vec![
+                "admin_db/public/gem".to_string(),
+            ])),
         ),
         (
             Command::Inspect {
-                drawer_name: "admin_db/public/gem".to_string(),
+                filter: OperationFilter::drawer("admin_db/public/gem"),
+                options: OperationOptions::default(),
             },
-            CommandResult::Inspection(inspection.clone()),
+            CommandResult::Inspect(InspectResult::Drawer(inspection.clone())),
         ),
         (
             Command::Backup {
@@ -964,7 +937,11 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
                 destination_path: "destination".to_string(),
                 archive: archive.clone(),
             },
-            CommandResult::Restored(restore_report.clone()),
+            CommandResult::Restore(restore_report.clone()),
+        ),
+        (
+            Command::Status(StatusRequest::cached_drawer_count()),
+            CommandResult::Status(StatusResult::CachedDrawerCount(1)),
         ),
     ]);
 
@@ -1061,11 +1038,11 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
             .expect("restore"),
         restore_report
     );
-    let cached_count = client.status(StatusRequest::cached_drawer_count());
-    assert!(cached_count.is_err());
     assert_eq!(
-        cached_count.unwrap_err().kind(),
-        std::io::ErrorKind::Unsupported
+        client
+            .status(StatusRequest::cached_drawer_count())
+            .expect("cached drawer count"),
+        StatusResult::CachedDrawerCount(1)
     );
 
     handle.join().expect("join failed");
@@ -1074,11 +1051,8 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
 #[test]
 fn client_unexpected_result_on_upsert_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Upsert {
-            drawer_name: "gem".to_string(),
-            payload: json!({"_id": "x"}),
-        },
-        CommandResult::Records(vec![json!({"element": "Fire"})]),
+        upsert_command(json!({"_id": "x"}), OperationFilter::drawer("gem")),
+        read_records_result(vec![json!({"element": "Fire"})]),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -1096,12 +1070,8 @@ fn client_unexpected_result_on_upsert_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_bulk_upsert_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::BulkUpsert {
-            drawer_name: "gem".to_string(),
-            records: vec![json!({"_id": "x"})],
-            atomic: true,
-        },
-        CommandResult::Records(vec![json!({"_id": "x"})]),
+        upsert_command(json!([json!({"_id": "x"})]), OperationFilter::drawer("gem")),
+        read_records_result(vec![json!({"_id": "x"})]),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -1119,9 +1089,7 @@ fn client_unexpected_result_on_bulk_upsert_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_find_all_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::FindAll {
-            drawer_name: "gem".to_string(),
-        },
+        read_command(OperationFilter::drawer("gem")),
         CommandResult::Count(5),
     )]);
 
@@ -1211,22 +1179,20 @@ fn client_handles_server_misbehaving_with_command_opcode() {
 fn client_alias_methods_execute_successfully() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (
-            Command::ShowTenants,
-            CommandResult::Tenants(vec!["tenant_beta".to_string()]),
-        ),
-        (Command::ShowDatabases, CommandResult::Databases(Vec::new())),
-        (
-            Command::ShowSchemas {
-                database_name: "db".to_string(),
-            },
-            CommandResult::Schemas(Vec::new()),
+            Command::Status(StatusRequest::tenants()),
+            CommandResult::Status(StatusResult::Tenants(vec!["tenant_beta".to_string()])),
         ),
         (
-            Command::ShowDrawers {
-                database_name: "db".to_string(),
-                schema_name: "schema".to_string(),
-            },
-            CommandResult::Drawers(Vec::new()),
+            Command::Status(StatusRequest::databases()),
+            CommandResult::Status(StatusResult::Databases(Vec::new())),
+        ),
+        (
+            Command::Status(StatusRequest::schemas("db")),
+            CommandResult::Status(StatusResult::Schemas(Vec::new())),
+        ),
+        (
+            Command::Status(StatusRequest::drawers("db", "schema")),
+            CommandResult::Status(StatusResult::Drawers(Vec::new())),
         ),
     ]);
 
@@ -1250,11 +1216,7 @@ fn client_alias_methods_execute_successfully() {
 #[test]
 fn client_unexpected_result_on_find_by_filter_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::FindByFilter {
-            drawer_name: "gem".to_string(),
-            filter: json!({"element": "Fire"}),
-            modifiers: None,
-        },
+        read_command(OperationFilter::query_in("gem", json!({"element": "Fire"}))),
         CommandResult::Count(0),
     )]);
 
@@ -1271,9 +1233,7 @@ fn client_unexpected_result_on_find_by_filter_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_find_by_id_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::FindById {
-            pointer: "@gem:target_identifier".to_string(),
-        },
+        read_command(OperationFilter::pointer("@gem:target_identifier")),
         CommandResult::Count(0),
     )]);
 
@@ -1287,9 +1247,7 @@ fn client_unexpected_result_on_find_by_id_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_delete_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Delete {
-            pointer: "@gem:target_identifier".to_string(),
-        },
+        delete_command(OperationFilter::pointer("@gem:target_identifier")),
         CommandResult::Count(0),
     )]);
 
@@ -1306,11 +1264,11 @@ fn client_unexpected_result_on_delete_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_delete_by_filter_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::DeleteByFilter {
-            drawer_name: "gem".to_string(),
-            filter: json!({"element": "Fire"}),
+        Command::Delete {
+            filter: OperationFilter::query_in("gem", json!({"element": "Fire"})),
+            options: OperationOptions::new().multi(true),
         },
-        CommandResult::Deleted(true),
+        CommandResult::Count(0),
     )]);
 
     let client = WardrobeClient::open(connection).expect("open failed");
@@ -1327,9 +1285,7 @@ fn client_unexpected_result_on_delete_by_filter_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_vacuum_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Vacuum {
-            drawer_name: "gem".to_string(),
-        },
+        Command::Compact(CompactRequest::drawer("gem")),
         CommandResult::Count(0),
     )]);
 
@@ -1343,9 +1299,10 @@ fn client_unexpected_result_on_vacuum_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_migrate_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Migrate {
-            drawer_name: "gem".to_string(),
-        },
+        Command::Compact(CompactRequest::drawer_with_mode(
+            "gem",
+            CompactMode::Migrate,
+        )),
         CommandResult::Count(0),
     )]);
 
@@ -1362,9 +1319,7 @@ fn client_unexpected_result_on_migrate_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_show_schemas_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::ShowSchemas {
-            database_name: "main_database".to_string(),
-        },
+        Command::Status(StatusRequest::schemas("main_database")),
         CommandResult::Count(0),
     )]);
 

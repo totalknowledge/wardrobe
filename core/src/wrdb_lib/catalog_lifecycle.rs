@@ -1,5 +1,5 @@
 use crate::wrdb_lib::catalog_validation;
-use crate::wrdb_lib::command::Command;
+use crate::wrdb_lib::command::{Command, CreateRequest, DropRequest};
 use crate::wrdb_lib::discovery;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::storage::StorageInventory;
@@ -19,9 +19,7 @@ where
     F: FnOnce(&Command) -> Result<()>,
 {
     catalog_validation::validate_database_name(database_name)?;
-    let command = Command::DefineDatabase {
-        database_name: database_name.to_string(),
-    };
+    let command = Command::Create(CreateRequest::database(database_name));
     append_wal(&command)?;
 
     let database_path = catalog_validation::database_path_from_name(root_directory, database_name)?;
@@ -48,10 +46,7 @@ where
 {
     catalog_validation::validate_database_name(database_name)?;
     catalog_validation::validate_schema_name(schema_name)?;
-    let command = Command::DefineSchema {
-        database_name: database_name.to_string(),
-        schema_name: schema_name.to_string(),
-    };
+    let command = Command::Create(CreateRequest::schema(database_name, schema_name));
     append_wal(&command)?;
 
     {
@@ -91,11 +86,11 @@ where
     catalog_validation::validate_database_name(database_name)?;
     catalog_validation::validate_schema_name(schema_name)?;
     catalog_validation::validate_drawer_name(drawer_name)?;
-    let command = Command::DefineDrawer {
-        database_name: database_name.to_string(),
-        schema_name: schema_name.to_string(),
-        drawer_name: drawer_name.to_string(),
-    };
+    let command = Command::Create(CreateRequest::drawer(
+        database_name,
+        schema_name,
+        drawer_name,
+    ));
     append_wal(&command)?;
 
     {
@@ -148,11 +143,11 @@ where
     catalog_validation::validate_tenant_identifier(tenant_id)?;
     catalog_validation::validate_database_name(database_name)?;
     catalog_validation::validate_catalog_location(location)?;
-    let command = Command::DefineTenantRoute {
-        tenant_id: tenant_id.to_string(),
-        database_name: database_name.to_string(),
-        location: location.to_string(),
-    };
+    let command = Command::Create(CreateRequest::tenant_route(
+        tenant_id,
+        database_name,
+        location,
+    ));
     append_wal(&command)?;
 
     let route_path = catalog_validation::catalog_location_path(root_directory, location);
@@ -177,9 +172,7 @@ where
     F: FnOnce(&Command) -> Result<()>,
 {
     catalog_validation::validate_database_name(database_name)?;
-    let command = Command::DropDatabase {
-        database_name: database_name.to_string(),
-    };
+    let command = Command::Drop(DropRequest::database(database_name));
     append_wal(&command)?;
 
     let database_path = catalog_validation::database_path_from_name(root_directory, database_name)?;
@@ -211,10 +204,7 @@ where
 {
     catalog_validation::validate_database_name(database_name)?;
     catalog_validation::validate_schema_name(schema_name)?;
-    let command = Command::DropSchema {
-        database_name: database_name.to_string(),
-        schema_name: schema_name.to_string(),
-    };
+    let command = Command::Drop(DropRequest::schema(database_name, schema_name));
     append_wal(&command)?;
 
     let schema_path = catalog_validation::database_path_from_name(root_directory, database_name)?
@@ -250,11 +240,7 @@ where
     catalog_validation::validate_database_name(database_name)?;
     catalog_validation::validate_schema_name(schema_name)?;
     catalog_validation::validate_drawer_name(drawer_name)?;
-    let command = Command::DropDrawer {
-        database_name: database_name.to_string(),
-        schema_name: schema_name.to_string(),
-        drawer_name: drawer_name.to_string(),
-    };
+    let command = Command::Drop(DropRequest::drawer(database_name, schema_name, drawer_name));
     append_wal(&command)?;
 
     let schema_path = catalog_validation::database_path_from_name(root_directory, database_name)?

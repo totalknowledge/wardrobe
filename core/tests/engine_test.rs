@@ -9,11 +9,47 @@ use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
     AlterRequest, BsonBinaryFormat, Command, CommandResult, CompactMode, CompactRequest,
-    CreateRequest, CreateResult, DatabaseReader, OperationFilter, OperationOptions, OrderDirection,
-    QueryModifiers, ReadResult, StatusRequest, StatusResult, StorageCoordinate, StorageFormat,
-    StorageInventory, StorageLocator, StorageScope, WAL_FILE_NAME, WalJournal, WalOperation,
-    WardrobeEngine,
+    CreateRequest, CreateResult, DatabaseReader, DeleteResult, OperationFilter, OperationOptions,
+    OrderDirection, QueryModifiers, ReadResult, ReturnShape, StatusRequest, StatusResult,
+    StorageCoordinate, StorageFormat, StorageInventory, StorageLocator, StorageScope, UpsertResult,
+    WAL_FILE_NAME, WalJournal, WalOperation, WardrobeEngine,
 };
+
+fn upsert_command(payload: serde_json::Value, filter: impl Into<OperationFilter>) -> Command {
+    Command::Upsert {
+        payload,
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn read_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Read {
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn read_record_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Read {
+        filter: filter.into(),
+        options: OperationOptions::new().return_shape(ReturnShape::Record),
+    }
+}
+
+fn count_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Count {
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
+
+fn delete_command(filter: impl Into<OperationFilter>) -> Command {
+    Command::Delete {
+        filter: filter.into(),
+        options: OperationOptions::default(),
+    }
+}
 
 fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields: &[&str]) {
     let cascade_delete_rules = fields
@@ -2123,19 +2159,21 @@ fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     let result = engine
         .execute(
             coordinate.clone(),
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "@weapon:lnk_us_034_blade",
                     "name": "Tenant Blade"
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("routed upsert should succeed");
 
     assert_eq!(
         result,
-        CommandResult::Pointer("@weapon:us_034_blade".to_string())
+        CommandResult::Upsert(UpsertResult::Pointers(vec![
+            "@weapon:us_034_blade".to_string()
+        ]))
     );
 
     assert!(
@@ -2150,15 +2188,10 @@ fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     assert!(!database.path.join("weapon.drw").exists());
 
     let result = engine
-        .execute(
-            coordinate,
-            Command::FindAll {
-                drawer_name: "weapon".to_string(),
-            },
-        )
+        .execute(coordinate, read_command(OperationFilter::drawer("weapon")))
         .expect("routed find all should succeed");
 
-    let CommandResult::Records(records) = result else {
+    let CommandResult::Read(ReadResult::Records(records)) = result else {
         panic!("expected records result");
     };
     assert_eq!(records.len(), 1);
@@ -2180,13 +2213,13 @@ fn us_034_storage_coordinates_isolate_neighboring_tenants() {
         engine
             .execute(
                 coordinate,
-                Command::Upsert {
-                    drawer_name: "weapon".to_string(),
-                    payload: json!({
+                upsert_command(
+                    json!({
                         "_id": "@weapon:lnk_shared_key",
                         "name": name
                     }),
-                },
+                    OperationFilter::drawer("weapon"),
+                ),
             )
             .expect("routed upsert should succeed");
     }
@@ -2194,31 +2227,18 @@ fn us_034_storage_coordinates_isolate_neighboring_tenants() {
     let deleted = engine
         .execute(
             tenant_a.clone(),
-            Command::Delete {
-                pointer: "@weapon:lnk_shared_key".to_string(),
-            },
+            delete_command(OperationFilter::pointer("@weapon:lnk_shared_key")),
         )
         .expect("routed delete should succeed");
-    assert_eq!(deleted, CommandResult::Deleted(true));
+    assert_eq!(deleted, CommandResult::Delete(DeleteResult { deleted: 1 }));
 
     let tenant_a_count = engine
-        .execute(
-            tenant_a,
-            Command::Count {
-                drawer_name: "weapon".to_string(),
-                filter: None,
-                modifiers: None,
-            },
-        )
+        .execute(tenant_a, count_command(OperationFilter::drawer("weapon")))
         .expect("tenant a count should succeed");
     let tenant_b_count = engine
         .execute(
             tenant_b.clone(),
-            Command::Count {
-                drawer_name: "weapon".to_string(),
-                filter: None,
-                modifiers: None,
-            },
+            count_command(OperationFilter::drawer("weapon")),
         )
         .expect("tenant b count should succeed");
 
@@ -2228,13 +2248,11 @@ fn us_034_storage_coordinates_isolate_neighboring_tenants() {
     let tenant_b_record = engine
         .execute(
             tenant_b,
-            Command::FindById {
-                pointer: "@weapon:lnk_shared_key".to_string(),
-            },
+            read_record_command(OperationFilter::pointer("@weapon:lnk_shared_key")),
         )
         .expect("tenant b lookup should succeed");
 
-    let CommandResult::Record(Some(record)) = tenant_b_record else {
+    let CommandResult::Read(ReadResult::Record(Some(record))) = tenant_b_record else {
         panic!("expected tenant b record");
     };
     assert_eq!(record["name"], "Tenant B Blade");
@@ -2250,9 +2268,8 @@ fn us_034_routed_nested_objects_and_hydration_stay_inside_coordinate() {
     engine
         .execute(
             coordinate.clone(),
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "@weapon:lnk_us_034_staff",
                     "name": "Routed Staff",
                     "gem": {
@@ -2261,7 +2278,8 @@ fn us_034_routed_nested_objects_and_hydration_stay_inside_coordinate() {
                         "potency": 700
                     }
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("routed nested upsert should succeed");
 
@@ -2279,15 +2297,14 @@ fn us_034_routed_nested_objects_and_hydration_stay_inside_coordinate() {
     let result = engine
         .execute(
             coordinate,
-            Command::FindByFilter {
-                drawer_name: "weapon".to_string(),
-                filter: json!({ "gem": { "_id": "us_034_gem" } }),
-                modifiers: None,
-            },
+            read_command(OperationFilter::query_in(
+                "weapon",
+                json!({ "gem": { "_id": "us_034_gem" } }),
+            )),
         )
         .expect("routed filtered query should succeed");
 
-    let CommandResult::Records(records) = result else {
+    let CommandResult::Read(ReadResult::Records(records)) = result else {
         panic!("expected records result");
     };
     assert_eq!(records.len(), 1);
@@ -2303,11 +2320,7 @@ fn us_034_storage_coordinate_rejects_path_traversal_segments() {
     let error = engine
         .execute(
             StorageCoordinate::new("tenant", "..", "schema"),
-            Command::Count {
-                drawer_name: "weapon".to_string(),
-                filter: None,
-                modifiers: None,
-            },
+            count_command(OperationFilter::drawer("weapon")),
         )
         .expect_err("path traversal coordinate should fail");
 
@@ -2377,13 +2390,13 @@ fn us_036_schema_level_isolation_uses_nested_database_schema_folders() {
         engine
             .execute_in_scope(
                 schema_scope.clone(),
-                Command::Upsert {
-                    drawer_name: "gem".to_string(),
-                    payload: json!({
+                upsert_command(
+                    json!({
                         "_id": "@gem:lnk_schema_fire",
                         "element": "Schema Fire"
                     }),
-                },
+                    OperationFilter::drawer("gem"),
+                ),
             )
             .expect("schema-scoped upsert should succeed");
     }
@@ -2403,25 +2416,16 @@ fn us_036_schema_level_isolation_uses_nested_database_schema_folders() {
     let count = restarted_engine
         .execute_in_scope(
             schema_scope.clone(),
-            Command::Count {
-                drawer_name: "gem".to_string(),
-                filter: None,
-                modifiers: None,
-            },
+            count_command(OperationFilter::drawer("gem")),
         )
         .expect("schema-scoped count should succeed");
     assert_eq!(count, CommandResult::Count(1));
 
     let records = restarted_engine
-        .execute_in_scope(
-            schema_scope,
-            Command::FindAll {
-                drawer_name: "gem".to_string(),
-            },
-        )
+        .execute_in_scope(schema_scope, read_command(OperationFilter::drawer("gem")))
         .expect("schema-scoped find_all should succeed");
 
-    let CommandResult::Records(records) = records else {
+    let CommandResult::Read(ReadResult::Records(records)) = records else {
         panic!("expected records result");
     };
     assert_eq!(records.len(), 1);
@@ -2443,13 +2447,13 @@ fn us_036_drawer_level_isolation_uses_prefixed_drawer_files() {
         engine
             .execute_in_scope(
                 scope,
-                Command::Upsert {
-                    drawer_name: "gem".to_string(),
-                    payload: json!({
+                upsert_command(
+                    json!({
                         "_id": "@gem:lnk_shared_drawer_key",
                         "element": name
                     }),
-                },
+                    OperationFilter::drawer("gem"),
+                ),
             )
             .expect("drawer-scoped upsert should succeed");
     }
@@ -2461,24 +2465,20 @@ fn us_036_drawer_level_isolation_uses_prefixed_drawer_files() {
     let tenant_a_record = engine
         .execute_in_scope(
             tenant_a_scope,
-            Command::FindById {
-                pointer: "@gem:lnk_shared_drawer_key".to_string(),
-            },
+            read_record_command(OperationFilter::pointer("@gem:lnk_shared_drawer_key")),
         )
         .expect("tenant 1 lookup should succeed");
     let tenant_b_record = engine
         .execute_in_scope(
             tenant_b_scope,
-            Command::FindById {
-                pointer: "@gem:lnk_shared_drawer_key".to_string(),
-            },
+            read_record_command(OperationFilter::pointer("@gem:lnk_shared_drawer_key")),
         )
         .expect("tenant 2 lookup should succeed");
 
-    let CommandResult::Record(Some(tenant_a_record)) = tenant_a_record else {
+    let CommandResult::Read(ReadResult::Record(Some(tenant_a_record))) = tenant_a_record else {
         panic!("expected tenant 1 record");
     };
-    let CommandResult::Record(Some(tenant_b_record)) = tenant_b_record else {
+    let CommandResult::Read(ReadResult::Record(Some(tenant_b_record))) = tenant_b_record else {
         panic!("expected tenant 2 record");
     };
 
@@ -2496,9 +2496,8 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
     engine
         .execute_in_scope(
             scope.clone(),
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "@weapon:lnk_graph_staff",
                     "name": "Graph Staff",
                     "gem": {
@@ -2507,7 +2506,8 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
                         "potency": 999
                     }
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("drawer-scoped nested upsert should succeed");
 
@@ -2526,15 +2526,14 @@ fn us_036_drawer_level_nested_records_and_filters_stay_namespaced() {
     let result = engine
         .execute_in_scope(
             scope,
-            Command::FindByFilter {
-                drawer_name: "weapon".to_string(),
-                filter: json!({ "gem": { "_id": "graph_fire" } }),
-                modifiers: None,
-            },
+            read_command(OperationFilter::query_in(
+                "weapon",
+                json!({ "gem": { "_id": "graph_fire" } }),
+            )),
         )
         .expect("drawer-scoped reference filter should succeed");
 
-    let CommandResult::Records(records) = result else {
+    let CommandResult::Read(ReadResult::Records(records)) = result else {
         panic!("expected records result");
     };
     assert_eq!(records.len(), 1);
@@ -2555,13 +2554,13 @@ fn us_048_show_tenants_discovers_active_tenant_namespaces() {
         engine
             .execute(
                 coordinate,
-                Command::Upsert {
-                    drawer_name: "gem".to_string(),
-                    payload: json!({
+                upsert_command(
+                    json!({
                         "_id": "route_seed",
                         "element": "Routed"
                     }),
-                },
+                    OperationFilter::drawer("gem"),
+                ),
             )
             .expect("coordinate-scoped upsert should succeed");
     }
@@ -2569,26 +2568,26 @@ fn us_048_show_tenants_discovers_active_tenant_namespaces() {
     engine
         .execute_in_scope(
             StorageScope::schema("main_db", "tenant_schema"),
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "schema_seed",
                     "name": "Schema Blade"
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("schema-scoped upsert should succeed");
 
     engine
         .execute_in_scope(
             StorageScope::drawer("tenant_drawer"),
-            Command::Upsert {
-                drawer_name: "character".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "drawer_seed",
                     "name": "Drawer Tenant"
                 }),
-            },
+                OperationFilter::drawer("character"),
+            ),
         )
         .expect("drawer-scoped upsert should succeed");
 
@@ -2616,9 +2615,12 @@ fn us_048_show_tenants_discovers_active_tenant_namespaces() {
     );
 
     let command_result = engine
-        .execute_command(Command::ShowTenants)
+        .execute_command(Command::Status(StatusRequest::tenants()))
         .expect("show tenants command should succeed");
-    assert_eq!(command_result, CommandResult::Tenants(tenants));
+    assert_eq!(
+        command_result,
+        CommandResult::Status(StatusResult::Tenants(tenants))
+    );
 }
 
 #[test]
@@ -2630,39 +2632,39 @@ fn us_049_show_databases_discovers_database_footprints_with_inventory() {
     engine
         .execute_in_scope(
             StorageScope::database("main_db"),
-            Command::Upsert {
-                drawer_name: "gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "main_seed",
                     "element": "Main"
                 }),
-            },
+                OperationFilter::drawer("gem"),
+            ),
         )
         .expect("database-scoped upsert should succeed");
 
     engine
         .execute_in_scope(
             StorageScope::schema("analytics_db", "tenant_schema"),
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "schema_seed",
                     "name": "Schema Blade"
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("schema-scoped upsert should succeed");
 
     engine
         .execute(
             StorageCoordinate::new("tenant_alpha", "production", "core"),
-            Command::Upsert {
-                drawer_name: "character".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "coordinate_seed",
                     "name": "Routed Character"
                 }),
-            },
+                OperationFilter::drawer("character"),
+            ),
         )
         .expect("coordinate-scoped upsert should succeed");
 
@@ -2707,9 +2709,12 @@ fn us_049_show_databases_discovers_database_footprints_with_inventory() {
     }
 
     let command_result = engine
-        .execute_command(Command::ShowDatabases)
+        .execute_command(Command::Status(StatusRequest::databases()))
         .expect("show databases command should succeed");
-    assert_eq!(command_result, CommandResult::Databases(databases));
+    assert_eq!(
+        command_result,
+        CommandResult::Status(StatusResult::Databases(databases))
+    );
 }
 
 #[test]
@@ -2722,13 +2727,13 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
         engine
             .execute_in_scope(
                 StorageScope::schema("main_db", schema_name),
-                Command::Upsert {
-                    drawer_name: "gem".to_string(),
-                    payload: json!({
+                upsert_command(
+                    json!({
                         "_id": format!("{schema_name}_seed"),
                         "element": schema_name
                     }),
-                },
+                    OperationFilter::drawer("gem"),
+                ),
             )
             .expect("schema-scoped upsert should succeed");
     }
@@ -2736,39 +2741,39 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
     engine
         .execute_in_scope(
             StorageScope::database("main_db"),
-            Command::Upsert {
-                drawer_name: "flat_schema.gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "flat_seed",
                     "element": "Flat"
                 }),
-            },
+                OperationFilter::drawer("flat_schema.gem"),
+            ),
         )
         .expect("flat schema-prefixed drawer should upsert");
 
     engine
         .execute_in_scope(
             StorageScope::database("main_db"),
-            Command::Upsert {
-                drawer_name: "loose_gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "loose_seed",
                     "element": "Loose"
                 }),
-            },
+                OperationFilter::drawer("loose_gem"),
+            ),
         )
         .expect("plain database drawer should upsert");
 
     engine
         .execute(
             StorageCoordinate::new("tenant_alpha", "production", "core"),
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "coordinate_seed",
                     "name": "Coordinate Blade"
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("coordinate-scoped upsert should succeed");
 
@@ -2787,11 +2792,12 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
     assert_eq!(routed_schemas, vec!["core".to_string()]);
 
     let command_result = engine
-        .execute_command(Command::ShowSchemas {
-            database_name: "main_db".to_string(),
-        })
+        .execute_command(Command::Status(StatusRequest::schemas("main_db")))
         .expect("show schemas command should succeed");
-    assert_eq!(command_result, CommandResult::Schemas(schemas));
+    assert_eq!(
+        command_result,
+        CommandResult::Status(StatusResult::Schemas(schemas))
+    );
 }
 
 #[test]
@@ -2808,13 +2814,13 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
         engine
             .execute_in_scope(
                 schema_scope.clone(),
-                Command::Upsert {
-                    drawer_name: "gem".to_string(),
-                    payload: json!({
+                upsert_command(
+                    json!({
                         "_id": id,
                         "element": element
                     }),
-                },
+                    OperationFilter::drawer("gem"),
+                ),
             )
             .expect("schema gem should upsert");
     }
@@ -2822,48 +2828,46 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
     engine
         .execute_in_scope(
             schema_scope.clone(),
-            Command::Delete {
-                pointer: "@gem:schema_gem_deleted".to_string(),
-            },
+            delete_command(OperationFilter::pointer("@gem:schema_gem_deleted")),
         )
         .expect("schema gem should delete");
 
     engine
         .execute_in_scope(
             schema_scope,
-            Command::Upsert {
-                drawer_name: "weapon".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "schema_weapon",
                     "name": "Schema Blade"
                 }),
-            },
+                OperationFilter::drawer("weapon"),
+            ),
         )
         .expect("schema weapon should upsert");
 
     engine
         .execute_in_scope(
             StorageScope::database("main_db"),
-            Command::Upsert {
-                drawer_name: "flat_schema.artifact".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "flat_artifact",
                     "kind": "Flat"
                 }),
-            },
+                OperationFilter::drawer("flat_schema.artifact"),
+            ),
         )
         .expect("flat schema drawer should upsert");
 
     engine
         .execute(
             StorageCoordinate::new("tenant_alpha", "production", "core"),
-            Command::Upsert {
-                drawer_name: "character".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "routed_character",
                     "name": "Routed"
                 }),
-            },
+                OperationFilter::drawer("character"),
+            ),
         )
         .expect("routed drawer should upsert");
 
@@ -2904,12 +2908,15 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
     assert_eq!(routed_drawers[0].record_count, 1);
 
     let command_result = engine
-        .execute_command(Command::ShowDrawers {
-            database_name: "main_db".to_string(),
-            schema_name: "tenant_schema".to_string(),
-        })
+        .execute_command(Command::Status(StatusRequest::drawers(
+            "main_db",
+            "tenant_schema",
+        )))
         .expect("show drawers command should succeed");
-    assert_eq!(command_result, CommandResult::Drawers(drawers));
+    assert_eq!(
+        command_result,
+        CommandResult::Status(StatusResult::Drawers(drawers))
+    );
 }
 
 #[test]
@@ -2978,9 +2985,7 @@ fn us_063_engine_bootstraps_registry_from_catalog_and_validates_locations() {
     let error = engine
         .execute_in_scope(
             StorageScope::schema("catalog_db", "core"),
-            Command::FindAll {
-                drawer_name: "missing".to_string(),
-            },
+            read_command(OperationFilter::drawer("missing")),
         )
         .expect_err("unregistered drawer should fail");
 
@@ -3614,13 +3619,13 @@ fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
     )
     .expect("records should seed");
     engine
-        .execute_command(Command::ManageSchema {
-            action: "add".to_string(),
-            kind: "index".to_string(),
-            drawer_name: "gem".to_string(),
-            field_name: "element".to_string(),
-            payload: json!({"kind": "index"}),
-        })
+        .execute_command(Command::Alter(AlterRequest::schema_rule(
+            "gem",
+            "add",
+            "index",
+            "element",
+            json!({"kind": "index"}),
+        )))
         .expect("index should be declared");
 
     assert_eq!(
@@ -4525,27 +4530,27 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
     engine
         .execute(
             coordinate.clone(),
-            Command::Upsert {
-                drawer_name: "gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "@gem:lnk_routed_keep",
                     "element": "Long Element Value",
                     "potency": 1
                 }),
-            },
+                OperationFilter::drawer("gem"),
+            ),
         )
         .expect("routed gem should upsert");
     engine
         .execute(
             coordinate.clone(),
-            Command::Upsert {
-                drawer_name: "gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "@gem:lnk_routed_keep",
                     "element": "Air",
                     "potency": 2
                 }),
-            },
+                OperationFilter::drawer("gem"),
+            ),
         )
         .expect("routed gem should update");
 
@@ -4560,13 +4565,11 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
     let result = engine
         .execute(
             coordinate.clone(),
-            Command::Vacuum {
-                drawer_name: "gem".to_string(),
-            },
+            Command::Compact(CompactRequest::drawer("gem")),
         )
         .expect("routed vacuum should succeed");
 
-    let CommandResult::Vacuumed(report) = result else {
+    let CommandResult::Compact(report) = result else {
         panic!("expected vacuum report");
     };
 
@@ -4576,14 +4579,9 @@ fn us_042_vacuum_command_compacts_routed_drawer_scope() {
     assert!(drawer_tombstone_count(&scoped_data_path) == 0);
 
     let result = engine
-        .execute(
-            coordinate,
-            Command::FindAll {
-                drawer_name: "gem".to_string(),
-            },
-        )
+        .execute(coordinate, read_command(OperationFilter::drawer("gem")))
         .expect("routed find should succeed");
-    let CommandResult::Records(records) = result else {
+    let CommandResult::Read(ReadResult::Records(records)) = result else {
         panic!("expected records");
     };
     assert_eq!(records.len(), 1);
@@ -4857,15 +4855,15 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
     );
 
     let command_result = engine
-        .execute_command(Command::DefineDrawer {
-            database_name: "managed_db".to_string(),
-            schema_name: "core".to_string(),
-            drawer_name: "weapon".to_string(),
-        })
+        .execute_command(Command::Create(CreateRequest::drawer(
+            "managed_db",
+            "core",
+            "weapon",
+        )))
         .expect("define drawer command should route through engine boundary");
     assert!(matches!(
         command_result,
-        CommandResult::StorageInventory(inventory) if inventory.name == "weapon"
+        CommandResult::Create(CreateResult::StorageInventory(inventory)) if inventory.name == "weapon"
     ));
 
     let reopened = WardrobeEngine::open(&storage_pool).expect("engine should reopen");
@@ -4928,16 +4926,20 @@ fn us_065_logical_tenant_routes_to_catalog_defined_location() {
     let result = engine
         .execute_in_scope(
             StorageScope::tenant("tenant_a", "production", "core"),
-            Command::Upsert {
-                drawer_name: "gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "tenant_fire",
                     "element": "Fire"
                 }),
-            },
+                OperationFilter::drawer("gem"),
+            ),
         )
         .expect("tenant scoped upsert should route");
-    assert!(matches!(result, CommandResult::Pointer(pointer) if pointer == "@gem:tenant_fire"));
+    assert!(matches!(
+        result,
+        CommandResult::Upsert(UpsertResult::Pointers(pointers))
+            if pointers == vec!["@gem:tenant_fire".to_string()]
+    ));
 
     assert!(routed_drawer.exists());
     assert!(
@@ -4961,14 +4963,12 @@ fn us_065_logical_tenant_routes_to_catalog_defined_location() {
             tenant_id: "tenant_a".to_string(),
             database_name: "production".to_string(),
             schema_name: "core".to_string(),
-            command: Box::new(Command::FindAll {
-                drawer_name: "gem".to_string(),
-            }),
+            command: Box::new(read_command(OperationFilter::drawer("gem"))),
         })
         .expect("tenant command should route");
     assert!(matches!(
         records,
-        CommandResult::Records(records)
+        CommandResult::Read(ReadResult::Records(records))
             if records.len() == 1 && records[0]["_id"] == "tenant_fire"
     ));
 
@@ -4977,9 +4977,7 @@ fn us_065_logical_tenant_routes_to_catalog_defined_location() {
             "tenant_b",
             "production",
             "core",
-            Command::FindAll {
-                drawer_name: "gem".to_string(),
-            },
+            read_command(OperationFilter::drawer("gem")),
         )
         .expect_err("missing tenant should fail");
     assert_eq!(missing_tenant.kind(), std::io::ErrorKind::NotFound);
@@ -4996,15 +4994,19 @@ fn us_066_binary_wal_logs_mutating_commands() {
     assert_eq!(empty_verification.last_sequence, None);
 
     let result = engine
-        .execute_command(Command::Upsert {
-            drawer_name: "gem".to_string(),
-            payload: json!({
+        .execute_command(upsert_command(
+            json!({
                 "_id": "wal_fire",
                 "element": "Fire"
             }),
-        })
+            OperationFilter::drawer("gem"),
+        ))
         .expect("upsert command should succeed");
-    assert!(matches!(result, CommandResult::Pointer(pointer) if pointer == "@gem:wal_fire"));
+    assert!(matches!(
+        result,
+        CommandResult::Upsert(UpsertResult::Pointers(pointers))
+            if pointers == vec!["@gem:wal_fire".to_string()]
+    ));
 
     let root_wal = database.path.join(WAL_FILE_NAME);
     assert!(root_wal.exists());
@@ -5014,22 +5016,23 @@ fn us_066_binary_wal_logs_mutating_commands() {
     assert_eq!(verification.last_sequence, Some(3));
 
     let command_result = engine
-        .execute_command(Command::VerifyWal {
-            database_name: None,
-        })
+        .execute_command(Command::Status(StatusRequest::wal(None::<String>)))
         .expect("wal verification command should succeed");
-    assert_eq!(command_result, CommandResult::WalVerification(verification));
+    assert_eq!(
+        command_result,
+        CommandResult::Status(StatusResult::Wal(verification))
+    );
 
     engine
         .execute(
             StorageCoordinate::new("tenant_wal", "production", "core"),
-            Command::Upsert {
-                drawer_name: "gem".to_string(),
-                payload: json!({
+            upsert_command(
+                json!({
                     "_id": "tenant_wal_fire",
                     "element": "Routed Fire"
                 }),
-            },
+                OperationFilter::drawer("gem"),
+            ),
         )
         .expect("coordinate upsert should succeed");
 
@@ -5054,22 +5057,21 @@ fn us_101_bulk_upsert_returns_ordered_pointers() {
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
 
     let result = engine
-        .execute_command(Command::BulkUpsert {
-            drawer_name: "gem".to_string(),
-            records: vec![
+        .execute_command(upsert_command(
+            json!([
                 json!({"_id": "bulk_fire", "element": "Fire"}),
                 json!({"_id": "bulk_water", "element": "Water"}),
-            ],
-            atomic: true,
-        })
+            ]),
+            OperationFilter::drawer("gem"),
+        ))
         .expect("bulk upsert should succeed");
 
     assert_eq!(
         result,
-        CommandResult::Pointers(vec![
+        CommandResult::Upsert(UpsertResult::Pointers(vec![
             "@gem:bulk_fire".to_string(),
             "@gem:bulk_water".to_string()
-        ])
+        ]))
     );
     assert_eq!(
         engine

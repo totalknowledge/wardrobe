@@ -458,39 +458,23 @@ fn emit_command_profile(profile: ServerCommandProfile) {
 
 fn command_label(command: &Command) -> &'static str {
     match command {
-        Command::ShowTenants => "ShowTenants",
-        Command::ShowDatabases => "ShowDatabases",
-        Command::VerifyWal { .. } => "VerifyWal",
-        Command::ShowSchemas { .. } => "ShowSchemas",
-        Command::ShowDrawers { .. } => "ShowDrawers",
-        Command::Upsert { .. } => "Upsert",
-        Command::BulkUpsert { .. } => "BulkUpsert",
-        Command::FindAll { .. } => "FindAll",
-        Command::FindById { .. } => "FindById",
-        Command::FindByFilter { .. } => "FindByFilter",
-        Command::Count { .. } => "Count",
-        Command::Delete { .. } => "Delete",
-        Command::DeleteByFilter { .. } => "DeleteByFilter",
-        Command::Vacuum { .. } => "Vacuum",
-        Command::Migrate { .. } => "Migrate",
-        Command::Inspect { .. } => "Inspect",
-        Command::Check { .. } => "Check",
-        Command::Diagnose => "Diagnose",
-        Command::ListDrawers => "ListDrawers",
-        Command::Backup { .. } => "Backup",
-        Command::Restore { .. } => "Restore",
-        Command::DefineDatabase { .. } => "DefineDatabase",
-        Command::DefineSchema { .. } => "DefineSchema",
-        Command::DefineDrawer { .. } => "DefineDrawer",
-        Command::DropDatabase { .. } => "DropDatabase",
-        Command::DropSchema { .. } => "DropSchema",
-        Command::DropDrawer { .. } => "DropDrawer",
-        Command::DefineTenantRoute { .. } => "DefineTenantRoute",
-        Command::ManageSchema { .. } => "ManageSchema",
-        Command::ManageUser { .. } => "ManageUser",
-        Command::ExecuteForTenant { .. } => "ExecuteForTenant",
-        Command::Execute { .. } => "Execute",
-        Command::ExecuteInScope { .. } => "ExecuteInScope",
+        Command::Upsert { .. } => "upsert",
+        Command::Read { .. } => "read",
+        Command::Delete { .. } => "delete",
+        Command::Inspect { .. } => "inspect",
+        Command::Count { .. } => "count",
+        Command::Compact(_) => "compact",
+        Command::Create(_) => "create",
+        Command::Alter(_) => "alter",
+        Command::Drop(_) => "drop",
+        Command::Backup { .. } => "backup",
+        Command::Restore { .. } => "restore",
+        Command::Grant(_) => "grant",
+        Command::Revoke(_) => "revoke",
+        Command::Status(_) => "status",
+        Command::ExecuteForTenant { .. } => "execute_for_tenant",
+        Command::Execute { .. } => "execute",
+        Command::ExecuteInScope { .. } => "execute_in_scope",
     }
 }
 
@@ -725,7 +709,11 @@ mod tests {
     use serde_json::json;
     use std::io::Cursor;
     use std::thread;
-    use wardrobe_core::{BackupArchive, BackupArchiveFile, StorageCoordinate, StorageScope};
+    use wardrobe_core::{
+        AlterRequest, BackupArchive, BackupArchiveFile, CompactRequest, CreateRequest, DropRequest,
+        OperationFilter, OperationOptions, PermissionRequest, StatusRequest, StorageCoordinate,
+        StorageScope,
+    };
 
     #[test]
     fn server_config_from_args_defaults() {
@@ -847,220 +835,116 @@ mod tests {
             }],
         };
         let commands = vec![
-            (Command::ShowTenants, "ShowTenants"),
-            (Command::ShowDatabases, "ShowDatabases"),
             (
-                Command::VerifyWal {
-                    database_name: Some("db".to_string()),
+                Command::Read {
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
                 },
-                "VerifyWal",
-            ),
-            (
-                Command::ShowSchemas {
-                    database_name: "db".to_string(),
-                },
-                "ShowSchemas",
-            ),
-            (
-                Command::ShowDrawers {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                },
-                "ShowDrawers",
+                "read",
             ),
             (
                 Command::Upsert {
-                    drawer_name: "gem".to_string(),
                     payload: json!({"_id": "one"}),
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
                 },
-                "Upsert",
-            ),
-            (
-                Command::BulkUpsert {
-                    drawer_name: "gem".to_string(),
-                    records: vec![json!({"_id": "one"})],
-                    atomic: true,
-                },
-                "BulkUpsert",
-            ),
-            (
-                Command::FindAll {
-                    drawer_name: "gem".to_string(),
-                },
-                "FindAll",
-            ),
-            (
-                Command::FindById {
-                    pointer: "@gem:one".to_string(),
-                },
-                "FindById",
-            ),
-            (
-                Command::FindByFilter {
-                    drawer_name: "gem".to_string(),
-                    filter: json!({"element": "Fire"}),
-                    modifiers: None,
-                },
-                "FindByFilter",
-            ),
-            (
-                Command::Count {
-                    drawer_name: "gem".to_string(),
-                    filter: None,
-                    modifiers: None,
-                },
-                "Count",
+                "upsert",
             ),
             (
                 Command::Delete {
-                    pointer: "@gem:one".to_string(),
+                    filter: OperationFilter::pointer("@gem:one"),
+                    options: OperationOptions::default(),
                 },
-                "Delete",
-            ),
-            (
-                Command::DeleteByFilter {
-                    drawer_name: "gem".to_string(),
-                    filter: json!({"element": "Fire"}),
-                },
-                "DeleteByFilter",
-            ),
-            (
-                Command::Vacuum {
-                    drawer_name: "gem".to_string(),
-                },
-                "Vacuum",
-            ),
-            (
-                Command::Migrate {
-                    drawer_name: "gem".to_string(),
-                },
-                "Migrate",
+                "delete",
             ),
             (
                 Command::Inspect {
-                    drawer_name: "gem".to_string(),
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
                 },
-                "Inspect",
+                "inspect",
             ),
             (
-                Command::Check {
-                    path: "db/public/gem".to_string(),
+                Command::Count {
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
                 },
-                "Check",
+                "count",
             ),
-            (Command::Diagnose, "Diagnose"),
-            (Command::ListDrawers, "ListDrawers"),
+            (Command::Compact(CompactRequest::drawer("gem")), "compact"),
+            (Command::Create(CreateRequest::database("db")), "create"),
+            (
+                Command::Alter(AlterRequest::schema_rule(
+                    "gem",
+                    "add",
+                    "index",
+                    "element",
+                    json!({"type": "hash"}),
+                )),
+                "alter",
+            ),
+            (
+                Command::Drop(DropRequest::schema_rule(
+                    "gem",
+                    "index",
+                    "element",
+                    json!({}),
+                )),
+                "drop",
+            ),
             (
                 Command::Backup {
                     source_path: "source".to_string(),
                 },
-                "Backup",
+                "backup",
             ),
             (
                 Command::Restore {
                     destination_path: "destination".to_string(),
                     archive,
                 },
-                "Restore",
+                "restore",
             ),
             (
-                Command::DefineDatabase {
-                    database_name: "db".to_string(),
-                },
-                "DefineDatabase",
+                Command::Grant(PermissionRequest::new("alice", "db:rud")),
+                "grant",
             ),
             (
-                Command::DefineSchema {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                },
-                "DefineSchema",
+                Command::Revoke(PermissionRequest::new("alice", "db:rud")),
+                "revoke",
             ),
-            (
-                Command::DefineDrawer {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                    drawer_name: "gem".to_string(),
-                },
-                "DefineDrawer",
-            ),
-            (
-                Command::DropDatabase {
-                    database_name: "db".to_string(),
-                },
-                "DropDatabase",
-            ),
-            (
-                Command::DropSchema {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                },
-                "DropSchema",
-            ),
-            (
-                Command::DropDrawer {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                    drawer_name: "gem".to_string(),
-                },
-                "DropDrawer",
-            ),
-            (
-                Command::DefineTenantRoute {
-                    tenant_id: "tenant".to_string(),
-                    database_name: "db".to_string(),
-                    location: "tenant/db/public".to_string(),
-                },
-                "DefineTenantRoute",
-            ),
-            (
-                Command::ManageSchema {
-                    action: "add".to_string(),
-                    kind: "index".to_string(),
-                    drawer_name: "gem".to_string(),
-                    field_name: "element".to_string(),
-                    payload: json!({"type": "hash"}),
-                },
-                "ManageSchema",
-            ),
-            (
-                Command::ManageUser {
-                    action: "grant_permission".to_string(),
-                    payload: json!({"username": "alice"}),
-                },
-                "ManageUser",
-            ),
+            (Command::Status(StatusRequest::tenants()), "status"),
             (
                 Command::ExecuteForTenant {
                     tenant_id: "tenant".to_string(),
                     database_name: "db".to_string(),
                     schema_name: "public".to_string(),
-                    command: Box::new(Command::FindAll {
-                        drawer_name: "gem".to_string(),
+                    command: Box::new(Command::Read {
+                        filter: OperationFilter::drawer("gem"),
+                        options: OperationOptions::default(),
                     }),
                 },
-                "ExecuteForTenant",
+                "execute_for_tenant",
             ),
             (
                 Command::Execute {
                     coordinate: StorageCoordinate::new("tenant", "db", "public"),
                     command: Box::new(Command::Count {
-                        drawer_name: "gem".to_string(),
-                        filter: None,
-                        modifiers: None,
+                        filter: OperationFilter::drawer("gem"),
+                        options: OperationOptions::default(),
                     }),
                 },
-                "Execute",
+                "execute",
             ),
             (
                 Command::ExecuteInScope {
                     scope: StorageScope::schema("db", "public"),
-                    command: Box::new(Command::DeleteByFilter {
-                        drawer_name: "gem".to_string(),
-                        filter: json!({}),
+                    command: Box::new(Command::Delete {
+                        filter: OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                        options: OperationOptions::new().multi(true),
                     }),
                 },
-                "ExecuteInScope",
+                "execute_in_scope",
             ),
         ];
 

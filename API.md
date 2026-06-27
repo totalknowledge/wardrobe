@@ -21,6 +21,8 @@ The stable operation vocabulary is:
 
 The public API should use the same operation names as the CLI and server command protocol. Internal helper functions may use more specific names, but public-facing Rust methods, CLI commands, and command variants should follow this vocabulary.
 
+The command protocol is still pre-stable. Serialized `Command` and `CommandResult` payloads use the canonical names above, and removed protocol names such as `FindAll`, `FindById`, `FindByFilter`, `DeleteByFilter`, `BulkUpsert`, `Vacuum`, and `Migrate` are not compatibility aliases.
+
 ## Entry Points
 
 WardrobeEngine executes directly against an embedded storage root.

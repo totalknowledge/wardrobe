@@ -1,6 +1,12 @@
+use crate::engine::{
+    OperationSelection, ReturnShapeResolution, UpsertContext, merge_payload_into_record,
+    record_pointer, resolve_read_shape, upsert_record_target,
+};
 use crate::wrdb_lib::command::{
-    BackupArchive, CheckReport, Command, CommandResult, DrawerInspectionMetrics, RestoreReport,
-    StorageDiagnosis,
+    AlterRequest, BackupArchive, CheckReport, Command, CommandResult, CompactMode, CompactRequest,
+    CreateRequest, CreateResult, DeleteResult, DrawerInspectionMetrics, DropRequest, InspectResult,
+    OperationFilter, OperationOptions, ReadResult, RestoreReport, StatusRequest, StatusResult,
+    StorageDiagnosis, UpsertResult,
 };
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
@@ -48,6 +54,7 @@ pub(crate) trait BoundaryCommandExecutor {
     fn check_path(&self, path: &str) -> Result<CheckReport>;
     fn diagnose_storage(&self) -> Result<StorageDiagnosis>;
     fn list_drawer_names(&self) -> Result<Vec<String>>;
+    fn cached_drawer_count(&self) -> Result<usize>;
     fn backup_archive(&self, source_path: &str) -> Result<BackupArchive>;
     fn restore_archive(
         &self,
@@ -151,86 +158,23 @@ pub(crate) fn execute_command<E>(engine: &E, command: Command) -> Result<Command
 where
     E: BoundaryCommandExecutor,
 {
-    if !matches!(
-        &command,
-        Command::DefineDatabase { .. }
-            | Command::DefineSchema { .. }
-            | Command::DefineDrawer { .. }
-            | Command::DefineTenantRoute { .. }
-            | Command::DropDatabase { .. }
-            | Command::DropSchema { .. }
-            | Command::DropDrawer { .. }
-            | Command::ManageUser { .. }
-            | Command::Inspect { .. }
-            | Command::Check { .. }
-            | Command::Diagnose
-            | Command::ListDrawers
-            | Command::Backup { .. }
-            | Command::Restore { .. }
-    ) {
+    if should_append_boundary_wal(&command) {
         engine.append_boundary_wal(&command)?;
     }
 
     match command {
-        Command::ShowTenants => engine.show_tenants().map(CommandResult::Tenants),
-        Command::ShowDatabases => engine.show_databases().map(CommandResult::Databases),
-        Command::VerifyWal { database_name } => engine
-            .verify_wal(database_name.as_deref())
-            .map(CommandResult::WalVerification),
-        Command::ShowSchemas { database_name } => engine
-            .show_schemas(&database_name)
-            .map(CommandResult::Schemas),
-        Command::ShowDrawers {
-            database_name,
-            schema_name,
-        } => engine
-            .show_drawers(&database_name, &schema_name)
-            .map(CommandResult::Drawers),
-        Command::DefineDatabase { database_name } => engine
-            .create_database(&database_name)
-            .map(CommandResult::StorageInventory),
-        Command::DefineSchema {
-            database_name,
-            schema_name,
-        } => engine
-            .create_schema(&database_name, &schema_name)
-            .map(CommandResult::StorageInventory),
-        Command::DefineDrawer {
-            database_name,
-            schema_name,
-            drawer_name,
-        } => engine
-            .create_drawer(&database_name, &schema_name, &drawer_name)
-            .map(CommandResult::StorageInventory),
-        Command::DefineTenantRoute {
-            tenant_id,
-            database_name,
-            location,
-        } => engine
-            .register_tenant_route(&tenant_id, &database_name, &location)
-            .map(CommandResult::StorageInventory),
-        Command::DropDatabase { database_name } => engine
-            .drop_database(&database_name)
-            .map(CommandResult::Admin),
-        Command::DropSchema {
-            database_name,
-            schema_name,
-        } => engine
-            .drop_schema(&database_name, &schema_name)
-            .map(CommandResult::Admin),
-        Command::DropDrawer {
-            database_name,
-            schema_name,
-            drawer_name,
-        } => engine
-            .drop_drawer(&database_name, &schema_name, &drawer_name)
-            .map(CommandResult::Admin),
-        Command::Inspect { drawer_name } => engine
-            .inspect_drawer(&drawer_name)
-            .map(CommandResult::Inspection),
-        Command::Check { path } => engine.check_path(&path).map(CommandResult::Check),
-        Command::Diagnose => engine.diagnose_storage().map(CommandResult::Diagnosis),
-        Command::ListDrawers => engine.list_drawer_names().map(CommandResult::DrawerNames),
+        Command::Create(request) => execute_create_command(engine, request),
+        Command::Drop(request) => execute_drop_command(engine, request),
+        Command::Status(request) => execute_status_command(engine, request),
+        Command::Inspect { filter, options } => {
+            let selection = OperationSelection::from_filter(filter)?;
+            let drawer_name = selection.required_drawer("inspect")?;
+            let _ = options;
+            engine
+                .inspect_drawer(&drawer_name)
+                .map(InspectResult::Drawer)
+                .map(CommandResult::Inspect)
+        }
         Command::Backup { source_path } => engine
             .backup_archive(&source_path)
             .map(CommandResult::Backup),
@@ -239,10 +183,13 @@ where
             archive,
         } => engine
             .restore_archive(&destination_path, archive)
-            .map(CommandResult::Restored),
-        Command::ManageUser { action, payload } => engine
-            .manage_user(&action, payload)
-            .map(CommandResult::Admin),
+            .map(CommandResult::Restore),
+        Command::Grant(request) => engine
+            .manage_user("grant_permission", request.into_payload())
+            .map(CommandResult::Grant),
+        Command::Revoke(request) => engine
+            .manage_user("revoke_permission", request.into_payload())
+            .map(CommandResult::Revoke),
         Command::ExecuteForTenant {
             tenant_id,
             database_name,
@@ -258,6 +205,131 @@ where
     }
 }
 
+fn should_append_boundary_wal(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Upsert { .. }
+            | Command::Delete { .. }
+            | Command::Compact(_)
+            | Command::Alter(_)
+            | Command::Drop(DropRequest::SchemaRule { .. })
+    )
+}
+
+fn execute_create_command<E>(engine: &E, request: CreateRequest) -> Result<CommandResult>
+where
+    E: BoundaryCommandExecutor,
+{
+    match request {
+        CreateRequest::Database { database_name } => engine
+            .create_database(&database_name)
+            .map(CreateResult::StorageInventory)
+            .map(CommandResult::Create),
+        CreateRequest::Schema {
+            database_name,
+            schema_name,
+        } => engine
+            .create_schema(&database_name, &schema_name)
+            .map(CreateResult::StorageInventory)
+            .map(CommandResult::Create),
+        CreateRequest::Drawer {
+            database_name,
+            schema_name,
+            drawer_name,
+        } => engine
+            .create_drawer(&database_name, &schema_name, &drawer_name)
+            .map(CreateResult::StorageInventory)
+            .map(CommandResult::Create),
+        CreateRequest::TenantRoute {
+            tenant_id,
+            database_name,
+            location,
+        } => engine
+            .register_tenant_route(&tenant_id, &database_name, &location)
+            .map(CreateResult::StorageInventory)
+            .map(CommandResult::Create),
+        CreateRequest::User { payload } => engine
+            .manage_user("add_user", payload)
+            .map(CreateResult::Admin)
+            .map(CommandResult::Create),
+    }
+}
+
+fn execute_drop_command<E>(engine: &E, request: DropRequest) -> Result<CommandResult>
+where
+    E: BoundaryCommandExecutor,
+{
+    match request {
+        DropRequest::Database { database_name } => engine
+            .drop_database(&database_name)
+            .map(CommandResult::Drop),
+        DropRequest::Schema {
+            database_name,
+            schema_name,
+        } => engine
+            .drop_schema(&database_name, &schema_name)
+            .map(CommandResult::Drop),
+        DropRequest::Drawer {
+            database_name,
+            schema_name,
+            drawer_name,
+        } => engine
+            .drop_drawer(&database_name, &schema_name, &drawer_name)
+            .map(CommandResult::Drop),
+        DropRequest::User { username } => engine
+            .manage_user("drop_user", serde_json::json!({ "username": username }))
+            .map(CommandResult::Drop),
+        request @ DropRequest::SchemaRule { .. } => engine.execute_local(Command::Drop(request)),
+    }
+}
+
+fn execute_status_command<E>(engine: &E, request: StatusRequest) -> Result<CommandResult>
+where
+    E: BoundaryCommandExecutor,
+{
+    match request {
+        StatusRequest::Tenants => engine
+            .show_tenants()
+            .map(StatusResult::Tenants)
+            .map(CommandResult::Status),
+        StatusRequest::Databases => engine
+            .show_databases()
+            .map(StatusResult::Databases)
+            .map(CommandResult::Status),
+        StatusRequest::Schemas { database_name } => engine
+            .show_schemas(&database_name)
+            .map(StatusResult::Schemas)
+            .map(CommandResult::Status),
+        StatusRequest::Drawers {
+            database_name,
+            schema_name,
+        } => engine
+            .show_drawers(&database_name, &schema_name)
+            .map(StatusResult::Drawers)
+            .map(CommandResult::Status),
+        StatusRequest::Wal { database_name } => engine
+            .verify_wal(database_name.as_deref())
+            .map(StatusResult::Wal)
+            .map(CommandResult::Status),
+        StatusRequest::Storage => engine
+            .diagnose_storage()
+            .map(StatusResult::Storage)
+            .map(CommandResult::Status),
+        StatusRequest::Path { path } => engine
+            .check_path(&path)
+            .map(StatusResult::Check)
+            .map(CommandResult::Status),
+        StatusRequest::DrawerNames => engine
+            .list_drawer_names()
+            .map(StatusResult::DrawerNames)
+            .map(CommandResult::Status),
+        StatusRequest::CachedDrawerCount => engine
+            .cached_drawer_count()
+            .map(StatusResult::CachedDrawerCount)
+            .map(CommandResult::Status),
+    }
+}
+
 pub(crate) fn execute_in_database<E>(
     database: &RwLock<Database>,
     command: Command,
@@ -269,74 +341,348 @@ where
     let context = ExecutionContext { drawer_namespace };
 
     match command {
-        Command::ShowTenants => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Tenant discovery is only available at the WardrobeEngine boundary",
-        )),
-        Command::ShowDatabases => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Database discovery is only available at the WardrobeEngine boundary",
-        )),
-        Command::VerifyWal { .. } => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "WAL verification is only available at the WardrobeEngine boundary",
-        )),
-        Command::ShowSchemas { .. } => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Schema discovery is only available at the WardrobeEngine boundary",
-        )),
-        Command::ShowDrawers { .. } => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Drawer discovery is only available at the WardrobeEngine boundary",
-        )),
         Command::Upsert {
-            drawer_name,
             payload,
-        } => match payload {
-            Value::Array(records) => {
-                E::bulk_upsert_in_database(database, &drawer_name, records, true, context)
-                    .map(CommandResult::Pointers)
+            filter,
+            options,
+        } => execute_upsert_in_database::<E>(database, payload, filter, options, context),
+        Command::Read { filter, options } => {
+            execute_read_in_database::<E>(database, filter, options, context)
+        }
+        Command::Count { filter, options } => {
+            execute_count_in_database::<E>(database, filter, options, context)
+        }
+        Command::Delete { filter, options } => {
+            execute_delete_in_database::<E>(database, filter, options, context)
+        }
+        Command::Compact(request) => execute_compact_in_database::<E>(database, request, context),
+        Command::Alter(request) => execute_alter_in_database::<E>(database, request, context),
+        Command::Drop(DropRequest::SchemaRule {
+            drawer_name,
+            kind,
+            field_name,
+            payload,
+        }) => E::manage_schema_in_database(
+            database,
+            &drawer_name,
+            "remove",
+            &kind,
+            &field_name,
+            payload,
+            context,
+        )
+        .map(CommandResult::Drop),
+        Command::Inspect { .. }
+        | Command::Backup { .. }
+        | Command::Restore { .. }
+        | Command::Create(_)
+        | Command::Drop(_)
+        | Command::Grant(_)
+        | Command::Revoke(_)
+        | Command::Status(_)
+        | Command::ExecuteForTenant { .. }
+        | Command::Execute { .. }
+        | Command::ExecuteInScope { .. } => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Catalog, status, diagnostics, recovery, and scoped command routing is only available at the WardrobeEngine boundary",
+        )),
+    }
+}
+
+fn execute_upsert_in_database<E>(
+    database: &RwLock<Database>,
+    payload: Value,
+    filter: OperationFilter,
+    options: OperationOptions,
+    context: ExecutionContext<'_>,
+) -> Result<CommandResult>
+where
+    E: DatabaseCommandExecutor,
+{
+    upsert_payload_in_database::<E>(
+        database,
+        payload,
+        UpsertContext::from_filter(filter)?,
+        options,
+        context,
+    )
+    .map(UpsertResult::Pointers)
+    .map(CommandResult::Upsert)
+}
+
+fn upsert_payload_in_database<E>(
+    database: &RwLock<Database>,
+    payload: Value,
+    context_filter: UpsertContext,
+    options: OperationOptions,
+    context: ExecutionContext<'_>,
+) -> Result<Vec<String>>
+where
+    E: DatabaseCommandExecutor,
+{
+    if context_filter.query.is_some() {
+        return upsert_by_query_in_database::<E>(
+            database,
+            payload,
+            context_filter,
+            options,
+            context,
+        );
+    }
+
+    match payload {
+        Value::Array(records)
+            if context_filter.pointer.is_none()
+                && context_filter.query.is_none()
+                && context_filter.drawer_name().is_some() =>
+        {
+            let drawer_name = context_filter.drawer_name().unwrap();
+            E::bulk_upsert_in_database(
+                database,
+                drawer_name,
+                records,
+                options.atomic_enabled(),
+                context,
+            )
+        }
+        Value::Array(records) => {
+            let mut grouped_records = std::collections::HashMap::<String, Vec<Value>>::new();
+            for record in records {
+                let (drawer_name, record) = upsert_record_target(record, &context_filter)?;
+                grouped_records.entry(drawer_name).or_default().push(record);
             }
-            payload => E::upsert_in_database(database, &drawer_name, payload, context)
-                .map(CommandResult::Pointer),
+            let mut pointers = Vec::new();
+            for (drawer_name, records) in grouped_records {
+                pointers.extend(E::bulk_upsert_in_database(
+                    database,
+                    &drawer_name,
+                    records,
+                    options.atomic_enabled(),
+                    context,
+                )?);
+            }
+            Ok(pointers)
+        }
+        payload => {
+            let (drawer_name, payload) = upsert_record_target(payload, &context_filter)?;
+            E::upsert_in_database(database, &drawer_name, payload, context)
+                .map(|pointer| vec![pointer])
+        }
+    }
+}
+
+fn upsert_by_query_in_database<E>(
+    database: &RwLock<Database>,
+    payload: Value,
+    context_filter: UpsertContext,
+    options: OperationOptions,
+    context: ExecutionContext<'_>,
+) -> Result<Vec<String>>
+where
+    E: DatabaseCommandExecutor,
+{
+    let drawer_name = context_filter.drawer_name().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "query upsert requires a drawer filter",
+        )
+    })?;
+    let query = context_filter.query.clone().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "query upsert requires a query filter",
+        )
+    })?;
+    let matched_records =
+        E::find_by_filter_in_database(database, drawer_name, query, None, context)?;
+    if matched_records.is_empty() {
+        if options.create_if_missing == Some(false) {
+            return Ok(Vec::new());
+        }
+        return upsert_payload_in_database::<E>(
+            database,
+            payload,
+            UpsertContext::from_filter(OperationFilter::drawer(drawer_name))?,
+            options,
+            context,
+        );
+    }
+    if matched_records.len() > 1 && options.multi != Some(true) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "query upsert matched multiple records; set multi=true to update all matches",
+        ));
+    }
+
+    let mut pointers = Vec::new();
+    for mut existing_record in matched_records {
+        merge_payload_into_record(&mut existing_record, &payload)?;
+        let pointer = record_pointer(&existing_record, Some(drawer_name)).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "query upsert match did not include an _id field",
+            )
+        })?;
+        pointers.extend(upsert_payload_in_database::<E>(
+            database,
+            existing_record,
+            UpsertContext::from_filter(OperationFilter::pointer(pointer))?,
+            options.clone(),
+            context,
+        )?);
+    }
+    Ok(pointers)
+}
+
+fn execute_read_in_database<E>(
+    database: &RwLock<Database>,
+    filter: OperationFilter,
+    options: OperationOptions,
+    context: ExecutionContext<'_>,
+) -> Result<CommandResult>
+where
+    E: DatabaseCommandExecutor,
+{
+    let selection = OperationSelection::from_filter(filter)?;
+    let records = if !selection.pointers.is_empty() {
+        let mut records = Vec::new();
+        for pointer in selection.resolved_pointers()? {
+            if let Some(record) = E::find_by_id_in_database(database, &pointer, context)? {
+                records.push(record);
+            }
+        }
+        crate::wrdb_lib::query::apply_query_modifiers(
+            &mut records,
+            options.query_modifiers().as_ref(),
+        );
+        records
+    } else {
+        let drawer_name = selection.required_drawer("read")?;
+        if let Some(query) = selection.query.clone() {
+            E::find_by_filter_in_database(
+                database,
+                &drawer_name,
+                query,
+                options.query_modifiers(),
+                context,
+            )?
+        } else {
+            let mut records = E::find_all_in_database(database, &drawer_name, context)?;
+            crate::wrdb_lib::query::apply_query_modifiers(
+                &mut records,
+                options.query_modifiers().as_ref(),
+            );
+            records
+        }
+    };
+
+    let result = match resolve_read_shape(options.return_shape, &selection) {
+        ReturnShapeResolution::Record => ReadResult::Record(records.into_iter().next()),
+        ReturnShapeResolution::Records => ReadResult::Records(records),
+        ReturnShapeResolution::Pointers => ReadResult::Pointers(
+            records
+                .iter()
+                .filter_map(|record| record_pointer(record, selection.drawer_name.as_deref()))
+                .collect(),
+        ),
+        ReturnShapeResolution::Exists => ReadResult::Exists(!records.is_empty()),
+    };
+    Ok(CommandResult::Read(result))
+}
+
+fn execute_count_in_database<E>(
+    database: &RwLock<Database>,
+    filter: OperationFilter,
+    options: OperationOptions,
+    context: ExecutionContext<'_>,
+) -> Result<CommandResult>
+where
+    E: DatabaseCommandExecutor,
+{
+    let selection = OperationSelection::from_filter(filter)?;
+    if !selection.pointers.is_empty() {
+        let mut count = 0;
+        for pointer in selection.resolved_pointers()? {
+            if E::find_by_id_in_database(database, &pointer, context)?.is_some() {
+                count += 1;
+            }
+        }
+        return Ok(CommandResult::Count(count));
+    }
+    let drawer_name = selection.required_drawer("count")?;
+    E::count_in_database(
+        database,
+        &drawer_name,
+        selection.query,
+        options.query_modifiers(),
+        context,
+    )
+    .map(CommandResult::Count)
+}
+
+fn execute_delete_in_database<E>(
+    database: &RwLock<Database>,
+    filter: OperationFilter,
+    options: OperationOptions,
+    context: ExecutionContext<'_>,
+) -> Result<CommandResult>
+where
+    E: DatabaseCommandExecutor,
+{
+    let _ = options;
+    let selection = OperationSelection::from_filter(filter)?;
+    if !selection.pointers.is_empty() {
+        let mut deleted = 0;
+        for pointer in selection.resolved_pointers()? {
+            deleted += usize::from(E::delete_by_id_in_database(
+                database,
+                StorageLocator::Inline(pointer),
+                context,
+            )?);
+        }
+        return Ok(CommandResult::Delete(DeleteResult { deleted }));
+    }
+    let drawer_name = selection.required_drawer("delete-by-filter")?;
+    let Some(query) = selection.query else {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "delete requires a record pointer or a drawer query filter",
+        ));
+    };
+    E::delete_by_filter_in_database(database, &drawer_name, query, context)
+        .map(|deleted| CommandResult::Delete(DeleteResult { deleted }))
+}
+
+fn execute_compact_in_database<E>(
+    database: &RwLock<Database>,
+    request: CompactRequest,
+    context: ExecutionContext<'_>,
+) -> Result<CommandResult>
+where
+    E: DatabaseCommandExecutor,
+{
+    match request {
+        CompactRequest::Drawer { drawer_name, mode } => match mode {
+            CompactMode::Vacuum => E::vacuum_drawer_in_database(database, &drawer_name, context),
+            CompactMode::Migrate => E::migrate_drawer_in_database(database, &drawer_name, context),
         },
-        Command::BulkUpsert {
+    }
+    .map(CommandResult::Compact)
+}
+
+fn execute_alter_in_database<E>(
+    database: &RwLock<Database>,
+    request: AlterRequest,
+    context: ExecutionContext<'_>,
+) -> Result<CommandResult>
+where
+    E: DatabaseCommandExecutor,
+{
+    match request {
+        AlterRequest::SchemaRule {
             drawer_name,
-            records,
-            atomic,
-        } => E::bulk_upsert_in_database(database, &drawer_name, records, atomic, context)
-            .map(CommandResult::Pointers),
-        Command::FindAll { drawer_name } => {
-            E::find_all_in_database(database, &drawer_name, context).map(CommandResult::Records)
-        }
-        Command::FindById { pointer } => {
-            E::find_by_id_in_database(database, &pointer, context).map(CommandResult::Record)
-        }
-        Command::FindByFilter {
-            drawer_name,
-            filter,
-            modifiers,
-        } => E::find_by_filter_in_database(database, &drawer_name, filter, modifiers, context)
-            .map(CommandResult::Records),
-        Command::Count {
-            drawer_name,
-            filter,
-            modifiers,
-        } => E::count_in_database(database, &drawer_name, filter, modifiers, context)
-            .map(CommandResult::Count),
-        Command::Delete { pointer } => {
-            E::delete_by_id_in_database(database, StorageLocator::Inline(pointer), context)
-                .map(CommandResult::Deleted)
-        }
-        Command::DeleteByFilter {
-            drawer_name,
-            filter,
-        } => E::delete_by_filter_in_database(database, &drawer_name, filter, context)
-            .map(CommandResult::Count),
-        Command::ManageSchema {
             action,
             kind,
-            drawer_name,
             field_name,
             payload,
         } => E::manage_schema_in_database(
@@ -347,40 +693,9 @@ where
             &field_name,
             payload,
             context,
-        )
-        .map(CommandResult::Admin),
-        Command::Vacuum { drawer_name } => {
-            E::vacuum_drawer_in_database(database, &drawer_name, context)
-                .map(CommandResult::Vacuumed)
-        }
-        Command::Migrate { drawer_name } => {
-            E::migrate_drawer_in_database(database, &drawer_name, context)
-                .map(CommandResult::Migrated)
-        }
-        Command::Inspect { .. }
-        | Command::Check { .. }
-        | Command::Diagnose
-        | Command::ListDrawers
-        | Command::Backup { .. }
-        | Command::Restore { .. } => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Storage diagnostics and recovery commands are only available at the WardrobeEngine boundary",
-        )),
-        Command::DefineDatabase { .. }
-        | Command::DefineSchema { .. }
-        | Command::DefineDrawer { .. }
-        | Command::DefineTenantRoute { .. }
-        | Command::DropDatabase { .. }
-        | Command::DropSchema { .. }
-        | Command::DropDrawer { .. }
-        | Command::ManageUser { .. }
-        | Command::ExecuteForTenant { .. }
-        | Command::Execute { .. }
-        | Command::ExecuteInScope { .. } => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Catalog and scoped command routing is only available at the WardrobeEngine boundary",
-        )),
+        ),
     }
+    .map(CommandResult::Alter)
 }
 
 pub(crate) fn validate_command_against_registry(
@@ -412,47 +727,58 @@ pub(crate) fn validate_command_against_registry(
 
 pub(crate) fn command_drawer_name(command: &Command) -> Option<String> {
     match command {
-        Command::Upsert { drawer_name, .. }
-        | Command::BulkUpsert { drawer_name, .. }
-        | Command::FindAll { drawer_name }
-        | Command::FindByFilter { drawer_name, .. }
-        | Command::Count { drawer_name, .. }
-        | Command::DeleteByFilter { drawer_name, .. }
-        | Command::ManageSchema { drawer_name, .. }
-        | Command::Vacuum { drawer_name }
-        | Command::Migrate { drawer_name } => Some(drawer_name.clone()),
-        Command::FindById { pointer } | Command::Delete { pointer } => {
-            pointer::try_parse_pointer(pointer).map(|(drawer_name, _)| drawer_name)
-        }
+        Command::Upsert {
+            payload, filter, ..
+        } => upsert_command_drawer_name(payload, filter),
+        Command::Read { filter, .. }
+        | Command::Delete { filter, .. }
+        | Command::Inspect { filter, .. }
+        | Command::Count { filter, .. } => selection_drawer_name(filter),
+        Command::Compact(CompactRequest::Drawer { drawer_name, .. }) => Some(drawer_name.clone()),
+        Command::Alter(AlterRequest::SchemaRule { drawer_name, .. })
+        | Command::Drop(DropRequest::SchemaRule { drawer_name, .. }) => Some(drawer_name.clone()),
         Command::Execute { command, .. } | Command::ExecuteInScope { command, .. } => {
             command_drawer_name(command)
         }
-        Command::DefineDatabase { .. }
-        | Command::DefineSchema { .. }
-        | Command::DefineDrawer { .. }
-        | Command::DefineTenantRoute { .. }
-        | Command::DropDatabase { .. }
-        | Command::DropSchema { .. }
-        | Command::DropDrawer { .. }
-        | Command::ManageUser { .. }
+        Command::Create(_)
+        | Command::Drop(_)
+        | Command::Grant(_)
+        | Command::Revoke(_)
         | Command::ExecuteForTenant { .. }
-        | Command::ShowTenants
-        | Command::ShowDatabases
-        | Command::VerifyWal { .. }
-        | Command::ShowSchemas { .. }
-        | Command::ShowDrawers { .. }
-        | Command::Inspect { .. }
-        | Command::Check { .. }
-        | Command::Diagnose
-        | Command::ListDrawers
+        | Command::Status(_)
         | Command::Backup { .. }
         | Command::Restore { .. } => None,
+    }
+}
+
+fn upsert_command_drawer_name(payload: &Value, filter: &OperationFilter) -> Option<String> {
+    UpsertContext::from_filter(filter.clone())
+        .ok()
+        .and_then(|context| context.drawer_name().map(str::to_string))
+        .or_else(|| payload_pointer_drawer_name(payload))
+}
+
+fn selection_drawer_name(filter: &OperationFilter) -> Option<String> {
+    OperationSelection::from_filter(filter.clone())
+        .ok()
+        .and_then(|selection| selection.drawer_name)
+}
+
+fn payload_pointer_drawer_name(payload: &Value) -> Option<String> {
+    match payload {
+        Value::Object(object) => object
+            .get("_id")
+            .and_then(Value::as_str)
+            .and_then(|pointer| pointer::try_parse_pointer(pointer).map(|(drawer, _)| drawer)),
+        Value::Array(records) => records.iter().find_map(payload_pointer_drawer_name),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wrdb_lib::command::{PermissionRequest, ReturnShape};
     use serde_json::json;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -661,6 +987,11 @@ mod tests {
             Ok(vec!["gem".to_string()])
         }
 
+        fn cached_drawer_count(&self) -> Result<usize> {
+            self.record("cached_drawer_count");
+            Ok(1)
+        }
+
         fn backup_archive(&self, source_path: &str) -> Result<BackupArchive> {
             self.record(format!("backup:{source_path}"));
             Ok(backup_archive())
@@ -858,162 +1189,150 @@ mod tests {
         }
     }
 
+    fn read_drawer(drawer_name: &str) -> Command {
+        Command::Read {
+            filter: OperationFilter::drawer(drawer_name),
+            options: OperationOptions::default(),
+        }
+    }
+
+    fn count_drawer(drawer_name: &str) -> Command {
+        Command::Count {
+            filter: OperationFilter::drawer(drawer_name),
+            options: OperationOptions::default(),
+        }
+    }
+
     #[test]
     fn execute_command_routes_boundary_commands_and_wal_policy() {
         let engine = FakeBoundary::default();
         let archive = backup_archive();
 
         assert_eq!(
-            execute_command(&engine, Command::ShowTenants).unwrap(),
-            CommandResult::Tenants(vec!["tenant_a".to_string()])
+            execute_command(&engine, Command::Status(StatusRequest::tenants())).unwrap(),
+            CommandResult::Status(StatusResult::Tenants(vec!["tenant_a".to_string()]))
         );
         assert!(matches!(
-            execute_command(&engine, Command::ShowDatabases).unwrap(),
-            CommandResult::Databases(_)
+            execute_command(&engine, Command::Status(StatusRequest::databases())).unwrap(),
+            CommandResult::Status(StatusResult::Databases(_))
+        ));
+        assert!(matches!(
+            execute_command(&engine, Command::Status(StatusRequest::wal(Some("db")))).unwrap(),
+            CommandResult::Status(StatusResult::Wal(_))
+        ));
+        assert!(matches!(
+            execute_command(&engine, Command::Status(StatusRequest::schemas("db"))).unwrap(),
+            CommandResult::Status(StatusResult::Schemas(_))
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::VerifyWal {
-                    database_name: Some("db".to_string()),
-                }
+                Command::Status(StatusRequest::drawers("db", "public")),
             )
             .unwrap(),
-            CommandResult::WalVerification(_)
+            CommandResult::Status(StatusResult::Drawers(_))
+        ));
+        assert!(matches!(
+            execute_command(&engine, Command::Create(CreateRequest::database("db"))).unwrap(),
+            CommandResult::Create(CreateResult::StorageInventory(_))
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::ShowSchemas {
-                    database_name: "db".to_string(),
-                }
+                Command::Create(CreateRequest::schema("db", "public"))
             )
             .unwrap(),
-            CommandResult::Schemas(_)
+            CommandResult::Create(CreateResult::StorageInventory(_))
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::ShowDrawers {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                }
+                Command::Create(CreateRequest::drawer("db", "public", "gem")),
             )
             .unwrap(),
-            CommandResult::Drawers(_)
+            CommandResult::Create(CreateResult::StorageInventory(_))
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::DefineDatabase {
-                    database_name: "db".to_string(),
-                }
+                Command::Create(CreateRequest::tenant_route(
+                    "tenant",
+                    "db",
+                    "tenant/db/public",
+                )),
             )
             .unwrap(),
-            CommandResult::StorageInventory(_)
+            CommandResult::Create(CreateResult::StorageInventory(_))
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::DefineSchema {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                }
+                Command::Create(CreateRequest::user(json!({"username": "alice"}))),
             )
             .unwrap(),
-            CommandResult::StorageInventory(_)
+            CommandResult::Create(CreateResult::Admin(_))
+        ));
+        assert!(matches!(
+            execute_command(&engine, Command::Drop(DropRequest::database("db"))).unwrap(),
+            CommandResult::Drop(_)
+        ));
+        assert!(matches!(
+            execute_command(&engine, Command::Drop(DropRequest::schema("db", "public"))).unwrap(),
+            CommandResult::Drop(_)
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::DefineDrawer {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                    drawer_name: "gem".to_string(),
-                }
+                Command::Drop(DropRequest::drawer("db", "public", "gem")),
             )
             .unwrap(),
-            CommandResult::StorageInventory(_)
+            CommandResult::Drop(_)
         ));
         assert!(matches!(
-            execute_command(
-                &engine,
-                Command::DefineTenantRoute {
-                    tenant_id: "tenant".to_string(),
-                    database_name: "db".to_string(),
-                    location: "tenant/db/public".to_string(),
-                }
-            )
-            .unwrap(),
-            CommandResult::StorageInventory(_)
-        ));
-        assert!(matches!(
-            execute_command(
-                &engine,
-                Command::DropDatabase {
-                    database_name: "db".to_string(),
-                }
-            )
-            .unwrap(),
-            CommandResult::Admin(_)
-        ));
-        assert!(matches!(
-            execute_command(
-                &engine,
-                Command::DropSchema {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                }
-            )
-            .unwrap(),
-            CommandResult::Admin(_)
-        ));
-        assert!(matches!(
-            execute_command(
-                &engine,
-                Command::DropDrawer {
-                    database_name: "db".to_string(),
-                    schema_name: "public".to_string(),
-                    drawer_name: "gem".to_string(),
-                }
-            )
-            .unwrap(),
-            CommandResult::Admin(_)
+            execute_command(&engine, Command::Drop(DropRequest::user("alice"))).unwrap(),
+            CommandResult::Drop(_)
         ));
         assert!(matches!(
             execute_command(
                 &engine,
                 Command::Inspect {
-                    drawer_name: "gem".to_string(),
-                }
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
+                },
             )
             .unwrap(),
-            CommandResult::Inspection(_)
+            CommandResult::Inspect(InspectResult::Drawer(_))
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::Check {
-                    path: "db/public/gem".to_string(),
-                }
+                Command::Status(StatusRequest::path("db/public/gem"))
             )
             .unwrap(),
-            CommandResult::Check(_)
+            CommandResult::Status(StatusResult::Check(_))
         ));
         assert!(matches!(
-            execute_command(&engine, Command::Diagnose).unwrap(),
-            CommandResult::Diagnosis(_)
+            execute_command(&engine, Command::Status(StatusRequest::storage())).unwrap(),
+            CommandResult::Status(StatusResult::Storage(_))
         ));
         assert!(matches!(
-            execute_command(&engine, Command::ListDrawers).unwrap(),
-            CommandResult::DrawerNames(_)
+            execute_command(&engine, Command::Status(StatusRequest::drawer_names())).unwrap(),
+            CommandResult::Status(StatusResult::DrawerNames(_))
         ));
+        assert_eq!(
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::cached_drawer_count())
+            )
+            .unwrap(),
+            CommandResult::Status(StatusResult::CachedDrawerCount(1))
+        );
         assert!(matches!(
             execute_command(
                 &engine,
                 Command::Backup {
                     source_path: "source".to_string(),
-                }
+                },
             )
             .unwrap(),
             CommandResult::Backup(_)
@@ -1024,24 +1343,43 @@ mod tests {
                 Command::Restore {
                     destination_path: "destination".to_string(),
                     archive,
-                }
+                },
             )
             .unwrap(),
-            CommandResult::Restored(_)
+            CommandResult::Restore(_)
         ));
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::ManageUser {
-                    action: "grant_permission".to_string(),
-                    payload: json!({"username": "alice"}),
-                }
+                Command::Grant(PermissionRequest::new("alice", "db:rud")),
             )
             .unwrap(),
-            CommandResult::Admin(_)
+            CommandResult::Grant(_)
         ));
+        assert!(matches!(
+            execute_command(
+                &engine,
+                Command::Revoke(PermissionRequest::new("alice", "db:rud")),
+            )
+            .unwrap(),
+            CommandResult::Revoke(_)
+        ));
+        assert_eq!(
+            execute_command(
+                &engine,
+                Command::Alter(AlterRequest::schema_rule(
+                    "gem",
+                    "add",
+                    "index",
+                    "element",
+                    json!({}),
+                )),
+            )
+            .unwrap(),
+            CommandResult::Count(44)
+        );
 
-        assert_eq!(engine.wal_count(), 5);
+        assert_eq!(engine.wal_count(), 1);
         let calls = engine.calls();
         assert!(calls.contains(&"create_drawer:db/public/gem".to_string()));
         assert!(calls.contains(&"drop_drawer:db/public/gem".to_string()));
@@ -1059,10 +1397,8 @@ mod tests {
                     tenant_id: "tenant".to_string(),
                     database_name: "db".to_string(),
                     schema_name: "public".to_string(),
-                    command: Box::new(Command::FindAll {
-                        drawer_name: "gem".to_string(),
-                    }),
-                }
+                    command: Box::new(read_drawer("gem")),
+                },
             )
             .unwrap(),
             CommandResult::Count(11)
@@ -1072,12 +1408,8 @@ mod tests {
                 &engine,
                 Command::Execute {
                     coordinate: StorageCoordinate::new("tenant", "db", "public"),
-                    command: Box::new(Command::Count {
-                        drawer_name: "gem".to_string(),
-                        filter: None,
-                        modifiers: None,
-                    }),
-                }
+                    command: Box::new(count_drawer("gem")),
+                },
             )
             .unwrap(),
             CommandResult::Count(22)
@@ -1087,27 +1419,33 @@ mod tests {
                 &engine,
                 Command::ExecuteInScope {
                     scope: StorageScope::schema("db", "public"),
-                    command: Box::new(Command::DeleteByFilter {
-                        drawer_name: "gem".to_string(),
-                        filter: json!({}),
+                    command: Box::new(Command::Delete {
+                        filter: OperationFilter::query_in("gem", json!({})),
+                        options: OperationOptions::default(),
                     }),
-                }
+                },
             )
             .unwrap(),
             CommandResult::Count(33)
         );
         assert_eq!(
+            execute_command(&engine, read_drawer("gem")).unwrap(),
+            CommandResult::Count(44)
+        );
+        assert_eq!(
             execute_command(
                 &engine,
-                Command::FindAll {
-                    drawer_name: "gem".to_string(),
-                }
+                Command::Upsert {
+                    payload: json!({"_id": "one"}),
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
+                },
             )
             .unwrap(),
             CommandResult::Count(44)
         );
 
-        assert_eq!(engine.wal_count(), 4);
+        assert_eq!(engine.wal_count(), 1);
         assert!(
             engine
                 .calls()
@@ -1124,81 +1462,88 @@ mod tests {
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
                 Command::Upsert {
-                    drawer_name: "gem".to_string(),
                     payload: json!({"_id": "one"}),
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
                 },
                 Some("tenant/db/public"),
             )
             .unwrap(),
-            CommandResult::Pointer("@gem:single-tenant/db/public".to_string())
+            CommandResult::Upsert(UpsertResult::Pointers(vec![
+                "@gem:single-tenant/db/public".to_string(),
+            ]))
         );
         assert!(matches!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
                 Command::Upsert {
-                    drawer_name: "gem".to_string(),
                     payload: json!([{"_id": "one"}, {"_id": "two"}]),
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::default(),
                 },
                 None,
             )
             .unwrap(),
-            CommandResult::Pointers(pointers) if pointers.len() == 2
+            CommandResult::Upsert(UpsertResult::Pointers(pointers)) if pointers.len() == 2
         ));
         assert!(matches!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::BulkUpsert {
-                    drawer_name: "gem".to_string(),
-                    records: vec![json!({"_id": "one"})],
-                    atomic: false,
+                Command::Upsert {
+                    payload: json!([{"_id": "one"}]),
+                    filter: OperationFilter::drawer("gem"),
+                    options: OperationOptions::new().atomic(false),
                 },
                 None,
             )
             .unwrap(),
-            CommandResult::Pointers(pointers) if pointers[0].contains("false")
+            CommandResult::Upsert(UpsertResult::Pointers(pointers)) if pointers[0].contains("false")
         ));
         assert!(matches!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::FindAll {
-                    drawer_name: "gem".to_string(),
-                },
+                read_drawer("gem"),
                 Some("tenant/db/public"),
             )
             .unwrap(),
-            CommandResult::Records(records) if records[0]["scope"] == "tenant/db/public"
+            CommandResult::Read(ReadResult::Records(records)) if records[0]["scope"] == "tenant/db/public"
         ));
         assert!(matches!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::FindById {
-                    pointer: "@gem:one".to_string(),
+                Command::Read {
+                    filter: OperationFilter::pointer("@gem:one"),
+                    options: OperationOptions::new().return_shape(ReturnShape::Record),
                 },
                 None,
             )
             .unwrap(),
-            CommandResult::Record(Some(record)) if record["pointer"] == "@gem:one"
+            CommandResult::Read(ReadResult::Record(Some(record))) if record["pointer"] == "@gem:one"
         ));
         assert!(matches!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::FindByFilter {
-                    drawer_name: "gem".to_string(),
-                    filter: json!({"element": "Fire"}),
-                    modifiers: Some(QueryModifiers::default()),
+                Command::Read {
+                    filter: OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                    options: OperationOptions::from(QueryModifiers {
+                        limit: Some(1),
+                        ..QueryModifiers::default()
+                    }),
                 },
                 None,
             )
             .unwrap(),
-            CommandResult::Records(records) if records[0]["has_modifiers"] == true
+            CommandResult::Read(ReadResult::Records(records)) if records[0]["has_modifiers"] == true
         ));
         assert_eq!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
                 Command::Count {
-                    drawer_name: "gem".to_string(),
-                    filter: Some(json!({})),
-                    modifiers: Some(QueryModifiers::default()),
+                    filter: OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                    options: OperationOptions::from(QueryModifiers {
+                        limit: Some(1),
+                        ..QueryModifiers::default()
+                    }),
                 },
                 None,
             )
@@ -1209,61 +1554,61 @@ mod tests {
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
                 Command::Delete {
-                    pointer: "@gem:one".to_string(),
+                    filter: OperationFilter::pointer("@gem:one"),
+                    options: OperationOptions::default(),
                 },
                 None,
             )
             .unwrap(),
-            CommandResult::Deleted(true)
+            CommandResult::Delete(DeleteResult { deleted: 1 })
         );
         assert_eq!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::DeleteByFilter {
-                    drawer_name: "gem".to_string(),
-                    filter: json!({}),
+                Command::Delete {
+                    filter: OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                    options: OperationOptions::default(),
                 },
                 None,
             )
             .unwrap(),
-            CommandResult::Count(3)
+            CommandResult::Delete(DeleteResult { deleted: 3 })
         );
         assert!(matches!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::ManageSchema {
-                    action: "add".to_string(),
-                    kind: "index".to_string(),
-                    drawer_name: "gem".to_string(),
-                    field_name: "element".to_string(),
-                    payload: json!({"type": "hash"}),
-                },
+                Command::Alter(AlterRequest::schema_rule(
+                    "gem",
+                    "add",
+                    "index",
+                    "element",
+                    json!({"type": "hash"}),
+                )),
                 None,
             )
             .unwrap(),
-            CommandResult::Admin(payload) if payload["kind"] == "index"
+            CommandResult::Alter(payload) if payload["kind"] == "index"
         ));
         assert_eq!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::Vacuum {
-                    drawer_name: "gem".to_string(),
-                },
+                Command::Compact(CompactRequest::drawer("gem")),
                 None,
             )
             .unwrap(),
-            CommandResult::Vacuumed(vacuum_report())
+            CommandResult::Compact(vacuum_report())
         );
         assert_eq!(
             execute_in_database::<FakeDatabaseExecutor>(
                 &database,
-                Command::Migrate {
-                    drawer_name: "gem".to_string(),
-                },
+                Command::Compact(CompactRequest::drawer_with_mode(
+                    "gem",
+                    CompactMode::Migrate,
+                )),
                 None,
             )
             .unwrap(),
-            CommandResult::Migrated(vacuum_report())
+            CommandResult::Compact(vacuum_report())
         );
 
         let _ = std::fs::remove_dir_all(path);
@@ -1275,26 +1620,10 @@ mod tests {
         let database = RwLock::new(Database::initialize(&path).expect("database should init"));
         let archive = backup_archive();
         let boundary_only_commands = vec![
-            Command::ShowTenants,
-            Command::ShowDatabases,
-            Command::VerifyWal {
-                database_name: None,
-            },
-            Command::ShowSchemas {
-                database_name: "db".to_string(),
-            },
-            Command::ShowDrawers {
-                database_name: "db".to_string(),
-                schema_name: "public".to_string(),
-            },
             Command::Inspect {
-                drawer_name: "gem".to_string(),
+                filter: OperationFilter::drawer("gem"),
+                options: OperationOptions::default(),
             },
-            Command::Check {
-                path: "db/public/gem".to_string(),
-            },
-            Command::Diagnose,
-            Command::ListDrawers,
             Command::Backup {
                 source_path: "source".to_string(),
             },
@@ -1302,58 +1631,24 @@ mod tests {
                 destination_path: "destination".to_string(),
                 archive,
             },
-            Command::DefineDatabase {
-                database_name: "db".to_string(),
-            },
-            Command::DefineSchema {
-                database_name: "db".to_string(),
-                schema_name: "public".to_string(),
-            },
-            Command::DefineDrawer {
-                database_name: "db".to_string(),
-                schema_name: "public".to_string(),
-                drawer_name: "gem".to_string(),
-            },
-            Command::DefineTenantRoute {
-                tenant_id: "tenant".to_string(),
-                database_name: "db".to_string(),
-                location: "tenant/db/public".to_string(),
-            },
-            Command::DropDatabase {
-                database_name: "db".to_string(),
-            },
-            Command::DropSchema {
-                database_name: "db".to_string(),
-                schema_name: "public".to_string(),
-            },
-            Command::DropDrawer {
-                database_name: "db".to_string(),
-                schema_name: "public".to_string(),
-                drawer_name: "gem".to_string(),
-            },
-            Command::ManageUser {
-                action: "grant_permission".to_string(),
-                payload: json!({"username": "alice"}),
-            },
+            Command::Create(CreateRequest::database("db")),
+            Command::Drop(DropRequest::database("db")),
+            Command::Grant(PermissionRequest::new("alice", "db:r")),
+            Command::Revoke(PermissionRequest::new("alice", "db:r")),
+            Command::Status(StatusRequest::databases()),
             Command::ExecuteForTenant {
                 tenant_id: "tenant".to_string(),
                 database_name: "db".to_string(),
                 schema_name: "public".to_string(),
-                command: Box::new(Command::FindAll {
-                    drawer_name: "gem".to_string(),
-                }),
+                command: Box::new(read_drawer("gem")),
             },
             Command::Execute {
                 coordinate: StorageCoordinate::new("tenant", "db", "public"),
-                command: Box::new(Command::FindAll {
-                    drawer_name: "gem".to_string(),
-                }),
+                command: Box::new(read_drawer("gem")),
             },
             Command::ExecuteInScope {
                 scope: StorageScope::database("db"),
-                command: Box::new(Command::FindAll {
-                    drawer_name: "gem".to_string(),
-                }),
+                command: Box::new(read_drawer("gem")),
             },
         ];
 
@@ -1369,30 +1664,28 @@ mod tests {
     #[test]
     fn drawer_name_resolution_and_registry_validation_cover_nested_commands() {
         assert_eq!(
-            command_drawer_name(&Command::FindById {
-                pointer: "@gem:one".to_string(),
+            command_drawer_name(&Command::Read {
+                filter: OperationFilter::pointer("@gem:one"),
+                options: OperationOptions::default(),
             }),
             Some("gem".to_string())
         );
         assert_eq!(
             command_drawer_name(&Command::Delete {
-                pointer: "not-a-pointer".to_string(),
+                filter: OperationFilter::pointer("not-a-pointer"),
+                options: OperationOptions::default(),
             }),
             None
         );
         assert_eq!(
             command_drawer_name(&Command::ExecuteInScope {
                 scope: StorageScope::drawer("namespace"),
-                command: Box::new(Command::Vacuum {
-                    drawer_name: "nested".to_string(),
-                }),
+                command: Box::new(Command::Compact(CompactRequest::drawer("nested"))),
             }),
             Some("nested".to_string())
         );
         assert_eq!(
-            command_drawer_name(&Command::DefineDatabase {
-                database_name: "db".to_string(),
-            }),
+            command_drawer_name(&Command::Create(CreateRequest::database("db"))),
             None
         );
 
@@ -1401,33 +1694,22 @@ mod tests {
             &empty_registry,
             "db",
             "public",
-            &Command::FindAll {
-                drawer_name: "anything".to_string(),
-            },
+            &read_drawer("anything"),
         )
         .expect("empty registry should not restrict commands");
 
         let mut registry = CatalogRegistry::new();
         registry.register_drawer("db", "public", "gem", "db/public");
+        validate_command_against_registry(&registry, "db", "public", &read_drawer("gem"))
+            .expect("registered drawer should pass");
+        validate_command_against_registry(&registry, "db", "public", &read_drawer("missing"))
+            .expect_err("unregistered drawer should fail");
         validate_command_against_registry(
             &registry,
             "db",
             "public",
-            &Command::FindAll {
-                drawer_name: "gem".to_string(),
-            },
+            &Command::Status(StatusRequest::tenants()),
         )
-        .expect("registered drawer should pass");
-        validate_command_against_registry(
-            &registry,
-            "db",
-            "public",
-            &Command::FindAll {
-                drawer_name: "missing".to_string(),
-            },
-        )
-        .expect_err("unregistered drawer should fail");
-        validate_command_against_registry(&registry, "db", "public", &Command::ShowTenants)
-            .expect("commands without drawer names should pass");
+        .expect("commands without drawer names should pass");
     }
 }

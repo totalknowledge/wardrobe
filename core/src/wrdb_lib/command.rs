@@ -860,65 +860,33 @@ pub enum StatusResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Command {
-    ShowTenants,
-    ShowDatabases,
-    VerifyWal {
-        database_name: Option<String>,
-    },
-    ShowSchemas {
-        database_name: String,
-    },
-    ShowDrawers {
-        database_name: String,
-        schema_name: String,
-    },
     Upsert {
-        drawer_name: String,
         payload: Value,
+        filter: OperationFilter,
+        options: OperationOptions,
     },
-    BulkUpsert {
-        drawer_name: String,
-        records: Vec<Value>,
-        atomic: bool,
-    },
-    FindAll {
-        drawer_name: String,
-    },
-    FindById {
-        pointer: String,
-    },
-    FindByFilter {
-        drawer_name: String,
-        filter: Value,
-        modifiers: Option<QueryModifiers>,
-    },
-    Count {
-        drawer_name: String,
-        filter: Option<Value>,
-        modifiers: Option<QueryModifiers>,
+    Read {
+        filter: OperationFilter,
+        options: OperationOptions,
     },
     Delete {
-        pointer: String,
-    },
-    DeleteByFilter {
-        drawer_name: String,
-        filter: Value,
-    },
-    Vacuum {
-        drawer_name: String,
-    },
-    Migrate {
-        drawer_name: String,
+        filter: OperationFilter,
+        options: OperationOptions,
     },
     Inspect {
-        drawer_name: String,
+        filter: OperationFilter,
+        options: OperationOptions,
     },
-    Check {
-        path: String,
+    Count {
+        filter: OperationFilter,
+        options: OperationOptions,
     },
-    Diagnose,
-    ListDrawers,
+    Compact(CompactRequest),
+    Create(CreateRequest),
+    Alter(AlterRequest),
+    Drop(DropRequest),
     Backup {
         source_path: String,
     },
@@ -926,46 +894,9 @@ pub enum Command {
         destination_path: String,
         archive: BackupArchive,
     },
-    DefineDatabase {
-        database_name: String,
-    },
-    DefineSchema {
-        database_name: String,
-        schema_name: String,
-    },
-    DefineDrawer {
-        database_name: String,
-        schema_name: String,
-        drawer_name: String,
-    },
-    DropDatabase {
-        database_name: String,
-    },
-    DropSchema {
-        database_name: String,
-        schema_name: String,
-    },
-    DropDrawer {
-        database_name: String,
-        schema_name: String,
-        drawer_name: String,
-    },
-    DefineTenantRoute {
-        tenant_id: String,
-        database_name: String,
-        location: String,
-    },
-    ManageSchema {
-        action: String,
-        kind: String,
-        drawer_name: String,
-        field_name: String,
-        payload: Value,
-    },
-    ManageUser {
-        action: String,
-        payload: Value,
-    },
+    Grant(PermissionRequest),
+    Revoke(PermissionRequest),
+    Status(StatusRequest),
     ExecuteForTenant {
         tenant_id: String,
         database_name: String,
@@ -983,28 +914,22 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandResult {
-    StorageInventory(StorageInventory),
-    Tenants(Vec<String>),
-    Databases(Vec<StorageInventory>),
-    WalVerification(WalVerification),
-    Schemas(Vec<String>),
-    Drawers(Vec<StorageInventory>),
-    Pointer(String),
-    Pointers(Vec<String>),
-    Records(Vec<Value>),
-    Record(Option<Value>),
+    Upsert(UpsertResult),
+    Read(ReadResult),
+    Delete(DeleteResult),
+    Inspect(InspectResult),
     Count(usize),
-    Deleted(bool),
-    Vacuumed(VacuumReport),
-    Migrated(VacuumReport),
-    Inspection(DrawerInspectionMetrics),
-    Check(CheckReport),
-    Diagnosis(StorageDiagnosis),
-    DrawerNames(Vec<String>),
+    Compact(VacuumReport),
+    Create(CreateResult),
+    Alter(Value),
+    Drop(Value),
     Backup(BackupArchive),
-    Restored(RestoreReport),
-    Admin(Value),
+    Restore(RestoreReport),
+    Grant(Value),
+    Revoke(Value),
+    Status(StatusResult),
 }
 
 #[cfg(test)]

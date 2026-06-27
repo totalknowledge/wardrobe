@@ -78,7 +78,7 @@ The benchmark phases are:
 - Index Mutation: create, drop, and rebuild the book ISBN index.
 - Complex Traversal: query books where author and editor criteria overlap using each engine's server-side traversal behavior, without benchmark-side N+1 follow-up fetches.
 - Targeted Purge: delete books matching a purge bucket filter using one server-side filter-delete command per target phase sample.
-- Compaction: run the target's clean/vacuum/compact directive.
+- Compaction: run the target's compact directive or closest native maintenance equivalent.
 
 Neo4j semantic notes:
 

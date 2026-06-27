@@ -98,10 +98,10 @@ Connection strings for the network daemon use the `wardrobe://host:port` shape:
 
 The server supports the same command surface as the embedded engine, including:
 
-- ordinary CRUD operations
+- canonical data operations: read, upsert, delete, inspect, and count
 - filtering and counting
 - scoped execution through tenant/database/schema routing
-- maintenance commands such as compaction and migration
+- maintenance commands such as compact, backup, and restore
 - status commands such as tenants, wardrobes, bays, and drawers
 
 If your application needs multi-tenant routing, build those requests through the core command types and route them through the client or server protocol.
@@ -115,6 +115,8 @@ The daemon speaks Wardrobe's framed binary protocol. At a high level:
 - the server returns a framed `CommandResult`
 
 Most users should not work with raw frames directly unless they are writing a custom client or language binding. The recommended path is to use `WardrobeClient`.
+
+Wardrobe is still pre-stable, so the protocol intentionally has no compatibility aliases for removed command names. Remote clients should serialize only the canonical `Command` variants used by the embedded engine.
 
 ## CLI And Server
 

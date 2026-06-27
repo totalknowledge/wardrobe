@@ -1,8 +1,18 @@
 # Wardrobe
 
-Wardrobe is a Rust document database that can run embedded or behind a server without forcing application code to change the API it calls. `WardrobeEngine` is the direct embedded engine. `WardrobeClient` is the deployment-neutral facade that selects embedded, TCP, or Unix socket transport from a connection string.
+Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
 
-Wardrobe stores JSON-like records in flat files with file-backed indexes, relationship hydration, schema and rule metadata, scoped tenant routing, write-ahead recovery, vacuum compaction, inspection tooling, and archive-based backup and restore workflows.
+It combines the flexibility of JSON documents with built-in referential integrity, relationship traversal, automatic hydration, cascading operations, and schema validation without requiring separate graph storage or complex object-relational mapping.
+
+Written in Rust, Wardrobe can run directly inside your application as an embedded database or as a standalone server while exposing the same API in both deployment models. Applications can move from embedded development to client/server deployment without rewriting their data access layer.
+
+Unlike many document databases that treat references as ordinary strings, Wardrobe understands relationships between documents. References can participate in integrity validation, automatic object hydration, virtual relationships, cascading updates and deletes, and efficient traversal while remaining simple fields inside your documents.
+
+Documents are organized hierarchically into Wardrobes, Bays, Drawers, and Documents, providing an intuitive logical structure that maps directly onto the on-disk storage layout. This transparent organization makes applications easier to understand, navigate, back up, and administer than systems built around opaque storage engines.
+
+Under the hood, Wardrobe stores BSON-encoded documents in flat files backed by persistent indexes, write-ahead logging, crash recovery, archive-based backup and restore, online compaction, and bounded in-memory caching. The result is a lightweight storage engine that requires no external services while providing capabilities typically associated with much larger database systems.
+
+Whether you're building desktop software, embedded systems, developer tools, games, SaaS platforms, or self-hosted services, Wardrobe provides a deployment-neutral database that scales from a single executable to a networked server without changing how your application interacts with its data.
 
 ## Workspace
 
@@ -155,7 +165,7 @@ fn query(engine: &WardrobeEngine) -> std::io::Result<()> {
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{Command, StorageCoordinate, WardrobeEngine};
+use wardrobe_core::{Command, OperationFilter, OperationOptions, StorageCoordinate, WardrobeEngine};
 
 fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
     let scope = StorageCoordinate::new("tenant_a", "production", "public");
@@ -163,11 +173,12 @@ fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
     engine.execute(
         scope,
         Command::Upsert {
-            drawer_name: "account".to_string(),
             payload: json!({
                 "_id": "@account:lnk_acme",
                 "name": "Acme Manufacturing"
             }),
+            filter: OperationFilter::drawer("account"),
+            options: OperationOptions::default(),
         },
     )?;
 
@@ -255,7 +266,7 @@ Compatibility aliases are intentionally not provided for the canonical CLI vocab
 - Relationship constraints, delete rules, cascade-delete rules, and drawer schema metadata
 - Scoped routing across tenant, database, schema, and drawer boundaries
 - Write-ahead log verification and recovery for incomplete operations
-- Explicit drawer vacuuming and migration workflows
+- Compact maintenance workflows for drawer storage reclamation and migration
 - Structural inspection and sanity checking through `inspect` and `status` surfaces
 - Archive-based backup and restore at wardrobe, bay, or drawer scope
 - Remote access-control administration persisted in `_wardrobe_access_control.json`

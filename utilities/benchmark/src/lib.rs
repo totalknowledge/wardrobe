@@ -18,8 +18,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use wardrobe_core::{
-    Command, CommandResult, ConnectionTarget, DurabilityPolicy, ProtocolFrame, ProtocolOpcode,
-    StorageDiagnosis, StorageInventory, StorageScope, WardrobeEngine,
+    AlterRequest, Command, CommandResult, CompactRequest, ConnectionTarget, CreateRequest,
+    DurabilityPolicy, OperationFilter, OperationOptions, ProtocolFrame, ProtocolOpcode, ReadResult,
+    StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageScope, UpsertResult,
+    WardrobeEngine,
 };
 
 const DEFAULT_WARDROBE_DATABASE_PREFIX: &str = "wardrobe_benchmark";
@@ -1153,7 +1155,7 @@ impl WardrobeStorageSnapshot {
             }
             if scoped_root_drawer_count != self.drawers.len() {
                 lines.push(format!(
-                    "Benchmark scoped ShowDrawers returned {} drawers; root scan found {} matching paths",
+                    "Benchmark scoped status(drawers) returned {} drawers; root scan found {} matching paths",
                     self.drawers.len(),
                     scoped_root_drawer_count
                 ));
@@ -1266,12 +1268,14 @@ impl WardrobeTarget {
 
     fn count_book_relationship_matches(&mut self, entity_reference: &str) -> io::Result<usize> {
         expect_count(self.execute_scoped(Command::Count {
-            drawer_name: BOOK_DRAWER.to_string(),
-            filter: Some(json!({
-                "author_id": entity_reference,
-                "editor_id": entity_reference,
-            })),
-            modifiers: None,
+            filter: OperationFilter::query_in(
+                BOOK_DRAWER,
+                json!({
+                    "author_id": entity_reference,
+                    "editor_id": entity_reference,
+                }),
+            ),
+            options: OperationOptions::default(),
         })?)
     }
 
@@ -1289,8 +1293,8 @@ impl WardrobeTarget {
 
     fn capture_storage_snapshot(&mut self) -> io::Result<WardrobeStorageSnapshot> {
         let drawers = self.show_benchmark_drawers()?;
-        let diagnosis = match self.execute(Command::Diagnose) {
-            Ok(CommandResult::Diagnosis(diagnosis)) => Some(diagnosis),
+        let diagnosis = match self.execute(Command::Status(StatusRequest::storage())) {
+            Ok(CommandResult::Status(StatusResult::Storage(diagnosis))) => Some(diagnosis),
             Ok(_) | Err(_) => None,
         };
         let root_wal_entries = self.wal_entry_count(None).ok().flatten();
@@ -1311,11 +1315,11 @@ impl WardrobeTarget {
     }
 
     fn show_benchmark_drawers(&mut self) -> io::Result<Vec<StorageInventory>> {
-        match self.execute(Command::ShowDrawers {
-            database_name: self.namespace.database.clone(),
-            schema_name: self.namespace.schema.clone(),
-        })? {
-            CommandResult::Drawers(drawers) => Ok(drawers),
+        match self.execute(Command::Status(StatusRequest::drawers(
+            self.namespace.database.clone(),
+            self.namespace.schema.clone(),
+        )))? {
+            CommandResult::Status(StatusResult::Drawers(drawers)) => Ok(drawers),
             other => Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("Expected Wardrobe drawer inventory, got {other:?}"),
@@ -1324,10 +1328,10 @@ impl WardrobeTarget {
     }
 
     fn wal_entry_count(&mut self, database_name: Option<&str>) -> io::Result<Option<usize>> {
-        match self.execute(Command::VerifyWal {
-            database_name: database_name.map(str::to_string),
-        })? {
-            CommandResult::WalVerification(report) => Ok(Some(report.entry_count)),
+        match self.execute(Command::Status(StatusRequest::wal(
+            database_name.map(str::to_string),
+        )))? {
+            CommandResult::Status(StatusResult::Wal(report)) => Ok(Some(report.entry_count)),
             _ => Ok(None),
         }
     }
@@ -1350,25 +1354,25 @@ impl BenchmarkTarget for WardrobeTarget {
             self.name(),
             self.namespace.database
         ));
-        expect_inventory(self.execute(Command::DefineDatabase {
-            database_name: self.namespace.database.clone(),
-        })?)?;
+        expect_inventory(self.execute(Command::Create(CreateRequest::database(
+            self.namespace.database.clone(),
+        )))?)?;
         progress.log(format!(
             "{}: creating schema '{}'",
             self.name(),
             self.namespace.schema
         ));
-        expect_inventory(self.execute(Command::DefineSchema {
-            database_name: self.namespace.database.clone(),
-            schema_name: self.namespace.schema.clone(),
-        })?)?;
+        expect_inventory(self.execute(Command::Create(CreateRequest::schema(
+            self.namespace.database.clone(),
+            self.namespace.schema.clone(),
+        )))?)?;
         for drawer in [ENTITY_DRAWER, BOOK_DRAWER] {
             progress.log(format!("{}: creating drawer '{}'", self.name(), drawer));
-            expect_inventory(self.execute(Command::DefineDrawer {
-                database_name: self.namespace.database.clone(),
-                schema_name: self.namespace.schema.clone(),
-                drawer_name: drawer.to_string(),
-            })?)?;
+            expect_inventory(self.execute(Command::Create(CreateRequest::drawer(
+                self.namespace.database.clone(),
+                self.namespace.schema.clone(),
+                drawer,
+            )))?)?;
         }
         for field_name in ["author_id", "editor_id", "purge_bucket"] {
             progress.log(format!(
@@ -1376,13 +1380,15 @@ impl BenchmarkTarget for WardrobeTarget {
                 self.name(),
                 field_name
             ));
-            expect_admin(self.execute_scoped(Command::ManageSchema {
-                action: "add".to_string(),
-                kind: "index".to_string(),
-                drawer_name: BOOK_DRAWER.to_string(),
-                field_name: field_name.to_string(),
-                payload: json!({ "kind": "index" }),
-            })?)?;
+            expect_admin(
+                self.execute_scoped(Command::Alter(AlterRequest::schema_rule(
+                    BOOK_DRAWER,
+                    "add",
+                    "index",
+                    field_name,
+                    json!({ "kind": "index" }),
+                )))?,
+            )?;
         }
         self.flush()
     }
@@ -1398,10 +1404,10 @@ impl BenchmarkTarget for WardrobeTarget {
                 .map(|index| profile.entity_payload(index))
                 .collect::<Vec<_>>();
             recorder.measure((end - start) as u64, || {
-                expect_pointers(self.execute_scoped(Command::BulkUpsert {
-                    drawer_name: ENTITY_DRAWER.to_string(),
-                    records,
-                    atomic: true,
+                expect_pointers(self.execute_scoped(Command::Upsert {
+                    payload: Value::Array(records),
+                    filter: OperationFilter::drawer(ENTITY_DRAWER),
+                    options: OperationOptions::new().atomic(true),
                 })?)
             })?;
             report_record_progress(
@@ -1416,10 +1422,10 @@ impl BenchmarkTarget for WardrobeTarget {
                 .map(|index| profile.book_payload(index))
                 .collect::<Vec<_>>();
             recorder.measure((end - start) as u64, || {
-                expect_pointers(self.execute_scoped(Command::BulkUpsert {
-                    drawer_name: BOOK_DRAWER.to_string(),
-                    records,
-                    atomic: true,
+                expect_pointers(self.execute_scoped(Command::Upsert {
+                    payload: Value::Array(records),
+                    filter: OperationFilter::drawer(BOOK_DRAWER),
+                    options: OperationOptions::new().atomic(true),
                 })?)
             })?;
             report_record_progress(
@@ -1450,13 +1456,15 @@ impl BenchmarkTarget for WardrobeTarget {
                 kind
             ));
             recorder.measure(1, || {
-                expect_admin(self.execute_scoped(Command::ManageSchema {
-                    action: action.to_string(),
-                    kind: kind.to_string(),
-                    drawer_name: BOOK_DRAWER.to_string(),
-                    field_name: "isbn".to_string(),
-                    payload: json!({ "kind": kind }),
-                })?)
+                expect_admin(
+                    self.execute_scoped(Command::Alter(AlterRequest::schema_rule(
+                        BOOK_DRAWER,
+                        action,
+                        kind,
+                        "isbn",
+                        json!({ "kind": kind }),
+                    )))?,
+                )
             })?;
         }
         Ok(3)
@@ -1487,13 +1495,15 @@ impl BenchmarkTarget for WardrobeTarget {
                 entity_id
             };
             recorder.measure(1, || {
-                expect_records(self.execute_scoped(Command::FindByFilter {
-                    drawer_name: BOOK_DRAWER.to_string(),
-                    filter: json!({
-                        "author_id": entity_reference,
-                        "editor_id": entity_reference,
-                    }),
-                    modifiers: None,
+                expect_records(self.execute_scoped(Command::Read {
+                    filter: OperationFilter::query_in(
+                        BOOK_DRAWER,
+                        json!({
+                            "author_id": entity_reference,
+                            "editor_id": entity_reference,
+                        }),
+                    ),
+                    options: OperationOptions::default(),
                 })?)?;
                 Ok(())
             })?;
@@ -1520,9 +1530,9 @@ impl BenchmarkTarget for WardrobeTarget {
             operations
         ));
         recorder.measure(operations.max(1), || {
-            expect_count(self.execute_scoped(Command::DeleteByFilter {
-                drawer_name: BOOK_DRAWER.to_string(),
-                filter: json!({ "purge_bucket": 0 }),
+            expect_delete(self.execute_scoped(Command::Delete {
+                filter: OperationFilter::query_in(BOOK_DRAWER, json!({ "purge_bucket": 0 })),
+                options: OperationOptions::default(),
             })?)
             .map(|_| ())
         })?;
@@ -1537,9 +1547,9 @@ impl BenchmarkTarget for WardrobeTarget {
     ) -> io::Result<u64> {
         progress.log(format!("{}: vacuuming book drawer", self.name()));
         recorder.measure(1, || {
-            expect_vacuumed(self.execute_scoped(Command::Vacuum {
-                drawer_name: BOOK_DRAWER.to_string(),
-            })?)
+            expect_vacuumed(
+                self.execute_scoped(Command::Compact(CompactRequest::drawer(BOOK_DRAWER)))?,
+            )
         })?;
         Ok(1)
     }
@@ -1547,7 +1557,9 @@ impl BenchmarkTarget for WardrobeTarget {
     fn flush(&mut self) -> io::Result<()> {
         if let Some(root) = &self.storage_root {
             fsync_tree(root)?;
-        } else if let Ok(CommandResult::Diagnosis(diagnosis)) = self.execute(Command::Diagnose) {
+        } else if let Ok(CommandResult::Status(StatusResult::Storage(diagnosis))) =
+            self.execute(Command::Status(StatusRequest::storage()))
+        {
             let path = PathBuf::from(diagnosis.storage_directory);
             if path.exists() {
                 fsync_tree(&path)?;
@@ -2991,21 +3003,21 @@ fn weighted_percentile(samples: &[LatencySample], percentile: f64) -> f64 {
 
 fn expect_inventory(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::StorageInventory(_) => Ok(()),
+        CommandResult::Create(wardrobe_core::CreateResult::StorageInventory(_)) => Ok(()),
         other => unexpected_wardrobe_result("storage inventory", other),
     }
 }
 
 fn expect_pointers(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::Pointers(_) => Ok(()),
+        CommandResult::Upsert(UpsertResult::Pointers(_)) => Ok(()),
         other => unexpected_wardrobe_result("pointers", other),
     }
 }
 
 fn expect_records(result: CommandResult) -> io::Result<Vec<Value>> {
     match result {
-        CommandResult::Records(records) => Ok(records),
+        CommandResult::Read(ReadResult::Records(records)) => Ok(records),
         other => unexpected_wardrobe_result("records", other),
     }
 }
@@ -3017,16 +3029,27 @@ fn expect_count(result: CommandResult) -> io::Result<usize> {
     }
 }
 
+fn expect_delete(result: CommandResult) -> io::Result<usize> {
+    match result {
+        CommandResult::Delete(result) => Ok(result.deleted),
+        other => unexpected_wardrobe_result("delete result", other),
+    }
+}
+
 fn expect_vacuumed(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::Vacuumed(_) => Ok(()),
+        CommandResult::Compact(_) => Ok(()),
         other => unexpected_wardrobe_result("vacuum report", other),
     }
 }
 
 fn expect_admin(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::Admin(_) => Ok(()),
+        CommandResult::Create(wardrobe_core::CreateResult::Admin(_))
+        | CommandResult::Alter(_)
+        | CommandResult::Drop(_)
+        | CommandResult::Grant(_)
+        | CommandResult::Revoke(_) => Ok(()),
         other => unexpected_wardrobe_result("admin response", other),
     }
 }
@@ -3459,6 +3482,22 @@ mod tests {
             command.as_ref()
         } else {
             panic!("expected ExecuteInScope command")
+        }
+    }
+
+    fn filter_contains_query(filter: &OperationFilter) -> bool {
+        match filter {
+            OperationFilter::Query(_) => true,
+            OperationFilter::Many(filters) => filters.iter().any(filter_contains_query),
+            _ => false,
+        }
+    }
+
+    fn filter_contains_pointer(filter: &OperationFilter) -> bool {
+        match filter {
+            OperationFilter::Pointer(_) => true,
+            OperationFilter::Many(filters) => filters.iter().any(filter_contains_pointer),
+            _ => false,
         }
     }
 
@@ -4224,9 +4263,11 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             ErrorKind::InvalidData
         );
         assert_eq!(
-            expect_pointers(CommandResult::Deleted(false))
-                .expect_err("pointers mismatch")
-                .kind(),
+            expect_pointers(CommandResult::Delete(wardrobe_core::DeleteResult {
+                deleted: 0,
+            }))
+            .expect_err("pointers mismatch")
+            .kind(),
             ErrorKind::InvalidData
         );
         assert_eq!(
@@ -4236,7 +4277,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             ErrorKind::InvalidData
         );
         assert_eq!(
-            expect_count(CommandResult::Records(Vec::new()))
+            expect_count(CommandResult::Read(ReadResult::Records(Vec::new())))
                 .expect_err("count mismatch")
                 .kind(),
             ErrorKind::InvalidData
@@ -4497,7 +4538,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let state = Rc::new(RefCell::new(MockRunnerState {
             commands: Vec::new(),
             responses: VecDeque::from(vec![
-                CommandResult::Drawers(vec![
+                CommandResult::Status(StatusResult::Drawers(vec![
                     StorageInventory {
                         name: ENTITY_DRAWER.to_string(),
                         record_count: 3,
@@ -4510,8 +4551,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                         disk_size_bytes: 700,
                         register_file_count: 3,
                     },
-                ]),
-                CommandResult::Diagnosis(StorageDiagnosis {
+                ])),
+                CommandResult::Status(StatusResult::Storage(StorageDiagnosis {
                     storage_directory: "/data/wardrobe".to_string(),
                     storage_bytes: 12_345,
                     data_bytes: 8_000,
@@ -4528,17 +4569,17 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                         "wardrobe_benchmark_test/library/entity".to_string(),
                         "wardrobe_benchmark_test/library/book".to_string(),
                     ],
-                }),
-                CommandResult::WalVerification(wardrobe_core::WalVerification {
+                })),
+                CommandResult::Status(StatusResult::Wal(wardrobe_core::WalVerification {
                     path: "/data/wardrobe/.wal".to_string(),
                     entry_count: 4,
                     last_sequence: Some(4),
-                }),
-                CommandResult::WalVerification(wardrobe_core::WalVerification {
+                })),
+                CommandResult::Status(StatusResult::Wal(wardrobe_core::WalVerification {
                     path: "/data/wardrobe/wardrobe/.wal".to_string(),
                     entry_count: 3,
                     last_sequence: Some(3),
-                }),
+                })),
             ]),
         }));
 
@@ -4576,9 +4617,12 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         );
         assert!(matches!(
             state.borrow().commands[0],
-            Command::ShowDrawers { .. }
+            Command::Status(StatusRequest::Drawers { .. })
         ));
-        assert!(matches!(state.borrow().commands[1], Command::Diagnose));
+        assert!(matches!(
+            state.borrow().commands[1],
+            Command::Status(StatusRequest::Storage)
+        ));
     }
 
     #[test]
@@ -4587,16 +4631,16 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             commands: Vec::new(),
             responses: VecDeque::from(vec![
                 CommandResult::Count(1),
-                CommandResult::Records(vec![json!({
+                CommandResult::Read(ReadResult::Records(vec![json!({
                     "_id": "book_00000000",
                     "author_id": "entity_00000000",
                     "editor_id": "entity_00000000",
-                })]),
-                CommandResult::Records(vec![json!({
+                })])),
+                CommandResult::Read(ReadResult::Records(vec![json!({
                     "_id": "book_00000001",
                     "author_id": "entity_00000000",
                     "editor_id": "entity_00000000",
-                })]),
+                })])),
             ]),
         }));
 
@@ -4631,11 +4675,21 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let commands = &state.borrow().commands;
         let find_by_filter_calls = commands
             .iter()
-            .filter(|command| matches!(scoped_command(command), Command::FindByFilter { .. }))
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Read { filter, .. } if filter_contains_query(filter)
+                )
+            })
             .count();
         let find_by_id_calls = commands
             .iter()
-            .filter(|command| matches!(scoped_command(command), Command::FindById { .. }))
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Read { filter, .. } if filter_contains_pointer(filter)
+                )
+            })
             .count();
 
         assert_eq!(find_by_filter_calls, 2);
@@ -4646,7 +4700,9 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
     fn wardrobe_purge_uses_single_delete_by_filter_command() {
         let state = Rc::new(RefCell::new(MockRunnerState {
             commands: Vec::new(),
-            responses: VecDeque::from(vec![CommandResult::Count(2)]),
+            responses: VecDeque::from(vec![CommandResult::Delete(wardrobe_core::DeleteResult {
+                deleted: 2,
+            })]),
         }));
 
         let mut target = WardrobeTarget {
@@ -4680,11 +4736,21 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let commands = &state.borrow().commands;
         let delete_by_filter_calls = commands
             .iter()
-            .filter(|command| matches!(scoped_command(command), Command::DeleteByFilter { .. }))
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Delete { filter, .. } if filter_contains_query(filter)
+                )
+            })
             .count();
         let per_record_delete_calls = commands
             .iter()
-            .filter(|command| matches!(scoped_command(command), Command::Delete { .. }))
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Delete { filter, .. } if filter_contains_pointer(filter)
+                )
+            })
             .count();
 
         assert_eq!(delete_by_filter_calls, 1);

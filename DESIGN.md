@@ -26,7 +26,7 @@ The current workspace is organized around three primary deliverables.
 |---|---|
 | `wardrobe-core` | Storage engine, command model, protocol types, and client facade |
 | `wardrobe-server` | Standalone daemon that executes the shared command surface remotely |
-| `wardrobe-cli` | Administrative and operational command-line tooling |
+| `wardrobe-cli` crate / `wardrobe` binary | Administrative and operational command-line tooling |
 
 Supporting projects such as GUI administration tools and language bindings should build on the same engine and command surface rather than inventing separate authorities.
 
@@ -94,7 +94,7 @@ Wardrobe now treats `Command` and `CommandResult` as the shared execution contra
 - `WardrobeEngine` executes commands locally
 - `WardrobeClient` either calls the engine directly or serializes commands over the protocol
 - `wardrobe-server` deserializes commands and hands them to the same engine-backed executor
-- `wardrobe-cli` issues the same command families regardless of whether the target is embedded or remote
+- the `wardrobe` CLI issues the same command families regardless of whether the target is embedded or remote
 
 This is the key reason structural, inspection, backup, restore, schema, and permission workflows can now work against the server instead of only against local files.
 
@@ -161,7 +161,7 @@ Wardrobe now exposes a fuller operational surface through both the engine and th
 - `inspect_drawer` for raw size, count, register, and fragmentation metrics
 - `check_path` for physical presence and sanity checks
 - `diagnose_storage` for high-level storage health summaries
-- `vacuum_drawer` and `migrate_drawer` for maintenance
+- `compact` / `CompactRequest` for storage reclamation and migration maintenance
 - `verify_wal` for write-ahead log inspection
 - `backup_archive` and `restore_archive` for scope-aware archive workflows
 
@@ -258,6 +258,8 @@ The CLI presents these as `status`, `create`, and `drop` across wardrobes, bays,
 ## Transport Layer
 
 The network protocol uses framed request and response messages carrying serialized `Command` and `CommandResult` payloads.
+
+Because Wardrobe is pre-stable, the protocol does not keep aliases for removed command names. Clients should send the canonical variants: `Read`, `Upsert`, `Delete`, `Inspect`, `Count`, `Compact`, `Create`, `Alter`, `Drop`, `Backup`, `Restore`, `Grant`, `Revoke`, and `Status`.
 
 Supported transports:
 

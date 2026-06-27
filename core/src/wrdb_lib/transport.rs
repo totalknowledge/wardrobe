@@ -128,6 +128,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wrdb_lib::command::{OperationFilter, OperationOptions};
     use std::io::Cursor;
     use std::net::TcpListener;
     use std::thread;
@@ -169,9 +170,8 @@ mod tests {
         let mutex = Mutex::new(stream);
 
         let command = Command::Count {
-            drawer_name: "gem".to_string(),
-            filter: None,
-            modifiers: None,
+            filter: OperationFilter::drawer("gem"),
+            options: OperationOptions::default(),
         };
         let result = execute_on_stream(&mutex, command, "test-target".to_string())
             .expect("execute should succeed");

@@ -204,11 +204,12 @@ fn tcp_connection_pool_limit_does_not_terminate_listener() {
     write_command(
         &mut first,
         &Command::Upsert {
-            drawer_name: "gem".to_string(),
             payload: json!({ "_id": "first", "element": "Fire" }),
+            filter: OperationFilter::drawer("gem"),
+            options: OperationOptions::default(),
         },
     );
-    assert!(matches!(read_result(&mut first), CommandResult::Pointer(_)));
+    assert!(matches!(read_result(&mut first), CommandResult::Upsert(_)));
 
     first
         .shutdown(Shutdown::Both)
@@ -217,14 +218,12 @@ fn tcp_connection_pool_limit_does_not_terminate_listener() {
     write_command(
         &mut second,
         &Command::Upsert {
-            drawer_name: "gem".to_string(),
             payload: json!({ "_id": "second", "element": "Water" }),
+            filter: OperationFilter::drawer("gem"),
+            options: OperationOptions::default(),
         },
     );
-    assert!(matches!(
-        read_result(&mut second),
-        CommandResult::Pointer(_)
-    ));
+    assert!(matches!(read_result(&mut second), CommandResult::Upsert(_)));
     second
         .shutdown(Shutdown::Both)
         .expect("second stream should close");
@@ -317,29 +316,25 @@ fn tcp_daemon_routes_scoped_commands_and_maintenance_frames() {
     let upsert = Command::Execute {
         coordinate: coordinate.clone(),
         command: Box::new(Command::Upsert {
-            drawer_name: "gem".to_string(),
             payload: json!({
                 "_id": "scoped_fire",
                 "element": "Fire"
             }),
+            filter: OperationFilter::drawer("gem"),
+            options: OperationOptions::default(),
         }),
     };
     let vacuum = Command::Execute {
         coordinate,
-        command: Box::new(Command::Vacuum {
-            drawer_name: "gem".to_string(),
-        }),
+        command: Box::new(Command::Compact(CompactRequest::drawer("gem"))),
     };
 
     write_command(&mut stream, &upsert);
-    assert!(matches!(
-        read_result(&mut stream),
-        CommandResult::Pointer(_)
-    ));
+    assert!(matches!(read_result(&mut stream), CommandResult::Upsert(_)));
     write_command(&mut stream, &vacuum);
     assert!(matches!(
         read_result(&mut stream),
-        CommandResult::Vacuumed(_)
+        CommandResult::Compact(_)
     ));
     stream
         .shutdown(Shutdown::Both)

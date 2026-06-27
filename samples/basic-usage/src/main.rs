@@ -32,7 +32,11 @@ fn print_execution_separator(stage_title: &str) {
 
 fn result_to_pointer(result: CommandResult) -> io::Result<String> {
     match result {
-        CommandResult::Pointer(pointer) => Ok(pointer),
+        CommandResult::Upsert(result) => result
+            .into_pointers()
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "upsert returned no pointer")),
         other => Err(Error::new(
             ErrorKind::InvalidData,
             format!("Expected pointer result, got {other:?}"),
@@ -197,8 +201,9 @@ fn upsert_in_public_scope(
     result_to_pointer(engine.execute_in_scope(
         public_scope(),
         Command::Upsert {
-            drawer_name: drawer_name.to_string(),
             payload,
+            filter: OperationFilter::drawer(drawer_name),
+            options: OperationOptions::default(),
         },
     )?)
 }

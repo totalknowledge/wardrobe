@@ -682,17 +682,10 @@ where
 
 fn command_operation(command: &Command) -> Option<WalOperation> {
     match command {
-        Command::Upsert { .. } | Command::BulkUpsert { .. } => Some(WalOperation::Upsert),
-        Command::Delete { .. } | Command::DeleteByFilter { .. } => Some(WalOperation::Delete),
-        Command::Vacuum { .. } | Command::Migrate { .. } => Some(WalOperation::Maintenance),
-        Command::DefineDatabase { .. }
-        | Command::DefineSchema { .. }
-        | Command::DefineDrawer { .. }
-        | Command::DefineTenantRoute { .. }
-        | Command::DropDatabase { .. }
-        | Command::DropSchema { .. }
-        | Command::DropDrawer { .. }
-        | Command::ManageSchema { .. } => Some(WalOperation::Define),
+        Command::Upsert { .. } => Some(WalOperation::Upsert),
+        Command::Delete { .. } => Some(WalOperation::Delete),
+        Command::Compact(_) => Some(WalOperation::Maintenance),
+        Command::Create(_) | Command::Alter(_) | Command::Drop(_) => Some(WalOperation::Define),
         _ => None,
     }
 }
