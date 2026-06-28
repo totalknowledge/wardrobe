@@ -5,9 +5,10 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::sync::{Client as MongoClient, Collection};
 use mysql::prelude::Queryable;
 use mysql::{OptsBuilder, Pool, PooledConn, Row};
-use neo4rs::{Graph, query};
+use neo4rs::{BoltList, BoltType, Graph, query};
 use rusqlite::Connection;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Error, ErrorKind, Write};
@@ -68,6 +69,35 @@ FROM books b
 JOIN entities author ON author.id = b.author_id
 JOIN entities editor ON editor.id = b.editor_id
 WHERE b.author_id = ?1 AND b.editor_id = ?1;
+"#;
+const NEO4J_BULK_ENTITY_UPSERT_QUERY: &str = r#"
+UNWIND $rows AS row
+MERGE (e:BenchNode:Entity {bench_marker: $marker, id: row.id})
+SET e.display_name = row.display_name,
+    e.role = row.role,
+    e.cohort = row.cohort
+"#;
+const NEO4J_BULK_BOOK_UPSERT_QUERY: &str = r#"
+UNWIND $rows AS row
+MERGE (b:BenchNode:Book {bench_marker: $marker, id: row.id})
+SET b.isbn = row.isbn,
+    b.title = row.title,
+    b.author_id = row.author_id,
+    b.editor_id = row.editor_id,
+    b.branch = row.branch,
+    b.quantity = row.quantity,
+    b.purge_bucket = row.purge_bucket
+WITH b, row, $marker AS marker
+MATCH (author:BenchNode:Entity {bench_marker: marker, id: row.author_id})
+MATCH (editor:BenchNode:Entity {bench_marker: marker, id: row.editor_id})
+MERGE (b)-[:AUTHORED_BY]->(author)
+MERGE (b)-[:EDITED_BY]->(editor)
+"#;
+const NEO4J_STORE_SIZE_BYTES_QUERY: &str = r#"
+CALL dbms.queryJmx("org.neo4j:*") YIELD name, attributes
+WHERE name CONTAINS "Store file sizes"
+  AND (name CONTAINS ("database=" + $database) OR name CONTAINS "instance=kernel")
+RETURN coalesce(max(toInteger(attributes.TotalStoreSize.value)), 0) AS storage_bytes
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2477,6 +2507,14 @@ impl Neo4jTarget {
             Err(error) => Err(error),
         }
     }
+
+    fn entity_rows(&self, profile: &LibraryProfile, start: usize, end: usize) -> BoltType {
+        neo4j_entity_rows(profile, start, end)
+    }
+
+    fn book_rows(&self, profile: &LibraryProfile, start: usize, end: usize) -> BoltType {
+        neo4j_book_rows(profile, start, end)
+    }
 }
 
 impl BenchmarkTarget for Neo4jTarget {
@@ -2523,26 +2561,13 @@ impl BenchmarkTarget for Neo4jTarget {
         progress: &ProgressReporter,
     ) -> io::Result<u64> {
         for (start, end) in chunk_ranges(profile.entity_records, profile.chunk_size) {
+            let rows = self.entity_rows(profile, start, end);
             recorder.measure((end - start) as u64, || {
-                for index in start..end {
-                    let payload = profile.entity_payload(index);
-                    let role = payload["role"].as_str().unwrap_or_default().to_string();
-                    let cohort = payload["cohort"].as_u64().unwrap_or_default() as i64;
-                    self.run_query(
-                        query(
-                            "MERGE (e:BenchNode:Entity {bench_marker: $marker, id: $id}) SET e.display_name = $display_name, e.role = $role, e.cohort = $cohort",
-                        )
+                self.run_query(
+                    query(NEO4J_BULK_ENTITY_UPSERT_QUERY)
                         .param("marker", self.marker.clone())
-                        .param("id", payload["_id"].as_str().unwrap_or_default().to_string())
-                        .param(
-                            "display_name",
-                            payload["display_name"].as_str().unwrap_or_default().to_string(),
-                        )
-                        .param("role", role)
-                        .param("cohort", cohort),
-                    )?;
-                }
-                Ok(())
+                        .param("rows", rows),
+                )
             })?;
             report_record_progress(
                 progress,
@@ -2553,36 +2578,13 @@ impl BenchmarkTarget for Neo4jTarget {
         }
 
         for (start, end) in chunk_ranges(profile.book_records, profile.chunk_size) {
+            let rows = self.book_rows(profile, start, end);
             recorder.measure((end - start) as u64, || {
-                for index in start..end {
-                    let payload = profile.book_payload(index);
-                    let quantity = payload["quantity"].as_u64().unwrap_or_default() as i64;
-                    let purge_bucket = payload["purge_bucket"].as_u64().unwrap_or_default() as i64;
-                    self.run_query(
-                        query(
-                            "MERGE (b:BenchNode:Book {bench_marker: $marker, id: $id}) SET b.isbn = $isbn, b.title = $title, b.author_id = $author_id, b.editor_id = $editor_id, b.branch = $branch, b.quantity = $quantity, b.purge_bucket = $purge_bucket WITH b, $marker AS marker, $author_id AS author_id, $editor_id AS editor_id MATCH (author:BenchNode:Entity {bench_marker: marker, id: author_id}) MATCH (editor:BenchNode:Entity {bench_marker: marker, id: editor_id}) MERGE (b)-[:AUTHORED_BY]->(author) MERGE (b)-[:EDITED_BY]->(editor)",
-                        )
+                self.run_query(
+                    query(NEO4J_BULK_BOOK_UPSERT_QUERY)
                         .param("marker", self.marker.clone())
-                        .param("id", payload["_id"].as_str().unwrap_or_default().to_string())
-                        .param("isbn", payload["isbn"].as_str().unwrap_or_default().to_string())
-                        .param("title", payload["title"].as_str().unwrap_or_default().to_string())
-                        .param(
-                            "author_id",
-                            payload["author_id"].as_str().unwrap_or_default().to_string(),
-                        )
-                        .param(
-                            "editor_id",
-                            payload["editor_id"].as_str().unwrap_or_default().to_string(),
-                        )
-                        .param(
-                            "branch",
-                            payload["branch"].as_str().unwrap_or_default().to_string(),
-                        )
-                        .param("quantity", quantity)
-                        .param("purge_bucket", purge_bucket),
-                    )?;
-                }
-                Ok(())
+                        .param("rows", rows),
+                )
             })?;
             report_record_progress(
                 progress,
@@ -2703,9 +2705,8 @@ impl BenchmarkTarget for Neo4jTarget {
 
     fn storage_footprint_bytes(&mut self) -> io::Result<u64> {
         self.count_query(
-            query("MATCH (n:BenchNode {bench_marker: $marker}) RETURN count(n) AS node_count")
-                .param("marker", self.marker.clone()),
-            "node_count",
+            query(NEO4J_STORE_SIZE_BYTES_QUERY).param("database", self.database.clone()),
+            "storage_bytes",
         )
     }
 
@@ -2727,7 +2728,7 @@ impl BenchmarkTarget for Neo4jTarget {
                 "Benchmark scope marker '{}' in database '{}' contains {} nodes and {} relationships",
                 self.marker, self.database, node_count, relationship_count
             ),
-            "Neo4j storage metric reports logical benchmark node count (graph store byte accounting is instance-wide).".to_string(),
+            "Neo4j storage metric reports database store size bytes from JMX; logical node and relationship counts are diagnostic only.".to_string(),
         ])
     }
 }
@@ -2905,6 +2906,56 @@ fn to_io_error(error: impl std::fmt::Display) -> io::Error {
 fn neo4j_checkpoint_is_unavailable(error: &io::Error) -> bool {
     let message = error.to_string();
     message.contains("ProcedureNotFound") && message.contains("db.checkpoint")
+}
+
+fn neo4j_entity_rows(profile: &LibraryProfile, start: usize, end: usize) -> BoltType {
+    let rows = (start..end)
+        .map(|index| {
+            let payload = profile.entity_payload(index);
+            neo4j_row([
+                ("id", neo4j_string_field(&payload, "_id")),
+                ("display_name", neo4j_string_field(&payload, "display_name")),
+                ("role", neo4j_string_field(&payload, "role")),
+                ("cohort", neo4j_i64_field(&payload, "cohort")),
+            ])
+        })
+        .collect::<Vec<_>>();
+    BoltType::List(BoltList::from(rows))
+}
+
+fn neo4j_book_rows(profile: &LibraryProfile, start: usize, end: usize) -> BoltType {
+    let rows = (start..end)
+        .map(|index| {
+            let payload = profile.book_payload(index);
+            neo4j_row([
+                ("id", neo4j_string_field(&payload, "_id")),
+                ("isbn", neo4j_string_field(&payload, "isbn")),
+                ("title", neo4j_string_field(&payload, "title")),
+                ("author_id", neo4j_string_field(&payload, "author_id")),
+                ("editor_id", neo4j_string_field(&payload, "editor_id")),
+                ("branch", neo4j_string_field(&payload, "branch")),
+                ("quantity", neo4j_i64_field(&payload, "quantity")),
+                ("purge_bucket", neo4j_i64_field(&payload, "purge_bucket")),
+            ])
+        })
+        .collect::<Vec<_>>();
+    BoltType::List(BoltList::from(rows))
+}
+
+fn neo4j_row<const N: usize>(fields: [(&str, BoltType); N]) -> BoltType {
+    let values = fields
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect::<HashMap<_, _>>();
+    BoltType::from(values)
+}
+
+fn neo4j_string_field(payload: &Value, field: &str) -> BoltType {
+    BoltType::from(payload[field].as_str().unwrap_or_default().to_string())
+}
+
+fn neo4j_i64_field(payload: &Value, field: &str) -> BoltType {
+    BoltType::from(payload[field].as_u64().unwrap_or_default() as i64)
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -3511,6 +3562,29 @@ mod tests {
         }
     }
 
+    fn bolt_field<'a>(row: &'a BoltType, key: &str) -> &'a BoltType {
+        let BoltType::Map(map) = row else {
+            panic!("row should be encoded as a Bolt map");
+        };
+        map.value
+            .get(&neo4rs::BoltString::from(key))
+            .unwrap_or_else(|| panic!("row should contain field '{key}'"))
+    }
+
+    fn assert_bolt_string(row: &BoltType, key: &str, expected: &str) {
+        let BoltType::String(value) = bolt_field(row, key) else {
+            panic!("field '{key}' should be a Bolt string");
+        };
+        assert_eq!(value.value, expected);
+    }
+
+    fn assert_bolt_integer(row: &BoltType, key: &str, expected: i64) {
+        let BoltType::Integer(value) = bolt_field(row, key) else {
+            panic!("field '{key}' should be a Bolt integer");
+        };
+        assert_eq!(value.value, expected);
+    }
+
     fn test_namespace() -> WardrobeNamespace {
         WardrobeNamespace {
             database: "wardrobe_benchmark_test".to_string(),
@@ -3779,6 +3853,53 @@ IGNORED=value
 
         assert!(neo4j_checkpoint_is_unavailable(&missing_checkpoint));
         assert!(!neo4j_checkpoint_is_unavailable(&auth_error));
+    }
+
+    #[test]
+    fn neo4j_ingestion_queries_use_bulk_unwind_rows() {
+        assert!(NEO4J_BULK_ENTITY_UPSERT_QUERY.contains("UNWIND $rows AS row"));
+        assert!(NEO4J_BULK_BOOK_UPSERT_QUERY.contains("UNWIND $rows AS row"));
+        assert!(NEO4J_BULK_BOOK_UPSERT_QUERY.contains("MATCH (author:BenchNode:Entity"));
+        assert!(NEO4J_BULK_BOOK_UPSERT_QUERY.contains("MERGE (b)-[:EDITED_BY]->(editor)"));
+        assert!(!NEO4J_BULK_ENTITY_UPSERT_QUERY.contains("$id"));
+        assert!(!NEO4J_BULK_BOOK_UPSERT_QUERY.contains("$id"));
+    }
+
+    #[test]
+    fn neo4j_batch_rows_encode_chunk_payloads_as_one_bolt_list() {
+        let profile = tiny_profile();
+
+        let entity_rows = neo4j_entity_rows(&profile, 0, 2);
+        let BoltType::List(entity_rows) = entity_rows else {
+            panic!("entity rows should be encoded as a Bolt list");
+        };
+        assert_eq!(entity_rows.value.len(), 2);
+        assert_bolt_string(&entity_rows.value[0], "id", "entity_00000000");
+        assert_bolt_string(
+            &entity_rows.value[0],
+            "display_name",
+            "Library Entity 00000000",
+        );
+        assert_bolt_integer(&entity_rows.value[0], "cohort", 0);
+
+        let book_rows = neo4j_book_rows(&profile, 0, 2);
+        let BoltType::List(book_rows) = book_rows else {
+            panic!("book rows should be encoded as a Bolt list");
+        };
+        assert_eq!(book_rows.value.len(), 2);
+        assert_bolt_string(&book_rows.value[0], "id", "book_00000000");
+        assert_bolt_string(&book_rows.value[0], "author_id", "entity_00000000");
+        assert_bolt_string(&book_rows.value[0], "editor_id", "entity_00000000");
+        assert_bolt_integer(&book_rows.value[0], "quantity", 1);
+        assert_bolt_integer(&book_rows.value[1], "purge_bucket", 1);
+    }
+
+    #[test]
+    fn neo4j_storage_metric_query_reports_store_size_bytes_not_node_count() {
+        assert!(NEO4J_STORE_SIZE_BYTES_QUERY.contains("dbms.queryJmx"));
+        assert!(NEO4J_STORE_SIZE_BYTES_QUERY.contains("TotalStoreSize.value"));
+        assert!(NEO4J_STORE_SIZE_BYTES_QUERY.contains("storage_bytes"));
+        assert!(!NEO4J_STORE_SIZE_BYTES_QUERY.contains("count(n)"));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 #[cfg(unix)]
 use super::execute_on_stream;
 use crate::wrdb_lib::command::{Command, CommandResult};
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
+#[cfg(not(unix))]
+use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 
 #[cfg(unix)]
