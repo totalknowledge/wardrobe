@@ -1,11 +1,11 @@
 use crate::wrdb_lib::catalog_validation;
+use crate::wrdb_lib::core::reader::DatabaseReader;
+use crate::wrdb_lib::core::storage_format::{BsonBinaryFormat, StorageFormat};
 use crate::wrdb_lib::drawer::{
     INDEX_FIELD_KEY, INDEX_OFFSET_KEY, INDEX_STATUS_KEY, INDEX_VALUE_KEY,
 };
-use crate::wrdb_lib::reader::DatabaseReader;
 use crate::wrdb_lib::registry::{CatalogEntry, CatalogRegistry};
 use crate::wrdb_lib::storage::StorageInventory;
-use crate::wrdb_lib::storage_format::{BsonBinaryFormat, StorageFormat};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
