@@ -56,7 +56,31 @@ fn load_index_records(
             }
         })
         .expect("index should stream");
+    if let Some(field_name_map) = field_name_map_from_metadata(database_directory, drawer_name) {
+        for record in &mut records {
+            if let Some(record_map) = record.as_object_mut() {
+                if let Some(logical_field_name) = record_map
+                    .get(INDEX_FIELD_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|stored_field_name| field_name_map.get(stored_field_name))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    record_map.insert(INDEX_FIELD_KEY.to_string(), json!(logical_field_name));
+                }
+            }
+        }
+    }
     records
+}
+
+fn field_name_map_from_metadata(
+    database_directory: &TempDatabase,
+    drawer_name: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    load_metadata(database_directory, drawer_name)
+        .get("field_name_map")?
+        .as_object()
+        .cloned()
 }
 
 fn compact_primary_index_record(
@@ -118,7 +142,53 @@ fn reopened_records_from_file(path: &std::path::Path) -> Vec<serde_json::Value> 
             }
         })
         .expect("stream should succeed");
+    let Some(field_name_map) = field_name_map_from_data_path(path) else {
+        return records;
+    };
     records
+        .into_iter()
+        .map(|record| decode_record_from_field_name_map(record, &field_name_map))
+        .collect()
+}
+
+fn field_name_map_from_data_path(
+    path: &std::path::Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let drawer_name = path.file_stem()?.to_str()?;
+    let metadata_path = path.with_file_name(format!("{drawer_name}_meta.drw"));
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(metadata_path).ok()?).ok()?;
+    metadata.get("field_name_map")?.as_object().cloned()
+}
+
+fn decode_record_from_field_name_map(
+    value: serde_json::Value,
+    field_name_map: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(field_name, field_value)| {
+                    let logical_field_name = field_name_map
+                        .get(&field_name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(field_name.as_str())
+                        .to_string();
+                    (
+                        logical_field_name,
+                        decode_record_from_field_name_map(field_value, field_name_map),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| decode_record_from_field_name_map(value, field_name_map))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 #[test]
@@ -912,8 +982,12 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
         "_id": "@socks:lnk_reclaimed",
         "color": "Gold"
     });
-    let serialized_record =
-        BsonBinaryFormat::serialize_record(&reclaimed_record).expect("record should serialize");
+    let stored_reclaimed_record = json!({
+        "_": "@socks:lnk_reclaimed",
+        "a": "Gold"
+    });
+    let serialized_record = BsonBinaryFormat::serialize_record(&stored_reclaimed_record)
+        .expect("record should serialize");
     let target_size_class = Recycler::new().calculate_aligned_size(serialized_record.len());
     let dead_offset = {
         let mut data_writer =

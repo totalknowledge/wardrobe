@@ -12,6 +12,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
+const RESERVED_ID_FIELD_TOKEN: &str = "_";
+const RESERVED_ID_FIELD_NAME: &str = "_id";
+const FIELD_TOKEN_ALPHABET: &[u8] =
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 pub(crate) const INDEX_FIELD_KEY: &str = "f";
 pub(crate) const INDEX_VALUE_KEY: &str = "k";
 pub(crate) const INDEX_OFFSET_KEY: &str = "o";
@@ -59,6 +63,8 @@ struct DrawerMetadata {
     secondary_index_generation: u64,
     #[serde(default)]
     materialized_secondary_indexes: BTreeMap<String, u64>,
+    #[serde(default)]
+    field_name_map: BTreeMap<String, String>,
 }
 
 impl DrawerMetadata {
@@ -88,6 +94,7 @@ impl DrawerMetadata {
         schema: Option<Value>,
         secondary_index_generation: u64,
         materialized_secondary_indexes: BTreeMap<String, u64>,
+        field_name_map: BTreeMap<String, String>,
     ) -> Self {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
@@ -100,6 +107,7 @@ impl DrawerMetadata {
             schema,
             secondary_index_generation,
             materialized_secondary_indexes,
+            field_name_map,
         }
     }
 
@@ -222,6 +230,9 @@ pub struct Drawer {
     record_count: usize,
     metadata_dirty: bool,
     metadata_format_version: u8,
+    field_name_map: BTreeMap<String, String>,
+    #[cfg(test)]
+    data_file_path: PathBuf,
     index_file_path: PathBuf,
     meta_file_path: PathBuf,
     #[cfg(test)]
@@ -229,6 +240,246 @@ pub struct Drawer {
 }
 
 impl Drawer {
+    fn ensure_reserved_id_field_mapping(field_name_map: &mut BTreeMap<String, String>) {
+        field_name_map
+            .entry(RESERVED_ID_FIELD_TOKEN.to_string())
+            .or_insert_with(|| RESERVED_ID_FIELD_NAME.to_string());
+    }
+
+    fn reserve_legacy_compact_field_names(
+        data_reader: &DatabaseReader,
+        field_name_map: &mut BTreeMap<String, String>,
+    ) -> std::io::Result<()> {
+        Self::ensure_reserved_id_field_mapping(field_name_map);
+
+        let mut raw_slots = Vec::new();
+        if data_reader
+            .stream_with_offsets(|_, line| {
+                if !BsonBinaryFormat::is_tombstone(line) {
+                    raw_slots.push(line.to_vec());
+                }
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        for slot in raw_slots {
+            if let Ok(Some(record)) = BsonBinaryFormat::deserialize_record(&slot) {
+                Self::reserve_legacy_compact_field_names_in_value(&record, field_name_map);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn reserve_legacy_compact_field_names_in_value(
+        value: &Value,
+        field_name_map: &mut BTreeMap<String, String>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                for (field_name, field_value) in map {
+                    if Self::is_initial_compact_field_token(field_name)
+                        && field_name != RESERVED_ID_FIELD_TOKEN
+                    {
+                        field_name_map
+                            .entry(field_name.clone())
+                            .or_insert_with(|| field_name.clone());
+                    }
+                    Self::reserve_legacy_compact_field_names_in_value(field_value, field_name_map);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    Self::reserve_legacy_compact_field_names_in_value(value, field_name_map);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn is_initial_compact_field_token(field_name: &str) -> bool {
+        field_name.len() == 1
+            && field_name
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| FIELD_TOKEN_ALPHABET.contains(byte))
+    }
+
+    fn decode_field_name_from_map(
+        field_name_map: &BTreeMap<String, String>,
+        stored_field_name: &str,
+    ) -> String {
+        field_name_map
+            .get(stored_field_name)
+            .cloned()
+            .unwrap_or_else(|| stored_field_name.to_string())
+    }
+
+    fn field_token_for_logical_name(&self, logical_field_name: &str) -> Option<&str> {
+        self.field_name_map
+            .iter()
+            .find_map(|(token, mapped_field_name)| {
+                (mapped_field_name == logical_field_name).then_some(token.as_str())
+            })
+    }
+
+    fn stored_field_name(&self, logical_field_name: &str) -> String {
+        self.field_token_for_logical_name(logical_field_name)
+            .unwrap_or(logical_field_name)
+            .to_string()
+    }
+
+    fn ensure_field_token(&mut self, logical_field_name: &str) -> bool {
+        if self
+            .field_token_for_logical_name(logical_field_name)
+            .is_some()
+        {
+            return false;
+        }
+
+        let token = if logical_field_name == RESERVED_ID_FIELD_NAME
+            && !self.field_name_map.contains_key(RESERVED_ID_FIELD_TOKEN)
+        {
+            RESERVED_ID_FIELD_TOKEN.to_string()
+        } else {
+            self.next_available_field_token()
+        };
+        self.field_name_map
+            .insert(token, logical_field_name.to_string());
+        true
+    }
+
+    fn ensure_field_tokens_for_value(&mut self, value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                let mut changed = false;
+                for (field_name, field_value) in map {
+                    changed |= self.ensure_field_token(field_name);
+                    changed |= self.ensure_field_tokens_for_value(field_value);
+                }
+                changed
+            }
+            Value::Array(values) => values.iter().fold(false, |changed, value| {
+                self.ensure_field_tokens_for_value(value) || changed
+            }),
+            _ => false,
+        }
+    }
+
+    fn ensure_field_tokens_for_record_write(&mut self, record: &Value) -> std::io::Result<()> {
+        Self::ensure_reserved_id_field_mapping(&mut self.field_name_map);
+        if self.ensure_field_tokens_for_value(record) {
+            self.persist_metadata()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_field_token_for_field_write(&mut self, field_name: &str) -> std::io::Result<()> {
+        Self::ensure_reserved_id_field_mapping(&mut self.field_name_map);
+        if self.ensure_field_token(field_name) {
+            self.persist_metadata()?;
+        }
+        Ok(())
+    }
+
+    fn next_available_field_token(&self) -> String {
+        let base = FIELD_TOKEN_ALPHABET.len();
+        let mut width = 1usize;
+
+        loop {
+            let capacity = base.pow(width as u32);
+            for ordinal in 0..capacity {
+                let token = Self::field_token_for_ordinal(ordinal, width);
+                if !self.field_name_map.contains_key(&token) {
+                    return token;
+                }
+            }
+            width += 1;
+        }
+    }
+
+    fn field_token_for_ordinal(mut ordinal: usize, width: usize) -> String {
+        let base = FIELD_TOKEN_ALPHABET.len();
+        let mut token = vec![FIELD_TOKEN_ALPHABET[0]; width];
+
+        for position in (0..width).rev() {
+            token[position] = FIELD_TOKEN_ALPHABET[ordinal % base];
+            ordinal /= base;
+        }
+
+        String::from_utf8(token).expect("field token alphabet must be valid utf-8")
+    }
+
+    fn encode_record_for_storage(&self, record: &Value) -> Value {
+        Self::encode_value_for_storage(record, &self.field_name_map)
+    }
+
+    fn encode_value_for_storage(value: &Value, field_name_map: &BTreeMap<String, String>) -> Value {
+        match value {
+            Value::Object(map) => {
+                let encoded = map
+                    .iter()
+                    .map(|(field_name, field_value)| {
+                        let stored_field_name = field_name_map
+                            .iter()
+                            .find_map(|(token, logical_name)| {
+                                (logical_name == field_name).then_some(token.clone())
+                            })
+                            .unwrap_or_else(|| field_name.clone());
+                        (
+                            stored_field_name,
+                            Self::encode_value_for_storage(field_value, field_name_map),
+                        )
+                    })
+                    .collect::<Map<String, Value>>();
+                Value::Object(encoded)
+            }
+            Value::Array(values) => Value::Array(
+                values
+                    .iter()
+                    .map(|value| Self::encode_value_for_storage(value, field_name_map))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    fn decode_record_from_storage(&self, record: Value) -> Value {
+        Self::decode_value_from_storage(record, &self.field_name_map)
+    }
+
+    fn decode_value_from_storage(value: Value, field_name_map: &BTreeMap<String, String>) -> Value {
+        match value {
+            Value::Object(map) => {
+                let decoded = map
+                    .into_iter()
+                    .map(|(stored_field_name, field_value)| {
+                        (
+                            Self::decode_field_name_from_map(field_name_map, &stored_field_name),
+                            Self::decode_value_from_storage(field_value, field_name_map),
+                        )
+                    })
+                    .collect::<Map<String, Value>>();
+                Value::Object(decoded)
+            }
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| Self::decode_value_from_storage(value, field_name_map))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    fn read_logical_record_at_offset(&self, offset: u64) -> std::io::Result<Option<Value>> {
+        self.data_reader
+            .read_record_at_offset(offset)
+            .map(|record| record.map(|record| self.decode_record_from_storage(record)))
+    }
+
     pub fn open<P: AsRef<Path>>(
         directory: P,
         name: &str,
@@ -277,6 +528,15 @@ impl Drawer {
             .as_ref()
             .map(|metadata| metadata.materialized_secondary_indexes.clone())
             .unwrap_or_default();
+        let mut field_name_map = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.field_name_map.clone())
+            .unwrap_or_default();
+        let field_name_map_was_empty = field_name_map.is_empty();
+        Self::ensure_reserved_id_field_mapping(&mut field_name_map);
+        if field_name_map_was_empty {
+            Self::reserve_legacy_compact_field_names(&data_reader, &mut field_name_map)?;
+        }
         let metadata_format_version = existing_metadata
             .as_ref()
             .map(|metadata| metadata.format_version)
@@ -333,7 +593,7 @@ impl Drawer {
                     .and_then(|value| value.as_u64())
                     == Some(DATA_BLOCK_STATUS_DEAD as u64)
                 {
-                    if let (Some(field), Some(key), Some(data_offset)) = (
+                    if let (Some(stored_field), Some(key), Some(data_offset)) = (
                         index_entry
                             .get(INDEX_FIELD_KEY)
                             .and_then(|value| value.as_str()),
@@ -344,6 +604,7 @@ impl Drawer {
                             .get(INDEX_OFFSET_KEY)
                             .and_then(|value| value.as_u64()),
                     ) {
+                        let field = Self::decode_field_name_from_map(&field_name_map, stored_field);
                         if field == primary_key
                             && primary_memory_index.get(key).copied() == Some(data_offset)
                         {
@@ -354,11 +615,12 @@ impl Drawer {
                     continue;
                 }
 
-                if let (Some(field), Some(key), Some(data_offset_val)) = (
+                if let (Some(stored_field), Some(key), Some(data_offset_val)) = (
                     index_entry.get(INDEX_FIELD_KEY).and_then(|v| v.as_str()),
                     index_entry.get(INDEX_VALUE_KEY).and_then(|v| v.as_str()),
                     index_entry.get(INDEX_OFFSET_KEY),
                 ) {
+                    let field = Self::decode_field_name_from_map(&field_name_map, stored_field);
                     let map_key = format!("{}:{}", field, key);
                     if let Some((stale_index_offset, stale_slot_size)) =
                         index_file_offsets.insert(map_key, (current_offset, actual_slot_size))
@@ -382,7 +644,7 @@ impl Drawer {
                             primary_memory_index.remove(key);
                             primary_memory_index.remove(&Self::clean_legacy_identifier(key));
                         }
-                    } else if let Some(field_map) = secondary_memory_index.get_mut(field) {
+                    } else if let Some(field_map) = secondary_memory_index.get_mut(field.as_str()) {
                         if let Some(data_offset) = data_offset_val.as_u64() {
                             field_map.insert(key.to_string(), vec![data_offset]);
                         } else if let Some(offset_array) = data_offset_val.as_array() {
@@ -432,6 +694,9 @@ impl Drawer {
             record_count,
             metadata_dirty: false,
             metadata_format_version,
+            field_name_map,
+            #[cfg(test)]
+            data_file_path,
             index_file_path,
             meta_file_path,
             #[cfg(test)]
@@ -494,7 +759,7 @@ impl Drawer {
 
         let is_new_record = old_data_offset.is_none();
         let old_record = if let Some(existing_offset) = old_data_offset {
-            self.data_reader.read_record_at_offset(existing_offset)?
+            self.read_logical_record_at_offset(existing_offset)?
         } else {
             None
         };
@@ -520,7 +785,9 @@ impl Drawer {
             }
         }
 
-        let serialized_record = BsonBinaryFormat::serialize_record(&record)?;
+        self.ensure_field_tokens_for_record_write(&record)?;
+        let stored_record = self.encode_record_for_storage(&record);
+        let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
         let raw_len = serialized_record.len();
         let target_size_class = self.data_recycler.calculate_aligned_size(raw_len);
         let live_block = DataBlockIndexEntry::live(&serialized_record, target_size_class);
@@ -678,7 +945,7 @@ impl Drawer {
 
     pub fn find_by_primary_key(&self, key: &str) -> std::io::Result<Option<Value>> {
         if let Some(&offset) = self.primary_memory_index.get(key) {
-            return self.data_reader.read_record_at_offset(offset);
+            return self.read_logical_record_at_offset(offset);
         }
         Ok(None)
     }
@@ -822,7 +1089,7 @@ impl Drawer {
             let Some(offset) = self.primary_memory_index.get(&key).copied() else {
                 continue;
             };
-            let Some(record) = self.data_reader.read_record_at_offset(offset)? else {
+            let Some(record) = self.read_logical_record_at_offset(offset)? else {
                 self.primary_memory_index.remove(&key);
                 continue;
             };
@@ -976,7 +1243,7 @@ impl Drawer {
             return Ok(None);
         };
 
-        let Some(deleted_record) = self.data_reader.read_record_at_offset(stale_offset)? else {
+        let Some(deleted_record) = self.read_logical_record_at_offset(stale_offset)? else {
             self.primary_memory_index.remove(key);
             return Ok(None);
         };
@@ -1061,9 +1328,18 @@ impl Drawer {
 
         let mut live_records = Vec::new();
         for (_, offset) in live_offsets {
-            if let Some(record) = self.data_reader.read_record_at_offset(offset)? {
+            if let Some(record) = self.read_logical_record_at_offset(offset)? {
                 live_records.push(record);
             }
+        }
+
+        let mut field_map_changed = false;
+        Self::ensure_reserved_id_field_mapping(&mut self.field_name_map);
+        for record in &live_records {
+            field_map_changed |= self.ensure_field_tokens_for_value(record);
+        }
+        if field_map_changed {
+            self.persist_metadata()?;
         }
 
         let mut compact_data = Vec::new();
@@ -1088,13 +1364,14 @@ impl Drawer {
                         format!("Missing primary key field: {}", self.primary_key),
                     )
                 })?;
-            let serialized_record = BsonBinaryFormat::serialize_record(record)?;
+            let stored_record = self.encode_record_for_storage(record);
+            let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
             let data_offset = Self::append_compact_payload(&mut compact_data, &serialized_record);
             let block_entry =
                 DataBlockIndexEntry::live(&serialized_record, serialized_record.len());
 
             let primary_index_entry = Self::index_entry_value(
-                &self.primary_key,
+                &self.stored_field_name(&self.primary_key),
                 primary_key_value,
                 Value::from(data_offset),
                 Some(block_entry),
@@ -1137,7 +1414,7 @@ impl Drawer {
 
         for (field, field_value, offsets) in compact_secondary_entries {
             let secondary_index_entry = Self::index_entry_value(
-                &field,
+                &self.stored_field_name(&field),
                 &field_value,
                 Self::offsets_index_value(&offsets),
                 None,
@@ -1485,7 +1762,7 @@ impl Drawer {
     ) -> std::io::Result<HashMap<String, Vec<u64>>> {
         let mut field_index: HashMap<String, Vec<u64>> = HashMap::new();
         for (primary_key, offset) in &self.primary_memory_index {
-            let Some(record) = self.data_reader.read_record_at_offset(*offset)? else {
+            let Some(record) = self.read_logical_record_at_offset(*offset)? else {
                 continue;
             };
             let Some(field_value) = record.get(field_name).and_then(Self::secondary_index_key)
@@ -1518,6 +1795,7 @@ impl Drawer {
         field_name: &str,
         field_index: &HashMap<String, Vec<u64>>,
     ) -> std::io::Result<()> {
+        self.ensure_field_token_for_field_write(field_name)?;
         let field_prefix = format!("{field_name}:");
         let stale_field_values: Vec<String> = self
             .index_file_offsets
@@ -2216,7 +2494,8 @@ impl Drawer {
 
         let size_class = self.estimate_data_slot_size(stale_offset, current_file_len);
         let (payload_len, crc) = if let Some(record) = old_record {
-            let serialized_record = BsonBinaryFormat::serialize_record(record)?;
+            let stored_record = self.encode_record_for_storage(record);
+            let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
             (serialized_record.len(), crc32(&serialized_record))
         } else {
             (size_class, 0)
@@ -2261,16 +2540,16 @@ impl Drawer {
         };
 
         if !self.needs_format_migration() {
-            return Ok(Some(record));
+            return Ok(Some(self.decode_record_from_storage(record)));
         }
 
         let mut migrated_record = record.clone();
         if !self.migrate_legacy_record_value(&mut migrated_record) {
-            return Ok(Some(record));
+            return Ok(Some(self.decode_record_from_storage(record)));
         }
 
         self.write_migrated_record_at_offset(offset, &record, &migrated_record)?;
-        Ok(Some(migrated_record))
+        Ok(Some(self.decode_record_from_storage(migrated_record)))
     }
 
     fn write_migrated_record_at_offset(
@@ -2313,7 +2592,9 @@ impl Drawer {
             ));
         };
 
-        let serialized_record = BsonBinaryFormat::serialize_record(migrated_record)?;
+        self.ensure_field_tokens_for_record_write(migrated_record)?;
+        let stored_record = self.encode_record_for_storage(migrated_record);
+        let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
         let (resolved_offset, resolved_size_class) =
             if serialized_record.len() <= old_block.size_class {
                 self.data_writer.overwrite_at_offset(
@@ -2453,7 +2734,12 @@ impl Drawer {
     ) -> std::io::Result<()> {
         let map_key = format!("{}:{}", field, key);
 
-        let index_entry = Self::index_entry_value(field, key, offset_value, block_entry);
+        let index_entry = Self::index_entry_value(
+            &self.stored_field_name(field),
+            key,
+            offset_value,
+            block_entry,
+        );
 
         let serialized_index = BsonBinaryFormat::serialize_record(&index_entry)?;
         let entry_raw_len = serialized_index.len();
@@ -2765,7 +3051,7 @@ impl Drawer {
         let mut live_records = Vec::with_capacity(raw_slots.len());
         for slot in raw_slots {
             if let Some(record_value) = BsonBinaryFormat::deserialize_record(&slot)? {
-                live_records.push(record_value);
+                live_records.push(self.decode_record_from_storage(record_value));
             }
         }
 
@@ -2774,9 +3060,13 @@ impl Drawer {
 
     pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {
         if self.should_read_by_primary_offsets()? {
-            return self
+            let records = self
                 .data_reader
-                .read_records_at_offsets(self.sorted_live_primary_offsets());
+                .read_records_at_offsets(self.sorted_live_primary_offsets())?;
+            return Ok(records
+                .into_iter()
+                .map(|record| self.decode_record_from_storage(record))
+                .collect());
         }
 
         self.find_all_records_by_streaming_live_offsets()
@@ -2834,6 +3124,7 @@ impl Drawer {
             self.schema.clone(),
             self.secondary_index_generation,
             self.materialized_secondary_indexes.clone(),
+            self.field_name_map.clone(),
         );
         metadata.persist(&self.meta_file_path)?;
         self.metadata_dirty = false;
@@ -2886,6 +3177,26 @@ mod tests {
         records
     }
 
+    fn live_data_records(drawer: &mut Drawer) -> Vec<Value> {
+        drawer.commit().expect("drawer should commit before read");
+
+        let reader =
+            DatabaseReader::open_drawer(&drawer.data_file_path).expect("data reader opens");
+        let mut records = Vec::new();
+        reader
+            .stream_with_offsets(|_, line| {
+                if !BsonBinaryFormat::is_tombstone(line) {
+                    records.push(
+                        BsonBinaryFormat::deserialize_record(line)
+                            .expect("data record should deserialize")
+                            .expect("data record should contain a value"),
+                    );
+                }
+            })
+            .expect("data should stream");
+        records
+    }
+
     fn assert_record_keys(record: &Value, expected: &[&str]) {
         let object = record.as_object().expect("index record should be object");
         let actual = object
@@ -2908,7 +3219,7 @@ mod tests {
                 .get(INDEX_FIELD_KEY)
                 .and_then(Value::as_str)
                 .expect("index record should include compact field key");
-            if field == "_id" {
+            if field == RESERVED_ID_FIELD_TOKEN {
                 primary_count += 1;
                 assert_record_keys(
                     record,
@@ -2928,7 +3239,7 @@ mod tests {
                     record,
                     &[INDEX_FIELD_KEY, INDEX_VALUE_KEY, INDEX_OFFSET_KEY],
                 );
-                assert_eq!(field, "element");
+                assert_eq!(field, "a");
             }
         }
 
@@ -2976,6 +3287,13 @@ mod tests {
             Some(json!({"type": "object"})),
             3,
             BTreeMap::from([("element".to_string(), 3)]),
+            BTreeMap::from([
+                (
+                    RESERVED_ID_FIELD_TOKEN.to_string(),
+                    RESERVED_ID_FIELD_NAME.to_string(),
+                ),
+                ("a".to_string(), "element".to_string()),
+            ]),
         );
         metadata.persist(&metadata_path).expect("metadata persists");
         let loaded = DrawerMetadata::load(&metadata_path)
@@ -2984,6 +3302,7 @@ mod tests {
         assert_eq!(loaded.primary_key, "_id");
         assert_eq!(loaded.record_count, 2);
         assert_eq!(loaded.materialized_secondary_indexes["element"], 3);
+        assert_eq!(loaded.field_name_map["a"], "element");
 
         let block = DataBlockIndexEntry::live(b"payload", 16);
         let index_entry =
@@ -3122,6 +3441,217 @@ mod tests {
 
         let records = live_index_records(&mut reopened);
         assert_compact_index_records(&records);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn field_name_encoding_maps_records_and_reuses_stable_tokens() {
+        let path = temp_dir("field_name_encoding_tokens");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer = Drawer::open(&path, "person", "_id", Vec::new()).expect("drawer opens");
+
+        drawer
+            .upsert_record(json!({
+                "_id": "person-1",
+                "name": "Bob",
+                "age": 56,
+                "weight": 210
+            }))
+            .expect("upsert should write")
+            .expect("upsert should validate");
+
+        let id_token = drawer.stored_field_name("_id");
+        let name_token = drawer.stored_field_name("name");
+        let age_token = drawer.stored_field_name("age");
+        let weight_token = drawer.stored_field_name("weight");
+
+        assert_eq!(id_token, RESERVED_ID_FIELD_TOKEN);
+        assert_ne!(name_token, "name");
+        assert_ne!(age_token, "age");
+        assert_ne!(weight_token, "weight");
+
+        let raw_records = live_data_records(&mut drawer);
+        assert_eq!(raw_records.len(), 1);
+        assert_eq!(raw_records[0][&id_token], "person-1");
+        assert_eq!(raw_records[0][&name_token], "Bob");
+        assert_eq!(raw_records[0][&age_token], 56);
+        assert_eq!(raw_records[0][&weight_token], 210);
+        assert!(raw_records[0].get("_id").is_none());
+        assert!(raw_records[0].get("name").is_none());
+        assert!(raw_records[0].get("age").is_none());
+        assert!(raw_records[0].get("weight").is_none());
+
+        let decoded = drawer
+            .find_by_primary_key("person-1")
+            .expect("read should decode")
+            .expect("record should exist");
+        assert_eq!(decoded["_id"], "person-1");
+        assert_eq!(decoded["name"], "Bob");
+        assert_eq!(decoded["age"], 56);
+        assert_eq!(decoded["weight"], 210);
+
+        drawer
+            .upsert_record(json!({
+                "_id": "person-2",
+                "name": "Ada",
+                "age": 37,
+                "weight": 130,
+                "height": 64
+            }))
+            .expect("second upsert should write")
+            .expect("second upsert should validate");
+
+        assert_eq!(drawer.stored_field_name("name"), name_token);
+        assert_eq!(drawer.stored_field_name("age"), age_token);
+        assert_eq!(drawer.stored_field_name("weight"), weight_token);
+        assert_ne!(drawer.stored_field_name("height"), "height");
+
+        let metadata = DrawerMetadata::load(&drawer.meta_file_path)
+            .expect("metadata should load")
+            .expect("metadata should exist");
+        assert_eq!(metadata.field_name_map[RESERVED_ID_FIELD_TOKEN], "_id");
+        assert_eq!(metadata.field_name_map[&name_token], "name");
+        assert_eq!(metadata.field_name_map[&age_token], "age");
+        assert_eq!(metadata.field_name_map[&weight_token], "weight");
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn logical_filters_and_indexed_queries_work_with_encoded_storage() {
+        let path = temp_dir("field_name_encoding_filter_index");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer = Drawer::open(&path, "book", "_id", Vec::new()).expect("drawer opens");
+
+        drawer
+            .upsert_record(json!({"_id": "book-1", "name": "Dune", "genre": "sci-fi"}))
+            .expect("first upsert should write")
+            .expect("first upsert should validate");
+        drawer
+            .upsert_record(json!({"_id": "book-2", "name": "Emma", "genre": "classic"}))
+            .expect("second upsert should write")
+            .expect("second upsert should validate");
+        drawer.record_schema_extension("indexes", "name", json!({"type": "hash"}));
+        drawer
+            .materialize_query_index("name")
+            .expect("query index should materialize");
+
+        let name_token = drawer.stored_field_name("name");
+        let index_records = live_index_records(&mut drawer);
+        assert!(
+            index_records.iter().any(|record| {
+                record.get(INDEX_FIELD_KEY).and_then(Value::as_str) == Some(name_token.as_str())
+            }),
+            "index file should store the encoded field token"
+        );
+        assert!(
+            index_records.iter().all(|record| {
+                record.get(INDEX_FIELD_KEY).and_then(Value::as_str) != Some("name")
+            }),
+            "index file should not leak logical field names"
+        );
+
+        let mut filter = Map::new();
+        filter.insert("name".to_string(), json!("Dune"));
+        let offsets = drawer
+            .indexed_candidate_offsets(&filter)
+            .expect("logical filter should use encoded index")
+            .expect("indexed candidates should be available");
+        assert_eq!(offsets.len(), 1);
+
+        let records = drawer
+            .records_matching_filter_candidates(&filter, None)
+            .expect("logical filter should match decoded records");
+        assert_eq!(
+            records,
+            vec![json!({"_id": "book-1", "name": "Dune", "genre": "sci-fi"})]
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn legacy_drawer_without_field_map_reads_and_compacts_to_encoded_storage() {
+        let path = temp_dir("field_name_encoding_legacy_compact");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let data_path = path.join("gem.drw");
+        let index_path = path.join("gem_index.drw");
+        let meta_path = path.join("gem_meta.drw");
+
+        let legacy_record = json!({"_id": "ruby", "name": "Ruby"});
+        let serialized_record =
+            BsonBinaryFormat::serialize_record(&legacy_record).expect("legacy record serializes");
+        let mut data_writer = DatabaseWriter::open_drawer(&data_path).expect("data writer opens");
+        let data_offset = data_writer
+            .append_record(&serialized_record, serialized_record.len())
+            .expect("legacy record writes");
+        let legacy_block = DataBlockIndexEntry::live(&serialized_record, serialized_record.len());
+        let primary_index_entry =
+            Drawer::index_entry_value("_id", "ruby", Value::from(data_offset), Some(legacy_block));
+        let serialized_index =
+            BsonBinaryFormat::serialize_record(&primary_index_entry).expect("index serializes");
+        let mut index_writer =
+            DatabaseWriter::open_drawer(&index_path).expect("index writer opens");
+        index_writer
+            .append_record(&serialized_index, serialized_index.len())
+            .expect("legacy index writes");
+        std::fs::write(
+            &meta_path,
+            serde_json::to_vec_pretty(&json!({
+                "format_version": DRAWER_METADATA_FORMAT_VERSION,
+                "primary_key": "_id",
+                "record_count": 1,
+                "unique_constraints": []
+            }))
+            .expect("legacy metadata serializes"),
+        )
+        .expect("legacy metadata writes");
+
+        let mut drawer = Drawer::open(&path, "gem", "_id", Vec::new()).expect("legacy opens");
+        let legacy_read = drawer
+            .find_by_primary_key("ruby")
+            .expect("legacy read should succeed")
+            .expect("legacy record should exist");
+        assert_eq!(legacy_read, legacy_record);
+
+        drawer
+            .upsert_record(json!({"_id": "sapphire", "name": "Sapphire", "color": "Blue"}))
+            .expect("new upsert should write")
+            .expect("new upsert should validate");
+        let name_token = drawer.stored_field_name("name");
+        let color_token = drawer.stored_field_name("color");
+
+        drawer
+            .vacuum()
+            .expect("vacuum should encode legacy records");
+        let raw_records = live_data_records(&mut drawer);
+        assert_eq!(raw_records.len(), 2);
+        assert!(raw_records.iter().all(|record| record.get("_id").is_none()));
+        assert!(
+            raw_records
+                .iter()
+                .all(|record| record.get("name").is_none())
+        );
+        assert!(
+            raw_records
+                .iter()
+                .any(|record| record.get(&name_token).and_then(Value::as_str) == Some("Ruby"))
+        );
+        assert!(
+            raw_records
+                .iter()
+                .any(|record| record.get(&color_token).and_then(Value::as_str) == Some("Blue"))
+        );
+
+        let reopened = Drawer::open(&path, "gem", "_id", Vec::new()).expect("reopen succeeds");
+        let decoded = reopened.find_all_records().expect("records decode");
+        assert!(decoded.contains(&json!({"_id": "ruby", "name": "Ruby"})));
+        assert!(decoded.contains(&json!({
+            "_id": "sapphire",
+            "name": "Sapphire",
+            "color": "Blue"
+        })));
 
         let _ = std::fs::remove_dir_all(path);
     }

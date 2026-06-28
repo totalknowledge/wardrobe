@@ -65,7 +65,7 @@ fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields
         .map(|field| ((*field).to_string(), json!(true)))
         .collect::<serde_json::Map<String, serde_json::Value>>();
 
-    let metadata = json!({
+    let mut metadata = json!({
         "format_version": 1,
         "primary_key": "_id",
         "unique_constraints": [],
@@ -73,6 +73,7 @@ fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields
         "delete_rules": {},
         "cascade_delete_rules": cascade_delete_rules
     });
+    preserve_existing_field_name_map(database, drawer_name, &mut metadata);
 
     fs::write(
         database.path.join(format!("{}_meta.drw", drawer_name)),
@@ -81,12 +82,43 @@ fn write_cascade_delete_rules(database: &TempDatabase, drawer_name: &str, fields
     .expect("metadata should write");
 }
 
-fn write_drawer_metadata(database: &TempDatabase, drawer_name: &str, metadata: serde_json::Value) {
+fn write_drawer_metadata(
+    database: &TempDatabase,
+    drawer_name: &str,
+    mut metadata: serde_json::Value,
+) {
+    preserve_existing_field_name_map(database, drawer_name, &mut metadata);
     fs::write(
         database.path.join(format!("{}_meta.drw", drawer_name)),
         serde_json::to_vec_pretty(&metadata).expect("metadata should serialize"),
     )
     .expect("metadata should write");
+}
+
+fn preserve_existing_field_name_map(
+    database: &TempDatabase,
+    drawer_name: &str,
+    metadata: &mut serde_json::Value,
+) {
+    if metadata.get("field_name_map").is_some() {
+        return;
+    }
+
+    let metadata_path = database.path.join(format!("{}_meta.drw", drawer_name));
+    let Ok(existing_metadata_contents) = fs::read(&metadata_path) else {
+        return;
+    };
+    let Ok(existing_metadata) =
+        serde_json::from_slice::<serde_json::Value>(&existing_metadata_contents)
+    else {
+        return;
+    };
+    let Some(field_name_map) = existing_metadata.get("field_name_map").cloned() else {
+        return;
+    };
+    if let Some(metadata_map) = metadata.as_object_mut() {
+        metadata_map.insert("field_name_map".to_string(), field_name_map);
+    }
 }
 
 fn write_legacy_drawer_record(
@@ -184,7 +216,61 @@ fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
             }
         })
         .expect("drawer should stream");
+    if path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.ends_with("_index"))
+    {
+        return records;
+    }
+
+    let Some(field_name_map) = drawer_field_name_map_from_disk(path) else {
+        return records;
+    };
     records
+        .into_iter()
+        .map(|record| decode_drawer_record_from_disk(record, &field_name_map))
+        .collect()
+}
+
+fn drawer_field_name_map_from_disk(
+    path: &Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let drawer_name = path.file_stem()?.to_str()?;
+    let metadata_path = path.with_file_name(format!("{drawer_name}_meta.drw"));
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(metadata_path).ok()?).ok()?;
+    metadata.get("field_name_map")?.as_object().cloned()
+}
+
+fn decode_drawer_record_from_disk(
+    value: serde_json::Value,
+    field_name_map: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(field_name, field_value)| {
+                    let logical_field_name = field_name_map
+                        .get(&field_name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(field_name.as_str())
+                        .to_string();
+                    (
+                        logical_field_name,
+                        decode_drawer_record_from_disk(field_value, field_name_map),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| decode_drawer_record_from_disk(value, field_name_map))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 fn drawer_tombstone_count(path: &Path) -> usize {
@@ -797,6 +883,48 @@ fn us_018_full_subobject_is_upserted_and_parent_stores_reference() {
     let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
         .expect("weapon lookup should succeed");
     assert_eq!(weapons[0]["gem"]["potency"], 123);
+}
+
+#[test]
+fn us_121_field_name_encoding_preserves_relationship_hydration() {
+    let database = TempDatabase::new("us_121_encoded_relationship_hydration");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    upsert_one(
+        &engine,
+        "gem",
+        json!({
+            "_id": "encoded_fire",
+            "element": "Fire",
+            "clarity": "flawless"
+        }),
+    )
+    .expect("gem should upsert");
+    upsert_one(
+        &engine,
+        "weapon",
+        json!({
+            "_id": "encoded_blade",
+            "name": "Encoded Blade",
+            "gem": "@gem:encoded_fire"
+        }),
+    )
+    .expect("weapon should upsert");
+
+    let raw_weapon_records = drawer_records_from_disk(&database.path.join("weapon.drw"));
+    assert!(
+        raw_weapon_records
+            .iter()
+            .any(|record| record["gem"] == "@gem:encoded_fire")
+    );
+
+    let weapon = read_record(&engine, OperationFilter::pointer("@weapon:encoded_blade"))
+        .expect("weapon lookup should succeed")
+        .expect("weapon should exist");
+    assert_eq!(weapon["name"], "Encoded Blade");
+    assert_eq!(weapon["gem"]["element"], "Fire");
+    assert_eq!(weapon["gem"]["clarity"], "flawless");
 }
 
 #[test]
@@ -4158,7 +4286,7 @@ fn us_074_transaction_coordinator_commits_wal_and_hardens_drawer_state() {
     assert!(
         index_records
             .iter()
-            .any(|record| record["f"] == "_id" && record["k"] == "coordinated_fire")
+            .any(|record| record["f"] == "_" && record["k"] == "coordinated_fire")
     );
 }
 
