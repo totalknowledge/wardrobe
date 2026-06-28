@@ -1,9 +1,9 @@
 use std::io::Result;
 use std::path::{Path, PathBuf};
 
-use super::catalog_validation;
-use super::pointer;
 use super::storage::{StorageCoordinate, StorageScope};
+use super::validation as catalog_validation;
+use crate::wrdb_lib::pointer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum DatabaseRoute {

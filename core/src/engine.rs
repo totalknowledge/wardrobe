@@ -1,6 +1,7 @@
 use crate::wrdb_lib::application_logging::{
     ApplicationLogEvent, ApplicationLogLevel, emit_application_log,
 };
+use crate::wrdb_lib::catalog::{backup, diagnostics};
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::registry::CatalogRegistry;
@@ -10,20 +11,16 @@ use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalVerification};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 #[path = "wrdb_lib/access_control.rs"]
 mod access_control;
-#[path = "wrdb_lib/backup.rs"]
-mod backup;
 #[path = "wrdb_lib/boundary_execution.rs"]
 mod boundary_execution;
 #[path = "wrdb_lib/database_execution.rs"]
 mod database_execution;
-#[path = "wrdb_lib/diagnostics.rs"]
-mod diagnostics;
 
 pub use crate::wrdb_lib::command::{
     AlterRequest, BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command,
@@ -1095,6 +1092,10 @@ impl WardrobeEngine {
 
     pub(crate) fn manage_user(&self, action: &str, payload: Value) -> Result<Value> {
         self.manage_user_authorization(action, payload)
+    }
+
+    pub(crate) fn root_directory(&self) -> &Path {
+        &self.root_directory
     }
 
     fn manage_user_authorization(&self, action: &str, payload: Value) -> Result<Value> {

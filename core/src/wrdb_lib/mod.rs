@@ -1,19 +1,18 @@
 pub mod application_logging;
-pub(crate) mod catalog_lifecycle;
-pub(crate) mod catalog_validation;
+pub mod catalog;
+pub use catalog::registry;
+pub(crate) use catalog::{
+    discovery, lifecycle as catalog_lifecycle, routing, storage, validation as catalog_validation,
+};
 pub(crate) mod command;
 pub mod connection;
 pub mod core;
 pub mod database;
-pub(crate) mod discovery;
 pub mod drawer;
 pub(crate) mod driver;
 pub(crate) mod pointer;
 pub mod protocol;
 pub(crate) mod query;
-pub mod registry;
-pub(crate) mod routing;
-pub(crate) mod storage;
 pub(crate) mod storage_lock;
 pub(crate) mod transport;
 pub mod wal;

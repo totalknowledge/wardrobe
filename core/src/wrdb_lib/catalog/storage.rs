@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Result;
 use std::path::{Path, PathBuf};
 
-use super::catalog_validation;
+use super::validation as catalog_validation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageInventory {

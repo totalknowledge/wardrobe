@@ -1,5 +1,5 @@
 use super::diagnostics::{is_drawer_data_file, relative_path_string, split_structural_path};
-use super::{BackupArchive, BackupArchiveFile, RestoreReport, WardrobeEngine};
+use crate::engine::{BackupArchive, BackupArchiveFile, RestoreReport, WardrobeEngine};
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
@@ -51,9 +51,9 @@ struct StructuralBackupTarget {
     storage_path: PathBuf,
 }
 
-pub(super) fn backup_archive(engine: &WardrobeEngine, source_path: &str) -> Result<BackupArchive> {
+pub(crate) fn backup_archive(engine: &WardrobeEngine, source_path: &str) -> Result<BackupArchive> {
     let target =
-        structural_backup_target(&engine.root_directory, source_path, "backup source path")?;
+        structural_backup_target(engine.root_directory(), source_path, "backup source path")?;
     let files = collect_backup_archive_files(&target)?;
     Ok(BackupArchive {
         format: BACKUP_ARCHIVE_FORMAT.to_string(),
@@ -63,14 +63,14 @@ pub(super) fn backup_archive(engine: &WardrobeEngine, source_path: &str) -> Resu
     })
 }
 
-pub(super) fn restore_archive(
+pub(crate) fn restore_archive(
     engine: &WardrobeEngine,
     destination_path: &str,
     archive: BackupArchive,
 ) -> Result<RestoreReport> {
     validate_backup_archive_format(&archive)?;
     let target = structural_backup_target(
-        &engine.root_directory,
+        engine.root_directory(),
         destination_path,
         "restore destination path",
     )?;
@@ -81,7 +81,7 @@ pub(super) fn restore_archive(
         .map(|(_, bytes)| bytes.len())
         .sum::<usize>();
 
-    clear_restore_target(&engine.root_directory, &target)?;
+    clear_restore_target(engine.root_directory(), &target)?;
     for (relative_path, bytes) in &decoded_files {
         let destination = target.storage_path.join(relative_path);
         if let Some(parent) = destination.parent() {

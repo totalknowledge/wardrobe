@@ -1,4 +1,6 @@
-use super::{CheckEntry, CheckReport, DrawerInspectionMetrics, StorageDiagnosis, WardrobeEngine};
+use crate::engine::{
+    CheckEntry, CheckReport, DrawerInspectionMetrics, StorageDiagnosis, WardrobeEngine,
+};
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
@@ -36,11 +38,11 @@ enum StorageFileKind {
     Other,
 }
 
-pub(super) fn inspect_drawer(
+pub(crate) fn inspect_drawer(
     engine: &WardrobeEngine,
     drawer_name: &str,
 ) -> Result<DrawerInspectionMetrics> {
-    let target = inspect_target(&engine.root_directory, drawer_name)?;
+    let target = inspect_target(engine.root_directory(), drawer_name)?;
     let files = drawer_files(&target.data_dir, &target.drawer_name);
     let data_bytes = file_size_or_zero(&files.data)?;
     let index_bytes = file_size_or_zero(&files.index)?;
@@ -66,24 +68,27 @@ pub(super) fn inspect_drawer(
     })
 }
 
-pub(super) fn check_path(engine: &WardrobeEngine, raw_path: &str) -> Result<CheckReport> {
+pub(crate) fn check_path(engine: &WardrobeEngine, raw_path: &str) -> Result<CheckReport> {
     let segments = split_structural_path(raw_path, "check path")?;
     let logical_path = segments.join("/");
     let mut entries = Vec::new();
 
     let kind = match segments.len() {
         1 => {
-            let path = engine.root_directory.join(&segments[0]);
+            let path = engine.root_directory().join(&segments[0]);
             entries.push(check_entry("directory", &path)?);
             "wardrobe"
         }
         2 => {
-            let path = engine.root_directory.join(&segments[0]).join(&segments[1]);
+            let path = engine
+                .root_directory()
+                .join(&segments[0])
+                .join(&segments[1]);
             entries.push(check_entry("directory", &path)?);
             "bay"
         }
         3 => {
-            let files = drawer_files(&engine.root_directory, &logical_path);
+            let files = drawer_files(engine.root_directory(), &logical_path);
             entries.push(check_entry("data", &files.data)?);
             entries.push(check_entry("index", &files.index)?);
             entries.push(check_entry("meta", &files.meta)?);
@@ -104,11 +109,11 @@ pub(super) fn check_path(engine: &WardrobeEngine, raw_path: &str) -> Result<Chec
     })
 }
 
-pub(super) fn diagnose_storage(engine: &WardrobeEngine) -> Result<StorageDiagnosis> {
+pub(crate) fn diagnose_storage(engine: &WardrobeEngine) -> Result<StorageDiagnosis> {
     let drawers = list_drawer_names(engine)?;
-    let breakdown = storage_breakdown(&engine.root_directory)?;
+    let breakdown = storage_breakdown(engine.root_directory())?;
     Ok(StorageDiagnosis {
-        storage_directory: engine.root_directory.display().to_string(),
+        storage_directory: engine.root_directory().display().to_string(),
         storage_bytes: breakdown.total_bytes,
         data_bytes: breakdown.data_bytes,
         index_bytes: breakdown.index_bytes,
@@ -126,9 +131,13 @@ pub(super) fn diagnose_storage(engine: &WardrobeEngine) -> Result<StorageDiagnos
     })
 }
 
-pub(super) fn list_drawer_names(engine: &WardrobeEngine) -> Result<Vec<String>> {
+pub(crate) fn list_drawer_names(engine: &WardrobeEngine) -> Result<Vec<String>> {
     let mut drawers = Vec::new();
-    collect_drawer_names(&engine.root_directory, &engine.root_directory, &mut drawers)?;
+    collect_drawer_names(
+        engine.root_directory(),
+        engine.root_directory(),
+        &mut drawers,
+    )?;
     drawers.sort();
     drawers.dedup();
     Ok(drawers)
@@ -156,7 +165,7 @@ fn inspect_target(root_directory: &Path, raw_path: &str) -> Result<InspectTarget
     })
 }
 
-pub(in crate::engine) fn split_structural_path(raw_path: &str, label: &str) -> Result<Vec<String>> {
+pub(crate) fn split_structural_path(raw_path: &str, label: &str) -> Result<Vec<String>> {
     let mut segments = Vec::new();
     for segment in raw_path.split(|c| c == '/' || c == '\\') {
         if segment.is_empty() || segment == "." || segment == ".." {
@@ -317,7 +326,7 @@ fn collect_drawer_names(root: &Path, current: &Path, drawers: &mut Vec<String>) 
     Ok(())
 }
 
-pub(in crate::engine) fn is_drawer_data_file(path: &Path) -> bool {
+pub(crate) fn is_drawer_data_file(path: &Path) -> bool {
     if path.extension().and_then(|extension| extension.to_str()) != Some("drw") {
         return false;
     }
@@ -327,7 +336,7 @@ pub(in crate::engine) fn is_drawer_data_file(path: &Path) -> bool {
     !stem.starts_with('.') && !stem.ends_with("_index") && !stem.ends_with("_meta")
 }
 
-pub(in crate::engine) fn relative_path_string(path: &Path) -> String {
+pub(crate) fn relative_path_string(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(value) => value.to_str().map(ToOwned::to_owned),
