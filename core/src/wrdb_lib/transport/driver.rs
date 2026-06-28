@@ -1,13 +1,13 @@
-use super::command::result_expectations;
-use super::command::{
+use super::connection::ConnectionTarget;
+use super::{NetworkTransport, UnixSocketTransport};
+use crate::WardrobeEngine;
+use crate::wrdb_lib::command::result_expectations;
+use crate::wrdb_lib::command::{
     AlterRequest, BackupArchive, Command, CommandResult, CompactRequest, CreateRequest,
     CreateResult, DeleteResult, DropRequest, InspectResult, OperationFilter, OperationOptions,
     PermissionRequest, ReadResult, RestoreReport, StatusRequest, StatusResult, UpsertResult,
 };
-use super::connection::ConnectionTarget;
-use super::drawer::VacuumReport;
-use super::transport::{NetworkTransport, UnixSocketTransport};
-use crate::WardrobeEngine;
+use crate::wrdb_lib::drawer::VacuumReport;
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
 
