@@ -1,12 +1,12 @@
-use crate::engine::{
-    OperationSelection, ReturnShapeResolution, UpsertContext, merge_payload_into_record,
-    record_pointer, resolve_read_shape, upsert_record_target,
-};
-use crate::wrdb_lib::command::{
+use super::{
     AlterRequest, BackupArchive, CheckReport, Command, CommandResult, CompactMode, CompactRequest,
     CreateRequest, CreateResult, DeleteResult, DrawerInspectionMetrics, DropRequest, InspectResult,
     OperationFilter, OperationOptions, ReadResult, RestoreReport, StatusRequest, StatusResult,
     StorageDiagnosis, UpsertResult,
+};
+use crate::engine::{
+    OperationSelection, ReturnShapeResolution, UpsertContext, merge_payload_into_record,
+    record_pointer, resolve_read_shape, upsert_record_target,
 };
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
@@ -777,8 +777,8 @@ fn payload_pointer_drawer_name(payload: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{PermissionRequest, ReturnShape};
     use super::*;
-    use crate::wrdb_lib::command::{PermissionRequest, ReturnShape};
     use serde_json::json;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};

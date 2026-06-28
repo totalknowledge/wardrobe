@@ -1,7 +1,7 @@
-use super::drawer::VacuumReport;
-use super::query::{OrderDirection, QueryModifiers};
-use super::storage::{StorageCoordinate, StorageInventory, StorageLocator, StorageScope};
-use super::wal::WalVerification;
+use crate::wrdb_lib::drawer::VacuumReport;
+use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
+use crate::wrdb_lib::storage::{StorageCoordinate, StorageInventory, StorageLocator, StorageScope};
+use crate::wrdb_lib::wal::WalVerification;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};

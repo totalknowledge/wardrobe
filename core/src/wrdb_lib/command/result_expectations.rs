@@ -1,30 +1,30 @@
-use super::command::{BackupArchive, CommandResult, RestoreReport};
-use super::drawer::VacuumReport;
+use super::{BackupArchive, CommandResult, RestoreReport};
+use crate::wrdb_lib::drawer::VacuumReport;
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
 
-pub(crate) fn upsert(result: CommandResult) -> Result<super::command::UpsertResult> {
+pub(crate) fn upsert(result: CommandResult) -> Result<super::UpsertResult> {
     match result {
         CommandResult::Upsert(result) => Ok(result),
         other => unexpected_result("upsert result", other),
     }
 }
 
-pub(crate) fn read(result: CommandResult) -> Result<super::command::ReadResult> {
+pub(crate) fn read(result: CommandResult) -> Result<super::ReadResult> {
     match result {
         CommandResult::Read(result) => Ok(result),
         other => unexpected_result("read result", other),
     }
 }
 
-pub(crate) fn delete(result: CommandResult) -> Result<super::command::DeleteResult> {
+pub(crate) fn delete(result: CommandResult) -> Result<super::DeleteResult> {
     match result {
         CommandResult::Delete(result) => Ok(result),
         other => unexpected_result("delete result", other),
     }
 }
 
-pub(crate) fn inspect(result: CommandResult) -> Result<super::command::InspectResult> {
+pub(crate) fn inspect(result: CommandResult) -> Result<super::InspectResult> {
     match result {
         CommandResult::Inspect(result) => Ok(result),
         other => unexpected_result("inspect result", other),
@@ -38,14 +38,14 @@ pub(crate) fn compact(result: CommandResult) -> Result<VacuumReport> {
     }
 }
 
-pub(crate) fn create(result: CommandResult) -> Result<super::command::CreateResult> {
+pub(crate) fn create(result: CommandResult) -> Result<super::CreateResult> {
     match result {
         CommandResult::Create(result) => Ok(result),
         other => unexpected_result("create result", other),
     }
 }
 
-pub(crate) fn status(result: CommandResult) -> Result<super::command::StatusResult> {
+pub(crate) fn status(result: CommandResult) -> Result<super::StatusResult> {
     match result {
         CommandResult::Status(result) => Ok(result),
         other => unexpected_result("status result", other),
@@ -75,7 +75,7 @@ pub(crate) fn restored(result: CommandResult) -> Result<RestoreReport> {
 
 pub(crate) fn admin(result: CommandResult) -> Result<Value> {
     match result {
-        CommandResult::Create(super::command::CreateResult::Admin(payload))
+        CommandResult::Create(super::CreateResult::Admin(payload))
         | CommandResult::Alter(payload)
         | CommandResult::Drop(payload)
         | CommandResult::Grant(payload)

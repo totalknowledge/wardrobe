@@ -4,7 +4,7 @@ use super::{
 };
 use crate::wrdb_lib::catalog_lifecycle;
 use crate::wrdb_lib::catalog_validation;
-use crate::wrdb_lib::command_dispatch;
+use crate::wrdb_lib::command::dispatch as command_dispatch;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::routing::{self, DatabaseRoute};
 use crate::wrdb_lib::wal::{self, WalVerification};

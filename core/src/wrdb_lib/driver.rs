@@ -1,3 +1,4 @@
+use super::command::result_expectations;
 use super::command::{
     AlterRequest, BackupArchive, Command, CommandResult, CompactRequest, CreateRequest,
     CreateResult, DeleteResult, DropRequest, InspectResult, OperationFilter, OperationOptions,
@@ -5,7 +6,6 @@ use super::command::{
 };
 use super::connection::ConnectionTarget;
 use super::drawer::VacuumReport;
-use super::result_expectations;
 use super::transport::{NetworkTransport, UnixSocketTransport};
 use crate::WardrobeEngine;
 use serde_json::Value;

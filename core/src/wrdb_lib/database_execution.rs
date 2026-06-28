@@ -1,5 +1,5 @@
 use super::{QueryModifiers, StorageLocator, WardrobeEngine};
-use crate::wrdb_lib::command_dispatch;
+use crate::wrdb_lib::command::dispatch as command_dispatch;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::delete_rules;
 use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
