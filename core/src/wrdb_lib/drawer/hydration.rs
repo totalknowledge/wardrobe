@@ -1,5 +1,5 @@
+use super::relationship::VirtualRelationship;
 use crate::wrdb_lib::pointer;
-use crate::wrdb_lib::relationship::VirtualRelationship;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Result;

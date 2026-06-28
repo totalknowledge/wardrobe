@@ -1,5 +1,5 @@
+use super::relationship;
 use crate::wrdb_lib::pointer;
-use crate::wrdb_lib::relationship;
 use crate::wrdb_lib::routing;
 use serde_json::Value;
 use std::collections::BTreeMap;

@@ -1,13 +1,11 @@
 use super::{QueryModifiers, StorageLocator, WardrobeEngine};
 use crate::wrdb_lib::command::dispatch as command_dispatch;
 use crate::wrdb_lib::database::Database;
-use crate::wrdb_lib::delete_rules;
-use crate::wrdb_lib::drawer::{Drawer, VacuumReport};
-use crate::wrdb_lib::hydration;
-use crate::wrdb_lib::nested_decomposition;
+use crate::wrdb_lib::drawer::{
+    Drawer, VacuumReport, delete_rules, hydration, nested_decomposition, relationship,
+};
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query;
-use crate::wrdb_lib::relationship;
 use crate::wrdb_lib::routing::{self, DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::wal;
 use serde_json::Value;
