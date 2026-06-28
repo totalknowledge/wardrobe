@@ -15,6 +15,11 @@ pub use engine::{
     RestoreReport, ReturnShape, StatusRequest, StatusResult, StorageCoordinate, StorageDiagnosis,
     StorageInventory, StorageLocator, StorageScope, UpsertResult, WardrobeEngine,
 };
+pub use wrdb_lib::application_logging::{
+    ApplicationLogDestination, ApplicationLogEvent, ApplicationLogFormat, ApplicationLogLevel,
+    ApplicationLoggingConfig, application_logging_is_configured, emit_application_log,
+    init_application_logging, shutdown_application_logging,
+};
 pub use wrdb_lib::connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::{Drawer, VacuumReport};

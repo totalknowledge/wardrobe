@@ -853,7 +853,25 @@ Wardrobe distinguishes three log-like systems:
 - Transaction log: atomicity and transaction recovery artifact.
 - Application log: operator-facing observability stream.
 
-Application logging should use a structured logging stack such as tracing.
+Application logging is implemented as an explicit Wardrobe application logger plus `tracing` events. The server and CLI may initialize Wardrobe logging from command-line/config values. Embedded engine construction does not install or replace a global logger by default.
+
+Current public logging hooks:
+
+```rust
+ApplicationLoggingConfig::from_parts(level, format, destination, file)?
+init_application_logging(config)?
+shutdown_application_logging()
+application_logging_is_configured()
+emit_application_log(ApplicationLogEvent::new(...))
+```
+
+Supported initial values:
+
+```text
+level: trace, debug, info, warn, error, off
+format: pretty, json
+destination: stderr, stdout, file
+```
 
 Logging configuration should control:
 
@@ -861,10 +879,12 @@ Logging configuration should control:
 - format
 - destination
 - file path
-- module filters
+- module filters in a future subscriber-backed configuration layer
 
 Application logs must not be used for recovery.
 
 WAL and transaction logs must not be treated as operator-facing application logs.
 
-Sensitive payload values, credentials, tokens, and secrets should not be logged by default.
+Sensitive payload values, credentials, tokens, permissions, user records, and secrets should not be logged by default. Debug and trace logging remain redacted unless a future explicit unsafe diagnostic option is added.
+
+The `wardrobe` CLI keeps command output and logs separated: command output remains stdout, while application logs default to stderr when enabled. `wardrobe-server` emits startup, shutdown, config, listener, connection, command execution, failure, recovery, backup/restore, and compaction events through the application logging stream.

@@ -5,7 +5,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wardrobe_core::{
-    Command, DEFAULT_NETWORK_PORT, DurabilityPolicy, ProtocolFrame, ProtocolOpcode, WardrobeEngine,
+    ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig, Command,
+    DEFAULT_NETWORK_PORT, DurabilityPolicy, ProtocolFrame, ProtocolOpcode, WardrobeEngine,
+    emit_application_log, init_application_logging,
 };
 
 const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 5;
@@ -23,6 +25,7 @@ pub struct ServerConfig {
     pub connection_pool_limit: Option<usize>,
     pub durability_policy: DurabilityPolicy,
     pub profile_commands: bool,
+    pub logging: ApplicationLoggingConfig,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,6 +45,10 @@ impl ServerConfig {
         let mut connection_pool_limit = None;
         let mut durability_policy = DurabilityPolicy::Strict;
         let mut profile_commands = false;
+        let mut logging_level = None;
+        let mut logging_format = None;
+        let mut logging_destination = None;
+        let mut logging_file = None;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -88,6 +95,38 @@ impl ServerConfig {
                         update_group_commit_max_batch(durability_policy, max_batch_size);
                 }
                 "--profile-commands" => profile_commands = true,
+                "--log-level" => {
+                    logging_level = Some(args.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--log-level requires trace, debug, info, warn, error, or off",
+                        )
+                    })?);
+                }
+                "--log-format" => {
+                    logging_format = Some(args.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--log-format requires pretty or json",
+                        )
+                    })?);
+                }
+                "--log-destination" => {
+                    logging_destination = Some(args.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--log-destination requires stderr, stdout, or file",
+                        )
+                    })?);
+                }
+                "--log-file" => {
+                    logging_file = Some(PathBuf::from(args.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--log-file requires a file path",
+                        )
+                    })?));
+                }
                 "--check" => check_only = true,
                 "--help" | "-h" => {
                     print_help();
@@ -110,6 +149,12 @@ impl ServerConfig {
             connection_pool_limit,
             durability_policy,
             profile_commands,
+            logging: ApplicationLoggingConfig::from_parts(
+                logging_level.as_deref(),
+                logging_format.as_deref(),
+                logging_destination.as_deref(),
+                logging_file,
+            )?,
         })
     }
 }
@@ -129,14 +174,99 @@ pub fn print_help() {
         "  --group-commit-max-batch <count>  Grouped WAL max batch, default {DEFAULT_GROUP_COMMIT_MAX_BATCH}"
     );
     println!("  --profile-commands         Print per-command protocol and engine timings");
+    println!(
+        "  --log-level <level>        Application log level: trace, debug, info, warn, error, off"
+    );
+    println!("  --log-format <format>      Application log format: pretty or json");
+    println!("  --log-destination <dest>   Application log destination: stderr, stdout, or file");
+    println!("  --log-file <path>          File path when --log-destination file is used");
     println!("  --check                    Initialize the daemon and exit without blocking");
 }
 
+fn server_log(
+    level: ApplicationLogLevel,
+    message: &'static str,
+    fields: Vec<(&'static str, String)>,
+) {
+    emit_application_log(ApplicationLogEvent::new(
+        level,
+        "wardrobe_server",
+        message,
+        fields,
+    ));
+}
+
+fn server_error_fields(error: &io::Error) -> Vec<(&'static str, String)> {
+    vec![
+        ("error_kind", format!("{:?}", error.kind())),
+        ("error", error.to_string()),
+    ]
+}
+
 pub fn run(config: ServerConfig) -> io::Result<()> {
-    let engine = Arc::new(WardrobeEngine::open_for_server_with_durability_policy(
+    init_application_logging(config.logging.clone())?;
+    server_log(
+        ApplicationLogLevel::Info,
+        "config_loaded",
+        vec![
+            ("operation", "config_loading".to_string()),
+            ("storage_root", config.data_dir.clone()),
+            (
+                "tcp_bind",
+                config
+                    .tcp_bind
+                    .clone()
+                    .unwrap_or_else(|| "disabled".to_string()),
+            ),
+            (
+                "unix_socket",
+                config
+                    .unix_socket
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "disabled".to_string()),
+            ),
+            ("log_level", config.logging.level.as_str().to_string()),
+            ("log_format", config.logging.format.as_str().to_string()),
+            (
+                "log_destination",
+                config.logging.destination.as_str().to_string(),
+            ),
+        ],
+    );
+    server_log(
+        ApplicationLogLevel::Info,
+        "startup",
+        vec![
+            ("operation", "startup".to_string()),
+            ("storage_root", config.data_dir.clone()),
+        ],
+    );
+    let engine = match WardrobeEngine::open_for_server_with_durability_policy(
         &config.data_dir,
         config.durability_policy.clone(),
-    )?);
+    ) {
+        Ok(engine) => Arc::new(engine),
+        Err(error) => {
+            let mut fields = vec![
+                ("operation", "startup".to_string()),
+                ("storage_root", config.data_dir.clone()),
+                ("success", "false".to_string()),
+            ];
+            fields.extend(server_error_fields(&error));
+            server_log(ApplicationLogLevel::Error, "startup_failure", fields);
+            return Err(error);
+        }
+    };
+    server_log(
+        ApplicationLogLevel::Info,
+        "startup_complete",
+        vec![
+            ("operation", "startup".to_string()),
+            ("storage_root", config.data_dir.clone()),
+            ("success", "true".to_string()),
+        ],
+    );
 
     println!(
         "Wardrobe daemon initialized with storage directory: {}",
@@ -145,14 +275,33 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
 
     if config.check_only {
         println!("Wardrobe daemon check completed.");
+        server_log(
+            ApplicationLogLevel::Info,
+            "shutdown",
+            vec![
+                ("operation", "shutdown".to_string()),
+                ("reason", "check_only".to_string()),
+            ],
+        );
         return Ok(());
     }
 
     if config.tcp_bind.is_none() && config.unix_socket.is_none() {
-        return Err(io::Error::new(
+        let error = io::Error::new(
             io::ErrorKind::InvalidInput,
             "At least one Wardrobe server listener must be enabled",
-        ));
+        );
+        let mut fields = vec![
+            ("operation", "listener_resolution".to_string()),
+            ("success", "false".to_string()),
+        ];
+        fields.extend(server_error_fields(&error));
+        server_log(
+            ApplicationLogLevel::Error,
+            "listener_resolution_failure",
+            fields,
+        );
+        return Err(error);
     }
 
     let mut listener_threads = Vec::new();
@@ -161,6 +310,15 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
         let listener = TcpListener::bind(&tcp_bind)?;
         let local_addr = listener.local_addr()?;
         println!("Wardrobe daemon listening on TCP: {local_addr}");
+        server_log(
+            ApplicationLogLevel::Info,
+            "listener_bound",
+            vec![
+                ("operation", "listener_bind".to_string()),
+                ("listener", "tcp".to_string()),
+                ("bind", local_addr.to_string()),
+            ],
+        );
         let engine = Arc::clone(&engine);
         let connection_pool_limit = config.connection_pool_limit;
         let runtime = ServerRuntimeConfig {
@@ -181,6 +339,15 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
             println!(
                 "Wardrobe daemon listening on Unix socket: {}",
                 socket_path.display()
+            );
+            server_log(
+                ApplicationLogLevel::Info,
+                "listener_bound",
+                vec![
+                    ("operation", "listener_bind".to_string()),
+                    ("listener", "unix".to_string()),
+                    ("path", socket_path.display().to_string()),
+                ],
             );
             let engine = Arc::clone(&engine);
             let connection_pool_limit = config.connection_pool_limit;
@@ -208,6 +375,11 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
         join_listener(handle)?;
     }
 
+    server_log(
+        ApplicationLogLevel::Info,
+        "shutdown",
+        vec![("operation", "shutdown".to_string())],
+    );
     Ok(())
 }
 
@@ -236,9 +408,18 @@ pub fn serve_tcp_listener_with_config(
     loop {
         let permit = connection_pool.as_ref().map(ConnectionPool::acquire);
         match listener.accept() {
-            Ok((stream, _)) => {
+            Ok((stream, peer_addr)) => {
                 configure_tcp_stream(&stream)?;
                 idle_polls = 0;
+                server_log(
+                    ApplicationLogLevel::Info,
+                    "connection_accepted",
+                    vec![
+                        ("operation", "connection_accept".to_string()),
+                        ("listener", "tcp".to_string()),
+                        ("peer_addr", peer_addr.to_string()),
+                    ],
+                );
                 spawn_connection_handler(Arc::clone(&engine), stream, permit, runtime);
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -294,6 +475,14 @@ pub fn serve_unix_listener_with_config(
             Ok((stream, _)) => {
                 stream.set_nonblocking(false)?;
                 idle_polls = 0;
+                server_log(
+                    ApplicationLogLevel::Info,
+                    "connection_accepted",
+                    vec![
+                        ("operation", "connection_accept".to_string()),
+                        ("listener", "unix".to_string()),
+                    ],
+                );
                 spawn_connection_handler(Arc::clone(&engine), stream, permit, runtime);
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -349,6 +538,20 @@ where
         let protocol_receive = receive_started.elapsed();
 
         if frame.opcode != ProtocolOpcode::Command {
+            server_log(
+                ApplicationLogLevel::Warn,
+                "command_failure",
+                vec![
+                    ("operation", "command_decode".to_string()),
+                    ("error_kind", "InvalidData".to_string()),
+                    (
+                        "error",
+                        "Wardrobe server expected a command frame from the client".to_string(),
+                    ),
+                    ("mutation_phase", "before_mutation".to_string()),
+                    ("success", "false".to_string()),
+                ],
+            );
             write_error_frame(
                 &mut *stream,
                 "Wardrobe server expected a command frame from the client",
@@ -360,6 +563,17 @@ where
         let command = match serde_json::from_slice::<Command>(&frame.payload) {
             Ok(command) => command,
             Err(error) => {
+                server_log(
+                    ApplicationLogLevel::Warn,
+                    "command_failure",
+                    vec![
+                        ("operation", "command_deserialize".to_string()),
+                        ("error_kind", "InvalidData".to_string()),
+                        ("error", error.to_string()),
+                        ("mutation_phase", "before_mutation".to_string()),
+                        ("success", "false".to_string()),
+                    ],
+                );
                 write_error_frame(
                     &mut *stream,
                     &format!("Failed to deserialize Wardrobe command: {error}"),
@@ -370,6 +584,15 @@ where
         let command_deserialization = deserialization_started.elapsed();
         let command_name = command_label(&command);
         let request_bytes = frame.payload.len();
+        server_log(
+            ApplicationLogLevel::Info,
+            "command_start",
+            vec![
+                ("operation", "command_execute".to_string()),
+                ("command", command_name.to_string()),
+                ("request_bytes", request_bytes.to_string()),
+            ],
+        );
 
         let execution_started = Instant::now();
         match engine.execute_command(command) {
@@ -388,6 +611,17 @@ where
                 ProtocolFrame::new(ProtocolOpcode::Result, payload)
                     .write_to_stream(&mut *stream)?;
                 let protocol_transmission = transmission_started.elapsed();
+                server_log(
+                    ApplicationLogLevel::Info,
+                    "command_finish",
+                    vec![
+                        ("operation", "command_execute".to_string()),
+                        ("command", command_name.to_string()),
+                        ("duration_us", engine_execution.as_micros().to_string()),
+                        ("response_bytes", response_bytes.to_string()),
+                        ("success", "true".to_string()),
+                    ],
+                );
                 if runtime.profile_commands {
                     emit_command_profile(ServerCommandProfile {
                         command_name,
@@ -411,6 +645,16 @@ where
                 let transmission_started = Instant::now();
                 write_error_frame(&mut *stream, &response)?;
                 let protocol_transmission = transmission_started.elapsed();
+                let mut fields = vec![
+                    ("operation", "command_execute".to_string()),
+                    ("command", command_name.to_string()),
+                    ("duration_us", engine_execution.as_micros().to_string()),
+                    ("response_bytes", response_bytes.to_string()),
+                    ("mutation_phase", "unknown".to_string()),
+                    ("success", "false".to_string()),
+                ];
+                fields.extend(server_error_fields(&error));
+                server_log(ApplicationLogLevel::Error, "command_failure", fields);
                 if runtime.profile_commands {
                     emit_command_profile(ServerCommandProfile {
                         command_name,
@@ -710,7 +954,8 @@ mod tests {
     use std::io::Cursor;
     use std::thread;
     use wardrobe_core::{
-        AlterRequest, BackupArchive, BackupArchiveFile, CompactRequest, CreateRequest, DropRequest,
+        AlterRequest, ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel,
+        BackupArchive, BackupArchiveFile, CompactRequest, CreateRequest, DropRequest,
         OperationFilter, OperationOptions, PermissionRequest, StatusRequest, StorageCoordinate,
         StorageScope,
     };
@@ -723,6 +968,8 @@ mod tests {
         assert!(!cfg.check_only);
         assert!(!cfg.profile_commands);
         assert_eq!(cfg.durability_policy, DurabilityPolicy::Strict);
+        assert_eq!(cfg.logging.level, ApplicationLogLevel::Off);
+        assert_eq!(cfg.logging.destination, ApplicationLogDestination::Stderr);
     }
 
     #[test]
@@ -730,6 +977,50 @@ mod tests {
         let cfg = ServerConfig::from_args(vec!["--profile-commands".to_string()])
             .expect("profile flag should parse");
         assert!(cfg.profile_commands);
+    }
+
+    #[test]
+    fn server_config_parses_application_logging_flags() {
+        let cfg = ServerConfig::from_args(vec![
+            "--log-level".to_string(),
+            "debug".to_string(),
+            "--log-format".to_string(),
+            "json".to_string(),
+            "--log-destination".to_string(),
+            "file".to_string(),
+            "--log-file".to_string(),
+            "logs/wardrobe.log".to_string(),
+        ])
+        .expect("logging flags should parse");
+
+        assert_eq!(cfg.logging.level, ApplicationLogLevel::Debug);
+        assert_eq!(cfg.logging.format, ApplicationLogFormat::Json);
+        assert_eq!(cfg.logging.destination, ApplicationLogDestination::File);
+        assert_eq!(cfg.logging.file, Some(PathBuf::from("logs/wardrobe.log")));
+    }
+
+    #[test]
+    fn server_config_rejects_invalid_application_logging_flags() {
+        assert!(
+            ServerConfig::from_args(vec!["--log-level".to_string(), "verbose".to_string()])
+                .is_err()
+        );
+        assert!(
+            ServerConfig::from_args(vec!["--log-format".to_string(), "xml".to_string()]).is_err()
+        );
+        assert!(
+            ServerConfig::from_args(vec!["--log-destination".to_string(), "syslog".to_string()])
+                .is_err()
+        );
+        assert!(
+            ServerConfig::from_args(vec![
+                "--log-level".to_string(),
+                "info".to_string(),
+                "--log-destination".to_string(),
+                "file".to_string()
+            ])
+            .is_err()
+        );
     }
 
     #[test]

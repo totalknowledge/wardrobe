@@ -1,3 +1,6 @@
+use crate::wrdb_lib::application_logging::{
+    ApplicationLogEvent, ApplicationLogLevel, emit_application_log,
+};
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::registry::CatalogRegistry;
@@ -9,6 +12,7 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 #[path = "wrdb_lib/access_control.rs"]
 mod access_control;
@@ -305,6 +309,26 @@ pub(crate) fn merge_payload_into_record(
     Ok(())
 }
 
+fn engine_log(
+    level: ApplicationLogLevel,
+    message: &'static str,
+    fields: Vec<(&'static str, String)>,
+) {
+    emit_application_log(ApplicationLogEvent::new(
+        level,
+        "wardrobe_engine",
+        message,
+        fields,
+    ));
+}
+
+fn error_log_fields(error: &Error) -> Vec<(&'static str, String)> {
+    vec![
+        ("error_kind", format!("{:?}", error.kind())),
+        ("error", error.to_string()),
+    ]
+}
+
 impl WardrobeEngine {
     pub fn open(directory: &str) -> Result<Self> {
         Self::open_with_optional_limits(directory, None, None)
@@ -417,7 +441,42 @@ impl WardrobeEngine {
             durability_policy.clone(),
         )?;
         let database_core = RwLock::new(database_core);
-        wal::recover_database::<Self>(&database_core)?;
+        let recovery_started = Instant::now();
+        engine_log(
+            ApplicationLogLevel::Info,
+            "recovery_start",
+            vec![
+                ("operation", "recovery".to_string()),
+                ("storage_root", root_directory.display().to_string()),
+            ],
+        );
+        if let Err(error) = wal::recover_database::<Self>(&database_core) {
+            let mut fields = vec![
+                ("operation", "recovery".to_string()),
+                ("storage_root", root_directory.display().to_string()),
+                (
+                    "duration_us",
+                    recovery_started.elapsed().as_micros().to_string(),
+                ),
+                ("success", "false".to_string()),
+            ];
+            fields.extend(error_log_fields(&error));
+            engine_log(ApplicationLogLevel::Error, "recovery_failure", fields);
+            return Err(error);
+        }
+        engine_log(
+            ApplicationLogLevel::Info,
+            "recovery_finish",
+            vec![
+                ("operation", "recovery".to_string()),
+                ("storage_root", root_directory.display().to_string()),
+                (
+                    "duration_us",
+                    recovery_started.elapsed().as_micros().to_string(),
+                ),
+                ("success", "true".to_string()),
+            ],
+        );
         Ok(Self {
             root_directory,
             registry: RwLock::new(registry),
@@ -528,18 +587,61 @@ impl WardrobeEngine {
         C: Into<CompactRequest>,
     {
         match request.into() {
-            CompactRequest::Drawer { drawer_name, mode } => match mode {
-                CompactMode::Vacuum => Self::vacuum_drawer_in_database(
-                    &self.database_core,
-                    &drawer_name,
-                    ExecutionContext::root(),
-                ),
-                CompactMode::Migrate => Self::migrate_drawer_in_database(
-                    &self.database_core,
-                    &drawer_name,
-                    ExecutionContext::root(),
-                ),
-            },
+            CompactRequest::Drawer { drawer_name, mode } => {
+                let mode_label = match mode {
+                    CompactMode::Vacuum => "vacuum",
+                    CompactMode::Migrate => "migrate",
+                };
+                let started = Instant::now();
+                engine_log(
+                    ApplicationLogLevel::Info,
+                    "compact_start",
+                    vec![
+                        ("operation", "compact".to_string()),
+                        ("drawer", drawer_name.clone()),
+                        ("mode", mode_label.to_string()),
+                    ],
+                );
+                let result = match mode {
+                    CompactMode::Vacuum => Self::vacuum_drawer_in_database(
+                        &self.database_core,
+                        &drawer_name,
+                        ExecutionContext::root(),
+                    ),
+                    CompactMode::Migrate => Self::migrate_drawer_in_database(
+                        &self.database_core,
+                        &drawer_name,
+                        ExecutionContext::root(),
+                    ),
+                };
+                match &result {
+                    Ok(report) => engine_log(
+                        ApplicationLogLevel::Info,
+                        "compact_finish",
+                        vec![
+                            ("operation", "compact".to_string()),
+                            ("drawer", drawer_name),
+                            ("mode", mode_label.to_string()),
+                            ("duration_us", started.elapsed().as_micros().to_string()),
+                            ("success", "true".to_string()),
+                            ("records_rewritten", report.records_rewritten.to_string()),
+                            ("bytes_reclaimed", report.bytes_reclaimed.to_string()),
+                        ],
+                    ),
+                    Err(error) => {
+                        let mut fields = vec![
+                            ("operation", "compact".to_string()),
+                            ("drawer", drawer_name),
+                            ("mode", mode_label.to_string()),
+                            ("duration_us", started.elapsed().as_micros().to_string()),
+                            ("success", "false".to_string()),
+                        ];
+                        fields.extend(error_log_fields(error));
+                        engine_log(ApplicationLogLevel::Error, "compact_failure", fields);
+                    }
+                }
+                result
+            }
         }
     }
 
@@ -758,11 +860,86 @@ impl WardrobeEngine {
     }
 
     pub fn backup(&self, source_path: &str) -> Result<BackupArchive> {
-        backup::backup_archive(self, source_path)
+        let started = Instant::now();
+        engine_log(
+            ApplicationLogLevel::Info,
+            "backup_start",
+            vec![
+                ("operation", "backup".to_string()),
+                ("source_path", source_path.to_string()),
+            ],
+        );
+        let result = backup::backup_archive(self, source_path);
+        match &result {
+            Ok(archive) => engine_log(
+                ApplicationLogLevel::Info,
+                "backup_finish",
+                vec![
+                    ("operation", "backup".to_string()),
+                    ("source_path", source_path.to_string()),
+                    ("scope", archive.scope.clone()),
+                    ("file_count", archive.files.len().to_string()),
+                    ("duration_us", started.elapsed().as_micros().to_string()),
+                    ("success", "true".to_string()),
+                ],
+            ),
+            Err(error) => {
+                let mut fields = vec![
+                    ("operation", "backup".to_string()),
+                    ("source_path", source_path.to_string()),
+                    ("duration_us", started.elapsed().as_micros().to_string()),
+                    ("success", "false".to_string()),
+                ];
+                fields.extend(error_log_fields(error));
+                engine_log(ApplicationLogLevel::Error, "backup_failure", fields);
+            }
+        }
+        result
     }
 
     pub fn restore(&self, destination_path: &str, archive: BackupArchive) -> Result<RestoreReport> {
-        backup::restore_archive(self, destination_path, archive)
+        let started = Instant::now();
+        let archive_scope = archive.scope.clone();
+        let archive_file_count = archive.files.len();
+        engine_log(
+            ApplicationLogLevel::Info,
+            "restore_start",
+            vec![
+                ("operation", "restore".to_string()),
+                ("destination_path", destination_path.to_string()),
+                ("scope", archive_scope.clone()),
+                ("file_count", archive_file_count.to_string()),
+            ],
+        );
+        let result = backup::restore_archive(self, destination_path, archive);
+        match &result {
+            Ok(report) => engine_log(
+                ApplicationLogLevel::Info,
+                "restore_finish",
+                vec![
+                    ("operation", "restore".to_string()),
+                    ("destination_path", report.destination_path.clone()),
+                    ("scope", report.scope.clone()),
+                    ("file_count", report.file_count.to_string()),
+                    ("byte_count", report.byte_count.to_string()),
+                    ("duration_us", started.elapsed().as_micros().to_string()),
+                    ("success", "true".to_string()),
+                ],
+            ),
+            Err(error) => {
+                let mut fields = vec![
+                    ("operation", "restore".to_string()),
+                    ("destination_path", destination_path.to_string()),
+                    ("scope", archive_scope),
+                    ("file_count", archive_file_count.to_string()),
+                    ("duration_us", started.elapsed().as_micros().to_string()),
+                    ("success", "false".to_string()),
+                ];
+                fields.extend(error_log_fields(error));
+                engine_log(ApplicationLogLevel::Error, "restore_failure", fields);
+            }
+        }
+        result
     }
 
     pub fn create<C>(&self, request: C) -> Result<CreateResult>
@@ -1034,6 +1211,28 @@ impl WardrobeEngine {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wardrobe_engine_{test_name}_{nanos}"))
+    }
+
+    #[test]
+    fn engine_open_does_not_configure_application_logging_by_default() {
+        let _guard = crate::wrdb_lib::application_logging::test_logging_guard();
+        crate::wrdb_lib::application_logging::shutdown_application_logging();
+        let storage = temp_dir("logging_default");
+        let engine = WardrobeEngine::open(&storage.to_string_lossy()).expect("engine should open");
+
+        assert!(!crate::wrdb_lib::application_logging::application_logging_is_configured());
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(storage);
+    }
 
     #[test]
     fn operation_selection_merges_drawers_queries_and_pointers() {

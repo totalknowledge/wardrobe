@@ -169,6 +169,22 @@ Backup and restore are structural operations, not just filesystem copies. The en
 
 ---
 
+## Observability
+
+Wardrobe deliberately keeps operator-facing application logs separate from recovery artifacts.
+
+- Application logs describe runtime behavior such as server startup, shutdown, config loading, listener binding, accepted connections, command start/end/failure, recovery activity, backup/restore, and compaction.
+- Logical WAL records are durability and recovery data for storage mutations.
+- Transaction WAL records are transaction atomicity and transaction recovery data.
+
+Application logs are never replayed for recovery. WAL and transaction WAL files are never treated as human-facing application log streams.
+
+`wardrobe-server` owns logging initialization for daemon mode. The `wardrobe` CLI can opt into the same logging controls while keeping command output on stdout and logs on stderr by default. Embedded `WardrobeEngine` construction does not install global logging; host applications either configure Wardrobe logging explicitly or install their own `tracing` subscriber.
+
+Application events should include structured fields where possible, such as operation, command, drawer, wardrobe/database, bay/schema, tenant, duration, and success/failure state. Events must not log raw record payloads, credentials, tokens, permission payloads, or user records by default.
+
+---
+
 ## Schema and Relationship Management
 
 Wardrobe supports schema-adjacent control without abandoning the document model.

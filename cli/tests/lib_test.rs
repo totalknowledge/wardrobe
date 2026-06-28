@@ -1,6 +1,7 @@
 use serde_json::json;
 use std::fs;
 use std::net::TcpStream;
+use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 use wardrobe_cli::{
     CliConfig, print_json, pub_normalize_record_ids, run_cli_logic, run_command, shell_split,
@@ -149,6 +150,14 @@ fn test_cli_config_clean_parsing() {
     assert_eq!(config.connection, "custom_dir");
     assert!(config.pretty);
     assert_eq!(config.command_parts, vec!["read", "character"]);
+    assert_eq!(
+        config.logging.level,
+        wardrobe_core::ApplicationLogLevel::Off
+    );
+    assert_eq!(
+        config.logging.destination,
+        wardrobe_core::ApplicationLogDestination::Stderr
+    );
 }
 
 #[test]
@@ -162,6 +171,83 @@ fn test_cli_config_alternate_flags() {
     let config = CliConfig::from_args(args).unwrap();
     assert_eq!(config.connection, "alt_dir");
     assert_eq!(config.command_parts, vec!["status", "drawer-names"]);
+}
+
+#[test]
+fn test_cli_config_logging_flags_are_parsed_and_not_commands() {
+    let args = vec![
+        "--log-level".to_string(),
+        "debug".to_string(),
+        "--log-format".to_string(),
+        "json".to_string(),
+        "--log-destination".to_string(),
+        "file".to_string(),
+        "--log-file".to_string(),
+        "logs/wardrobe-cli.log".to_string(),
+        "read".to_string(),
+        "gem".to_string(),
+    ];
+    let config = CliConfig::from_args(args).unwrap();
+
+    assert_eq!(
+        config.logging.level,
+        wardrobe_core::ApplicationLogLevel::Debug
+    );
+    assert_eq!(
+        config.logging.format,
+        wardrobe_core::ApplicationLogFormat::Json
+    );
+    assert_eq!(
+        config.logging.destination,
+        wardrobe_core::ApplicationLogDestination::File
+    );
+    assert_eq!(
+        config.logging.file,
+        Some(std::path::PathBuf::from("logs/wardrobe-cli.log"))
+    );
+    assert_eq!(config.command_parts, vec!["read", "gem"]);
+}
+
+#[test]
+fn test_cli_config_rejects_invalid_logging_flags() {
+    assert!(CliConfig::from_args(vec!["--log-level".to_string(), "verbose".to_string()]).is_err());
+    assert!(CliConfig::from_args(vec!["--log-format".to_string(), "xml".to_string()]).is_err());
+    assert!(
+        CliConfig::from_args(vec!["--log-destination".to_string(), "syslog".to_string()]).is_err()
+    );
+    assert!(
+        CliConfig::from_args(vec![
+            "--log-level".to_string(),
+            "info".to_string(),
+            "--log-destination".to_string(),
+            "file".to_string(),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn test_cli_logging_defaults_to_stderr_without_corrupting_stdout() {
+    let storage_directory = temp_storage_directory("logging_stderr_stdout_clean");
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_wardrobe"))
+        .arg("--data-dir")
+        .arg(&storage_directory)
+        .arg("--log-level")
+        .arg("info")
+        .arg("status")
+        .arg("drawer-names")
+        .output()
+        .expect("wardrobe binary should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stdout.trim(), "[]");
+    assert!(stderr.contains("cli_start"));
+    assert!(stderr.contains("command_start"));
+    assert!(!stdout.contains("command_start"));
+
+    let _ = fs::remove_dir_all(storage_directory);
 }
 
 #[test]
@@ -208,6 +294,7 @@ fn test_embedded_drawers_and_diagnose_execution() {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: false,
         command_parts: vec!["status".to_string(), "drawer-names".to_string()],
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(run_cli_logic(config).is_ok());
 
@@ -215,6 +302,7 @@ fn test_embedded_drawers_and_diagnose_execution() {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: false,
         command_parts: vec!["status".to_string(), "storage".to_string()],
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(run_cli_logic(config_diag).is_ok());
 
@@ -240,6 +328,7 @@ fn test_embedded_inspect_and_records_execution() {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: true,
         command_parts: vec!["inspect".to_string(), "gem".to_string()],
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(run_cli_logic(config_inspect).is_ok());
 
@@ -247,6 +336,7 @@ fn test_embedded_inspect_and_records_execution() {
         connection: storage_directory.to_string_lossy().to_string(),
         pretty: false,
         command_parts: vec!["read".to_string(), "gem".to_string()],
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(run_cli_logic(config_records).is_ok());
 
@@ -279,6 +369,7 @@ fn test_network_show_commands_via_library() {
         connection: target,
         pretty: false,
         command_parts: vec!["status".to_string(), "wardrobes".to_string()],
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(run_cli_logic(config).is_ok());
 }

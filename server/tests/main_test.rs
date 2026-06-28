@@ -136,6 +136,35 @@ fn daemon_check_rejects_missing_data_dir_argument() {
 }
 
 #[test]
+fn daemon_check_file_logging_writes_application_log_without_terminal() {
+    let storage_directory = temp_storage_directory("check_file_logging");
+    let log_path = storage_directory.join("logs").join("wardrobe.log");
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_wardrobe-server"))
+        .arg("--data-dir")
+        .arg(&storage_directory)
+        .arg("--check")
+        .arg("--log-level")
+        .arg("info")
+        .arg("--log-format")
+        .arg("json")
+        .arg("--log-destination")
+        .arg("file")
+        .arg("--log-file")
+        .arg(&log_path)
+        .output()
+        .expect("server binary should run");
+
+    assert!(output.status.success());
+    let contents = std::fs::read_to_string(&log_path).expect("log file should be readable");
+    assert!(contents.contains("\"target\":\"wardrobe_server\""));
+    assert!(contents.contains("\"message\":\"config_loaded\""));
+    assert!(contents.contains("\"message\":\"startup_complete\""));
+
+    let _ = std::fs::remove_dir_all(storage_directory);
+}
+
+#[test]
 fn tcp_daemon_routes_client_commands_to_shared_engine() {
     let storage_directory = temp_storage_directory("tcp_routes_client_commands");
     let engine =
@@ -559,6 +588,7 @@ fn run_returns_error_when_no_listeners_enabled() {
         connection_pool_limit: None,
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     let res = wardrobe_server::run(cfg);
     assert!(res.is_err());
@@ -626,6 +656,7 @@ fn run_execution_with_check_only_flag() {
         connection_pool_limit: None,
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(wardrobe_server::run(cfg).is_ok());
     let _ = std::fs::remove_dir_all(storage_directory);
@@ -642,6 +673,7 @@ fn run_execution_unsupported_unix_platform_guard() {
         connection_pool_limit: None,
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
+        logging: wardrobe_core::ApplicationLoggingConfig::default(),
     };
     assert!(wardrobe_server::run(cfg).is_err());
 }

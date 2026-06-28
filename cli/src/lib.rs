@@ -4,10 +4,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use wardrobe_core::{
-    AlterRequest, CompactRequest, ConnectionTarget, CreateRequest, CreateResult, Database,
-    DropRequest, InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult,
-    StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, VacuumReport, WardrobeClient,
+    AlterRequest, ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig,
+    CompactRequest, ConnectionTarget, CreateRequest, CreateResult, Database, DropRequest,
+    InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult, StatusRequest,
+    StatusResult, StorageDiagnosis, StorageInventory, VacuumReport, WardrobeClient,
+    emit_application_log, init_application_logging,
 };
 
 #[derive(Debug)]
@@ -15,6 +18,7 @@ pub struct CliConfig {
     pub connection: String,
     pub pretty: bool,
     pub command_parts: Vec<String>,
+    pub logging: ApplicationLoggingConfig,
 }
 
 impl CliConfig {
@@ -25,6 +29,10 @@ impl CliConfig {
         let mut connection = "./wardrobe".to_string();
         let mut pretty = false;
         let mut command_parts = Vec::new();
+        let mut logging_level = None;
+        let mut logging_format = None;
+        let mut logging_destination = None;
+        let mut logging_file = None;
 
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
@@ -40,6 +48,35 @@ impl CliConfig {
                 }
                 "--pretty" => {
                     pretty = true;
+                }
+                "--log-level" => {
+                    logging_level = Some(args.next().ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidInput,
+                            "--log-level requires trace, debug, info, warn, error, or off",
+                        )
+                    })?);
+                }
+                "--log-format" => {
+                    logging_format = Some(args.next().ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidInput,
+                            "--log-format requires pretty or json",
+                        )
+                    })?);
+                }
+                "--log-destination" => {
+                    logging_destination = Some(args.next().ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidInput,
+                            "--log-destination requires stderr, stdout, or file",
+                        )
+                    })?);
+                }
+                "--log-file" => {
+                    logging_file = Some(PathBuf::from(args.next().ok_or_else(|| {
+                        Error::new(ErrorKind::InvalidInput, "--log-file requires a file path")
+                    })?));
                 }
                 "--help" | "-h" => {
                     print_help();
@@ -57,6 +94,12 @@ impl CliConfig {
             connection,
             pretty,
             command_parts,
+            logging: ApplicationLoggingConfig::from_parts(
+                logging_level.as_deref(),
+                logging_format.as_deref(),
+                logging_destination.as_deref(),
+                logging_file,
+            )?,
         })
     }
 }
@@ -64,6 +107,10 @@ impl CliConfig {
 const HELP_TEXT: &str = r#"wardrobe:
     -h, --help                  Show this message and exit
     -v, --version               Show the version and exit
+    --log-level <level>         Application log level: trace, debug, info, warn, error, off
+    --log-format <format>       Application log format: pretty or json
+    --log-destination <dest>    Application log destination: stderr, stdout, or file
+    --log-file <path>           File path when --log-destination file is used
 
     The first argument to the CLI is always the target connection context.
     It can be a filesystem path (e.g., ./wardrobe) for embedded mode, or a network connection string or socket location
@@ -219,9 +266,51 @@ pub fn print_version() {
     println!("wardrobe {}", env!("CARGO_PKG_VERSION"));
 }
 
+fn cli_log(level: ApplicationLogLevel, message: &'static str, fields: Vec<(&'static str, String)>) {
+    emit_application_log(ApplicationLogEvent::new(
+        level,
+        "wardrobe_cli",
+        message,
+        fields,
+    ));
+}
+
 pub fn run_cli_logic(config: CliConfig) -> io::Result<()> {
-    let client = WardrobeClient::open(&config.connection)
-        .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to open connection: {e}")))?;
+    init_application_logging(config.logging.clone())?;
+    cli_log(
+        ApplicationLogLevel::Info,
+        "cli_start",
+        vec![
+            ("operation", "cli_start".to_string()),
+            ("connection", config.connection.clone()),
+            ("log_level", config.logging.level.as_str().to_string()),
+            ("log_format", config.logging.format.as_str().to_string()),
+            (
+                "log_destination",
+                config.logging.destination.as_str().to_string(),
+            ),
+        ],
+    );
+    let client = match WardrobeClient::open(&config.connection) {
+        Ok(client) => client,
+        Err(error) => {
+            cli_log(
+                ApplicationLogLevel::Error,
+                "connection_failure",
+                vec![
+                    ("operation", "connect".to_string()),
+                    ("connection", config.connection.clone()),
+                    ("error_kind", format!("{:?}", error.kind())),
+                    ("error", error.to_string()),
+                    ("success", "false".to_string()),
+                ],
+            );
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Failed to open connection: {error}"),
+            ));
+        }
+    };
 
     if !config.command_parts.is_empty() {
         return run_command(&client, &config.command_parts, config.pretty);
@@ -512,7 +601,17 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
         return Ok(());
     }
 
-    match parts[0].as_str() {
+    let command_name = parts[0].as_str();
+    let started = Instant::now();
+    cli_log(
+        ApplicationLogLevel::Info,
+        "command_start",
+        vec![
+            ("operation", "command_execute".to_string()),
+            ("command", command_name.to_string()),
+        ],
+    );
+    let result = match command_name {
         "status" => run_status_command(client, parts, pretty),
         "inspect" => run_inspect_command(client, parts, pretty),
         "read" => run_read_command(client, parts, pretty),
@@ -545,7 +644,33 @@ pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> i
             ErrorKind::InvalidInput,
             format!("Unknown command: {}", parts[0]),
         )),
+    };
+    match &result {
+        Ok(()) => cli_log(
+            ApplicationLogLevel::Info,
+            "command_finish",
+            vec![
+                ("operation", "command_execute".to_string()),
+                ("command", command_name.to_string()),
+                ("duration_us", started.elapsed().as_micros().to_string()),
+                ("success", "true".to_string()),
+            ],
+        ),
+        Err(error) => cli_log(
+            ApplicationLogLevel::Error,
+            "command_failure",
+            vec![
+                ("operation", "command_execute".to_string()),
+                ("command", command_name.to_string()),
+                ("duration_us", started.elapsed().as_micros().to_string()),
+                ("error_kind", format!("{:?}", error.kind())),
+                ("error", error.to_string()),
+                ("mutation_phase", "unknown".to_string()),
+                ("success", "false".to_string()),
+            ],
+        ),
     }
+    result
 }
 
 fn run_upsert_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {

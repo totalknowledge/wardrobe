@@ -2,7 +2,10 @@ use std::io;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::thread;
-use wardrobe_core::{ProtocolFrame, ProtocolOpcode};
+use wardrobe_core::{
+    ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel, ProtocolFrame,
+    ProtocolOpcode,
+};
 use wardrobe_server::{ServerConfig, print_help};
 
 #[test]
@@ -11,6 +14,8 @@ fn server_config_from_args_defaults() {
     assert_eq!(cfg.data_dir, "./wardrobe");
     assert_eq!(cfg.tcp_bind.unwrap().starts_with("127.0.0.1"), true);
     assert!(!cfg.check_only);
+    assert_eq!(cfg.logging.level, ApplicationLogLevel::Off);
+    assert_eq!(cfg.logging.destination, ApplicationLogDestination::Stderr);
 }
 
 #[test]
@@ -32,6 +37,26 @@ fn server_config_explicit_valid_flags() {
 }
 
 #[test]
+fn server_config_application_logging_flags() {
+    let args = vec![
+        "--log-level".to_string(),
+        "info".to_string(),
+        "--log-format".to_string(),
+        "json".to_string(),
+        "--log-destination".to_string(),
+        "file".to_string(),
+        "--log-file".to_string(),
+        "logs/wardrobe.log".to_string(),
+    ];
+    let cfg = ServerConfig::from_args(args).unwrap();
+
+    assert_eq!(cfg.logging.level, ApplicationLogLevel::Info);
+    assert_eq!(cfg.logging.format, ApplicationLogFormat::Json);
+    assert_eq!(cfg.logging.destination, ApplicationLogDestination::File);
+    assert_eq!(cfg.logging.file, Some(PathBuf::from("logs/wardrobe.log")));
+}
+
+#[test]
 fn server_config_no_tcp_flag() {
     let args = vec![
         "--no-tcp".to_string(),
@@ -49,6 +74,10 @@ fn server_config_missing_payload_args() {
     assert!(ServerConfig::from_args(vec!["--tcp-bind".to_string()]).is_err());
     assert!(ServerConfig::from_args(vec!["--unix-socket".to_string()]).is_err());
     assert!(ServerConfig::from_args(vec!["--connection-pool-limit".to_string()]).is_err());
+    assert!(ServerConfig::from_args(vec!["--log-level".to_string()]).is_err());
+    assert!(ServerConfig::from_args(vec!["--log-format".to_string()]).is_err());
+    assert!(ServerConfig::from_args(vec!["--log-destination".to_string()]).is_err());
+    assert!(ServerConfig::from_args(vec!["--log-file".to_string()]).is_err());
 }
 
 #[test]

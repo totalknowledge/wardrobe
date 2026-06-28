@@ -59,6 +59,7 @@ They map directly:
 - Inspection, verification, and recovery types: `DrawerInspectionMetrics`, `CheckReport`, `CheckEntry`, `StorageDiagnosis`, `VacuumReport`, `WalVerification`, `BackupArchive`, `BackupArchiveFile`, `RestoreReport`
 - Lower-level storage types: `Database`, `Drawer`, `DatabaseReader`, `DatabaseWriter`, `Recycler`, `StorageFormat`, `BsonBinaryFormat`
 - Catalog and WAL types: `CATALOG_FILE_NAME`, `CatalogEntry`, `CatalogRegistry`, `CatalogTenantRoute`, `WAL_FILE_NAME`, `WalEntry`, `WalJournal`, `WalOperation`
+- Application logging types: `ApplicationLoggingConfig`, `ApplicationLogLevel`, `ApplicationLogFormat`, `ApplicationLogDestination`, `ApplicationLogEvent`
 
 The two main application entry points are:
 
@@ -201,6 +202,12 @@ Useful server flags:
 - `--no-tcp` disables the TCP listener
 - `--unix-socket <path>` binds a Unix domain socket listener on Unix platforms
 - `--check` initializes the engine and exits without blocking
+- `--log-level <level>` enables application logs at `trace`, `debug`, `info`, `warn`, `error`, or disables them with `off`
+- `--log-format <format>` selects `pretty` or `json`
+- `--log-destination <dest>` writes application logs to `stderr`, `stdout`, or `file`
+- `--log-file <path>` chooses the file path when `--log-destination file` is used
+
+Application logs are operator-facing diagnostics only. They are separate from Wardrobe's logical WAL and transaction WAL, and they are never used for recovery.
 
 ## CLI Usage
 
@@ -213,6 +220,8 @@ cargo run -p wardrobe-cli -- --target <connection> [--pretty] <command> [args]
 ```
 
 If no command is supplied, the CLI enters an interactive REPL. If standard input is piped in, the CLI executes the piped command instead.
+
+CLI application logging uses the same `--log-level`, `--log-format`, `--log-destination`, and `--log-file` controls as the server. Logging is off by default, and when enabled it writes to stderr by default so JSON command output remains script-friendly.
 
 Examples:
 
@@ -255,6 +264,18 @@ Behavior notes:
 - `backup` and `restore` operate at wardrobe, bay, or drawer scope
 
 Compatibility aliases are intentionally not provided for the canonical CLI vocabulary.
+
+## Application Logging
+
+Wardrobe has three separate log-like systems:
+
+- Application logs: structured operator-facing diagnostics for startup, shutdown, connection handling, command execution, recovery, backup, restore, and compaction activity.
+- Logical WAL: durable storage recovery records.
+- Transaction WAL: transaction atomicity and transaction recovery records.
+
+Application logs may be configured explicitly by `wardrobe-server`, by the `wardrobe` CLI, or by an embedding host through `ApplicationLoggingConfig` and `init_application_logging`. Embedded `WardrobeEngine::open` does not install or override a global logger by default. Wardrobe also emits application events through `tracing`, so a host application that has already installed a tracing subscriber can observe them without Wardrobe taking ownership of global logging.
+
+Logs include structured fields such as operation, command, drawer, duration, and success state where available. Raw record payloads, credentials, tokens, and user records are not logged by default.
 
 ## Current Capabilities
 
