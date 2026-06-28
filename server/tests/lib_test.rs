@@ -1,12 +1,24 @@
+use std::fs;
 use std::io;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
-    ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel, ProtocolFrame,
-    ProtocolOpcode,
+    ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel, DurabilityPolicy,
+    ProtocolFrame, ProtocolOpcode,
 };
 use wardrobe_server::{ServerConfig, print_help};
+
+fn temp_config_file(test_name: &str, contents: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("wardrobe_server_{test_name}_{nanos}.toml"));
+    fs::write(&path, contents).expect("config fixture should write");
+    path
+}
 
 #[test]
 fn server_config_from_args_defaults() {
@@ -54,6 +66,120 @@ fn server_config_application_logging_flags() {
     assert_eq!(cfg.logging.format, ApplicationLogFormat::Json);
     assert_eq!(cfg.logging.destination, ApplicationLogDestination::File);
     assert_eq!(cfg.logging.file, Some(PathBuf::from("logs/wardrobe.log")));
+}
+
+#[test]
+fn server_config_loads_first_positional_toml_file() {
+    let path = temp_config_file(
+        "positional",
+        r#"
+        [data]
+        directory = "./from_config"
+
+        [network]
+        tcp_bind = "127.0.0.1:3333"
+
+        [cache]
+        max_cached_drawers = 7
+
+        [wal]
+        durability = "grouped"
+        group_commit_window_ms = 12
+        group_commit_max_batch = 34
+        checkpoint_size_bytes = 4096
+        checkpoint_ops = 5
+
+        [logging]
+        level = "warn"
+        format = "json"
+        destination = "stderr"
+        "#,
+    );
+
+    let cfg = ServerConfig::from_args(vec![path.to_string_lossy().to_string()])
+        .expect("positional config should parse");
+    let _ = fs::remove_file(path);
+
+    assert_eq!(cfg.data_dir, "./from_config");
+    assert_eq!(cfg.tcp_bind, Some("127.0.0.1:3333".to_string()));
+    assert_eq!(cfg.max_cached_drawers, Some(7));
+    assert_eq!(cfg.wal_checkpoint_size_bytes, 4096);
+    assert_eq!(cfg.wal_checkpoint_ops, 5);
+    assert_eq!(cfg.logging.level, ApplicationLogLevel::Warn);
+    assert_eq!(cfg.logging.format, ApplicationLogFormat::Json);
+    assert_eq!(
+        cfg.durability_policy,
+        DurabilityPolicy::Grouped {
+            commit_window_ms: 12,
+            max_batch_size: 34
+        }
+    );
+}
+
+#[test]
+fn server_config_flag_loads_file_and_cli_overrides_win() {
+    let path = temp_config_file(
+        "override",
+        r#"
+        [data]
+        directory = "./from_config"
+
+        [network]
+        tcp_bind = "127.0.0.1:3333"
+
+        [cache]
+        max_cached_drawers = 7
+
+        [wal]
+        checkpoint_size_bytes = 4096
+        checkpoint_ops = 5
+
+        [logging]
+        level = "warn"
+        "#,
+    );
+
+    let cfg = ServerConfig::from_args(vec![
+        "--config".to_string(),
+        path.to_string_lossy().to_string(),
+        "--data-dir".to_string(),
+        "./from_cli".to_string(),
+        "--tcp-bind".to_string(),
+        "127.0.0.1:4444".to_string(),
+        "--max-cached-drawers".to_string(),
+        "9".to_string(),
+        "--wal-checkpoint-ops".to_string(),
+        "8".to_string(),
+        "--log-level".to_string(),
+        "error".to_string(),
+    ])
+    .expect("config and overrides should parse");
+    let _ = fs::remove_file(path);
+
+    assert_eq!(cfg.data_dir, "./from_cli");
+    assert_eq!(cfg.tcp_bind, Some("127.0.0.1:4444".to_string()));
+    assert_eq!(cfg.max_cached_drawers, Some(9));
+    assert_eq!(cfg.wal_checkpoint_size_bytes, 4096);
+    assert_eq!(cfg.wal_checkpoint_ops, 8);
+    assert_eq!(cfg.logging.level, ApplicationLogLevel::Error);
+}
+
+#[test]
+fn server_config_rejects_file_with_no_enabled_listener() {
+    let path = temp_config_file(
+        "no_listener",
+        r#"
+        [network]
+        tcp_enabled = false
+        unix_socket_enabled = false
+        "#,
+    );
+
+    let result = ServerConfig::from_args(vec![path.to_string_lossy().to_string()]);
+    let _ = fs::remove_file(path);
+
+    assert!(result.is_err());
+    assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidInput);
 }
 
 #[test]

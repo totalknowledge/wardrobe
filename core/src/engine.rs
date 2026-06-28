@@ -2,6 +2,7 @@ use crate::wrdb_lib::application_logging::{
     ApplicationLogEvent, ApplicationLogLevel, emit_application_log,
 };
 use crate::wrdb_lib::catalog::{backup, diagnostics};
+use crate::wrdb_lib::config::WardrobeConfig;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::registry::CatalogRegistry;
@@ -44,6 +45,11 @@ pub struct WardrobeEngine {
     wal_ops_threshold_count: u64,
     durability_policy: DurabilityPolicy,
     server_lock: Option<StorageRootLockGuard>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WardrobeEngineBuilder {
+    config: WardrobeConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -327,8 +333,22 @@ fn error_log_fields(error: &Error) -> Vec<(&'static str, String)> {
 }
 
 impl WardrobeEngine {
+    pub fn builder() -> WardrobeEngineBuilder {
+        WardrobeEngineBuilder::default()
+    }
+
     pub fn open(directory: &str) -> Result<Self> {
         Self::open_with_optional_limits(directory, None, None)
+    }
+
+    pub fn open_with_config(config: WardrobeConfig) -> Result<Self> {
+        config.validate()?;
+        Self::open_with_optional_limits_and_durability(
+            config.data.directory.to_string_lossy().as_ref(),
+            config.cache.max_cached_drawers,
+            Some((config.wal.checkpoint_size_bytes, config.wal.checkpoint_ops)),
+            config.wal.durability,
+        )
     }
 
     pub fn open_with_drawer_cache_limit(
@@ -398,6 +418,19 @@ impl WardrobeEngine {
             None,
             None,
             durability_policy,
+            Some(server_lock),
+        )
+    }
+
+    pub fn open_for_server_with_config(config: WardrobeConfig) -> Result<Self> {
+        config.validate()?;
+        let root_directory = config.data.directory.clone();
+        let server_lock = storage_lock::acquire_server_lock(&root_directory)?;
+        Self::open_with_optional_limits_and_durability_and_lock(
+            root_directory.to_string_lossy().as_ref(),
+            config.cache.max_cached_drawers,
+            Some((config.wal.checkpoint_size_bytes, config.wal.checkpoint_ops)),
+            config.wal.durability,
             Some(server_lock),
         )
     }
@@ -1098,6 +1131,18 @@ impl WardrobeEngine {
         &self.root_directory
     }
 
+    pub fn configured_max_cached_drawers(&self) -> Option<usize> {
+        self.max_cached_drawers
+    }
+
+    pub fn configured_wal_thresholds(&self) -> (u64, u64) {
+        (self.wal_size_threshold_bytes, self.wal_ops_threshold_count)
+    }
+
+    pub fn configured_durability_policy(&self) -> DurabilityPolicy {
+        self.durability_policy.clone()
+    }
+
     fn manage_user_authorization(&self, action: &str, payload: Value) -> Result<Value> {
         if self.server_lock.is_some() {
             access_control::manage_user_with_server_lock(&self.root_directory, action, payload)
@@ -1205,6 +1250,50 @@ impl WardrobeEngine {
 
     pub fn execute_command(&self, command: Command) -> Result<CommandResult> {
         boundary_execution::execute_command(self, command)
+    }
+}
+
+impl Default for WardrobeEngineBuilder {
+    fn default() -> Self {
+        Self {
+            config: WardrobeConfig::default(),
+        }
+    }
+}
+
+impl WardrobeEngineBuilder {
+    pub fn config(mut self, config: WardrobeConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.config.data.directory = directory.into();
+        self
+    }
+
+    pub fn max_cached_drawers(mut self, max_cached_drawers: usize) -> Self {
+        self.config.cache.max_cached_drawers = Some(max_cached_drawers);
+        self
+    }
+
+    pub fn durability(mut self, durability_policy: DurabilityPolicy) -> Self {
+        self.config.wal.durability = durability_policy;
+        self
+    }
+
+    pub fn wal_checkpoint_thresholds(
+        mut self,
+        checkpoint_size_bytes: u64,
+        checkpoint_ops: u64,
+    ) -> Self {
+        self.config.wal.checkpoint_size_bytes = checkpoint_size_bytes;
+        self.config.wal.checkpoint_ops = checkpoint_ops;
+        self
+    }
+
+    pub fn open(self) -> Result<WardrobeEngine> {
+        WardrobeEngine::open_with_config(self.config)
     }
 }
 

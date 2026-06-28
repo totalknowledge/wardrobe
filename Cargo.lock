@@ -6210,6 +6210,7 @@ dependencies = [
  "rand 0.10.1",
  "serde",
  "serde_json",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "uuid",
 ]

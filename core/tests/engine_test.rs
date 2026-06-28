@@ -12,7 +12,8 @@ use wardrobe_core::{
     CreateRequest, CreateResult, DatabaseReader, DeleteResult, OperationFilter, OperationOptions,
     OrderDirection, QueryModifiers, ReadResult, ReturnShape, StatusRequest, StatusResult,
     StorageCoordinate, StorageFormat, StorageInventory, StorageLocator, StorageScope, UpsertResult,
-    WAL_FILE_NAME, WalJournal, WalOperation, WardrobeEngine,
+    WAL_FILE_NAME, WalJournal, WalOperation, WardrobeConfig, WardrobeEngine,
+    application_logging_is_configured, shutdown_application_logging,
 };
 
 const INDEX_FIELD_KEY: &str = "f";
@@ -4863,6 +4864,49 @@ fn engine_appends_to_wal_on_write() -> std::io::Result<()> {
     let metadata = fs::metadata(&wal_path)?;
     assert!(metadata.len() > 0);
     Ok(())
+}
+
+#[test]
+fn us_127_open_with_config_applies_cache_and_wal_settings_without_global_logging() {
+    shutdown_application_logging();
+    let database = TempDatabase::new("us_127_open_with_config");
+    let mut config = WardrobeConfig::default();
+    config.data.directory = database.path.clone();
+    config.cache.max_cached_drawers = Some(2);
+    config.wal.checkpoint_size_bytes = 2048;
+    config.wal.checkpoint_ops = 3;
+    config.wal.durability = wardrobe_core::DurabilityPolicy::Grouped {
+        commit_window_ms: 9,
+        max_batch_size: 11,
+    };
+    config.logging.level = wardrobe_core::ApplicationLogLevel::Info;
+
+    let engine = WardrobeEngine::open_with_config(config).expect("engine should open with config");
+
+    assert_eq!(engine.configured_max_cached_drawers(), Some(2));
+    assert_eq!(engine.configured_wal_thresholds(), (2048, 3));
+    assert_eq!(
+        engine.configured_durability_policy(),
+        wardrobe_core::DurabilityPolicy::Grouped {
+            commit_window_ms: 9,
+            max_batch_size: 11
+        }
+    );
+    assert!(!application_logging_is_configured());
+}
+
+#[test]
+fn us_127_engine_builder_opens_with_explicit_config() {
+    let database = TempDatabase::new("us_127_engine_builder");
+    let engine = WardrobeEngine::builder()
+        .directory(database.path.clone())
+        .max_cached_drawers(4)
+        .wal_checkpoint_thresholds(4096, 5)
+        .open()
+        .expect("builder should open engine");
+
+    assert_eq!(engine.configured_max_cached_drawers(), Some(4));
+    assert_eq!(engine.configured_wal_thresholds(), (4096, 5));
 }
 
 #[test]

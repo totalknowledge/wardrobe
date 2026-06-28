@@ -5,9 +5,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wardrobe_core::{
-    ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig, Command,
-    DEFAULT_NETWORK_PORT, DurabilityPolicy, ProtocolFrame, ProtocolOpcode, WardrobeEngine,
-    emit_application_log, init_application_logging,
+    ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig, Command, DurabilityPolicy,
+    ProtocolFrame, ProtocolOpcode, WardrobeConfig, WardrobeEngine, emit_application_log,
+    init_application_logging,
 };
 
 const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 5;
@@ -23,6 +23,9 @@ pub struct ServerConfig {
     pub tcp_bind: Option<String>,
     pub unix_socket: Option<PathBuf>,
     pub connection_pool_limit: Option<usize>,
+    pub max_cached_drawers: Option<usize>,
+    pub wal_checkpoint_size_bytes: u64,
+    pub wal_checkpoint_ops: u64,
     pub durability_policy: DurabilityPolicy,
     pub profile_commands: bool,
     pub logging: ApplicationLoggingConfig,
@@ -38,94 +41,117 @@ impl ServerConfig {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut data_dir = String::from("./wardrobe");
+        let args = args.into_iter().collect::<Vec<_>>();
+        let (config_path, args) = extract_config_path(args)?;
+        let mut wardrobe_config = match config_path {
+            Some(path) => WardrobeConfig::from_toml_file(path)?,
+            None => WardrobeConfig::default(),
+        };
         let mut check_only = false;
-        let mut tcp_bind = Some(format!("127.0.0.1:{DEFAULT_NETWORK_PORT}"));
-        let mut unix_socket = None;
         let mut connection_pool_limit = None;
-        let mut durability_policy = DurabilityPolicy::Strict;
         let mut profile_commands = false;
-        let mut logging_level = None;
-        let mut logging_format = None;
-        let mut logging_destination = None;
-        let mut logging_file = None;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--data-dir" => {
-                    data_dir = args.next().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "--data-dir requires a directory path",
-                        )
-                    })?;
+                    wardrobe_config.data.directory =
+                        PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--data-dir requires a directory path",
+                            )
+                        })?);
                 }
                 "--tcp-bind" => {
-                    tcp_bind = Some(args.next().ok_or_else(|| {
+                    wardrobe_config.network.tcp_enabled = true;
+                    wardrobe_config.network.tcp_bind = args.next().ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "--tcp-bind requires an address such as 127.0.0.1:24842",
                         )
-                    })?);
+                    })?;
                 }
-                "--no-tcp" => tcp_bind = None,
+                "--no-tcp" => wardrobe_config.network.tcp_enabled = false,
                 "--unix-socket" => {
-                    unix_socket = Some(PathBuf::from(args.next().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "--unix-socket requires a socket path",
-                        )
-                    })?));
+                    wardrobe_config.network.unix_socket_enabled = true;
+                    wardrobe_config.network.unix_socket =
+                        PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--unix-socket requires a socket path",
+                            )
+                        })?);
                 }
                 "--connection-pool-limit" => {
                     connection_pool_limit = Some(parse_connection_pool_limit(&mut args, &arg)?);
                 }
+                "--max-cached-drawers" => {
+                    wardrobe_config.cache.max_cached_drawers =
+                        Some(parse_positive_usize(&mut args, &arg)?);
+                }
+                "--wal-checkpoint-size-bytes" => {
+                    wardrobe_config.wal.checkpoint_size_bytes =
+                        parse_positive_u64(&mut args, &arg)?;
+                }
+                "--wal-checkpoint-ops" => {
+                    wardrobe_config.wal.checkpoint_ops = parse_positive_u64(&mut args, &arg)?;
+                }
                 "--durability" => {
-                    durability_policy = parse_durability_policy(&mut args, &arg)?;
+                    wardrobe_config.wal.durability = parse_durability_policy(&mut args, &arg)?;
                 }
                 "--group-commit-window-ms" => {
                     let commit_window_ms = parse_positive_u64(&mut args, &arg)?;
-                    durability_policy =
-                        update_group_commit_window(durability_policy, commit_window_ms);
+                    wardrobe_config.wal.durability = update_group_commit_window(
+                        wardrobe_config.wal.durability,
+                        commit_window_ms,
+                    );
                 }
                 "--group-commit-max-batch" => {
                     let max_batch_size = parse_positive_usize(&mut args, &arg)?;
-                    durability_policy =
-                        update_group_commit_max_batch(durability_policy, max_batch_size);
+                    wardrobe_config.wal.durability = update_group_commit_max_batch(
+                        wardrobe_config.wal.durability,
+                        max_batch_size,
+                    );
                 }
                 "--profile-commands" => profile_commands = true,
                 "--log-level" => {
-                    logging_level = Some(args.next().ok_or_else(|| {
+                    let raw = args.next().ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "--log-level requires trace, debug, info, warn, error, or off",
                         )
-                    })?);
+                    })?;
+                    wardrobe_config.logging.level = ApplicationLogLevel::parse(&raw)?;
                 }
                 "--log-format" => {
-                    logging_format = Some(args.next().ok_or_else(|| {
+                    let raw = args.next().ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "--log-format requires pretty or json",
                         )
-                    })?);
+                    })?;
+                    wardrobe_config.logging.format =
+                        wardrobe_core::ApplicationLogFormat::parse(&raw)?;
                 }
                 "--log-destination" => {
-                    logging_destination = Some(args.next().ok_or_else(|| {
+                    let raw = args.next().ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "--log-destination requires stderr, stdout, or file",
                         )
-                    })?);
+                    })?;
+                    wardrobe_config.logging.destination =
+                        wardrobe_core::ApplicationLogDestination::parse(&raw)?;
                 }
                 "--log-file" => {
-                    logging_file = Some(PathBuf::from(args.next().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "--log-file requires a file path",
-                        )
-                    })?));
+                    wardrobe_config.logging.file =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--log-file requires a file path",
+                            )
+                        })?));
                 }
                 "--check" => check_only = true,
                 "--help" | "-h" => {
@@ -141,31 +167,115 @@ impl ServerConfig {
             }
         }
 
+        wardrobe_config.validate_for_server()?;
+        let tcp_bind = if wardrobe_config.network.tcp_enabled {
+            Some(wardrobe_config.network.tcp_bind.clone())
+        } else {
+            None
+        };
+        let unix_socket = if wardrobe_config.network.unix_socket_enabled {
+            Some(wardrobe_config.network.unix_socket.clone())
+        } else {
+            None
+        };
+
         Ok(Self {
-            data_dir,
+            data_dir: wardrobe_config.data.directory.display().to_string(),
             check_only,
             tcp_bind,
             unix_socket,
             connection_pool_limit,
-            durability_policy,
+            max_cached_drawers: wardrobe_config.cache.max_cached_drawers,
+            wal_checkpoint_size_bytes: wardrobe_config.wal.checkpoint_size_bytes,
+            wal_checkpoint_ops: wardrobe_config.wal.checkpoint_ops,
+            durability_policy: wardrobe_config.wal.durability,
             profile_commands,
-            logging: ApplicationLoggingConfig::from_parts(
-                logging_level.as_deref(),
-                logging_format.as_deref(),
-                logging_destination.as_deref(),
-                logging_file,
-            )?,
+            logging: wardrobe_config.logging,
         })
     }
+
+    fn engine_config(&self) -> WardrobeConfig {
+        let mut config = WardrobeConfig::default();
+        config.data.directory = PathBuf::from(&self.data_dir);
+        config.network.tcp_enabled = self.tcp_bind.is_some();
+        if let Some(tcp_bind) = &self.tcp_bind {
+            config.network.tcp_bind = tcp_bind.clone();
+        }
+        config.network.unix_socket_enabled = self.unix_socket.is_some();
+        if let Some(unix_socket) = &self.unix_socket {
+            config.network.unix_socket = unix_socket.clone();
+        }
+        config.cache.max_cached_drawers = self.max_cached_drawers;
+        config.wal.durability = self.durability_policy.clone();
+        config.wal.checkpoint_size_bytes = self.wal_checkpoint_size_bytes;
+        config.wal.checkpoint_ops = self.wal_checkpoint_ops;
+        config.logging = self.logging.clone();
+        config
+    }
+}
+
+fn extract_config_path(args: Vec<String>) -> io::Result<(Option<PathBuf>, Vec<String>)> {
+    let mut config_path = None;
+    let mut remaining = Vec::new();
+    let mut args = args.into_iter().enumerate();
+
+    while let Some((index, arg)) = args.next() {
+        if index == 0 && !arg.starts_with('-') {
+            set_config_path(&mut config_path, PathBuf::from(arg))?;
+            continue;
+        }
+
+        if arg == "--config" {
+            let path = args.next().map(|(_, value)| value).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--config requires a TOML config file path",
+                )
+            })?;
+            set_config_path(&mut config_path, PathBuf::from(path))?;
+            continue;
+        }
+
+        if let Some(path) = arg.strip_prefix("--config=") {
+            if path.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--config requires a TOML config file path",
+                ));
+            }
+            set_config_path(&mut config_path, PathBuf::from(path))?;
+            continue;
+        }
+
+        remaining.push(arg);
+    }
+
+    Ok((config_path, remaining))
+}
+
+fn set_config_path(slot: &mut Option<PathBuf>, path: PathBuf) -> io::Result<()> {
+    if slot.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Only one Wardrobe server config file can be provided",
+        ));
+    }
+    *slot = Some(path);
+    Ok(())
 }
 
 pub fn print_help() {
     println!("wardrobe-server");
+    println!("  <config.toml>              Optional first positional TOML config file");
+    println!("  --config <path>            Load TOML config file");
     println!("  --data-dir <path>          Storage directory for the Wardrobe database");
     println!("  --tcp-bind <addr:port>     Bind TCP listener, default 127.0.0.1:24842");
     println!("  --no-tcp                   Disable TCP listener");
     println!("  --unix-socket <path>       Bind Unix domain socket listener on Unix");
     println!("  --connection-pool-limit <count>  Maximum active worker connections");
+    println!("  --max-cached-drawers <count>  Maximum cached drawers in the embedded engine");
+    println!("  --wal-checkpoint-size-bytes <bytes>  WAL checkpoint byte threshold");
+    println!("  --wal-checkpoint-ops <count>  WAL checkpoint operation threshold");
     println!("  --durability <mode>        WAL durability mode: strict or grouped");
     println!(
         "  --group-commit-window-ms <ms>  Grouped WAL commit window, default {DEFAULT_GROUP_COMMIT_WINDOW_MS}"
@@ -242,10 +352,8 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
             ("storage_root", config.data_dir.clone()),
         ],
     );
-    let engine = match WardrobeEngine::open_for_server_with_durability_policy(
-        &config.data_dir,
-        config.durability_policy.clone(),
-    ) {
+    let engine_config = config.engine_config();
+    let engine = match WardrobeEngine::open_for_server_with_config(engine_config) {
         Ok(engine) => Arc::new(engine),
         Err(error) => {
             let mut fields = vec![

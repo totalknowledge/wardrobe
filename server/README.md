@@ -48,6 +48,47 @@ cargo run -p wardrobe-server -- --data-dir ./data --check
 
 That mode is useful for verifying that the data directory can be initialized successfully.
 
+## Configuration File
+
+The server can also load a TOML configuration file. The config file may be passed either as the first positional argument or with `--config`:
+
+```text
+cargo run -p wardrobe-server -- ./wardrobe.server.toml
+cargo run -p wardrobe-server -- --config ./wardrobe.server.toml
+```
+
+CLI flags override values from the config file:
+
+```text
+cargo run -p wardrobe-server -- ./wardrobe.server.toml --data-dir ./override --tcp-bind 127.0.0.1:24843
+```
+
+Minimal config:
+
+```toml
+[data]
+directory = "./data"
+
+[network]
+tcp_enabled = true
+tcp_bind = "127.0.0.1:24842"
+unix_socket_enabled = false
+unix_socket = "/tmp/wardrobe.sock"
+
+[cache]
+max_cached_drawers = 128
+
+[wal]
+durability = "strict"
+checkpoint_size_bytes = 1048576
+checkpoint_ops = 1000
+
+[logging]
+level = "info"
+format = "pretty"
+destination = "stderr"
+```
+
 ## Storage Root
 
 The server points at a single root directory. Under that root, the engine can manage:

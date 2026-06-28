@@ -14,11 +14,16 @@ pub use engine::{
     OrderDirection, PermissionRequest, PermissionScopeDescriptor, QueryModifiers, ReadResult,
     RestoreReport, ReturnShape, StatusRequest, StatusResult, StorageCoordinate, StorageDiagnosis,
     StorageInventory, StorageLocator, StorageScope, UpsertResult, WardrobeEngine,
+    WardrobeEngineBuilder,
 };
 pub use wrdb_lib::application_logging::{
     ApplicationLogDestination, ApplicationLogEvent, ApplicationLogFormat, ApplicationLogLevel,
     ApplicationLoggingConfig, application_logging_is_configured, emit_application_log,
     init_application_logging, shutdown_application_logging,
+};
+pub use wrdb_lib::config::{
+    CacheConfig, DataConfig, NetworkConfig, SecurityConfig, TransactionConfig,
+    TransactionRecoveryMode, WalConfig, WardrobeConfig,
 };
 pub use wrdb_lib::connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use wrdb_lib::core::reader::DatabaseReader;
