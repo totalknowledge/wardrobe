@@ -170,6 +170,21 @@ impl DataBlockIndexEntry {
     }
 }
 
+#[derive(Debug)]
+struct DeleteCandidate {
+    key: String,
+    offset: u64,
+    record: Value,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct DrawerTestMetrics {
+    find_all_records_with_migration_calls: usize,
+    invalidate_materialized_query_indexes_calls: usize,
+    persist_metadata_calls: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VacuumReport {
     pub records_rewritten: usize,
@@ -209,6 +224,8 @@ pub struct Drawer {
     metadata_format_version: u8,
     index_file_path: PathBuf,
     meta_file_path: PathBuf,
+    #[cfg(test)]
+    test_metrics: DrawerTestMetrics,
 }
 
 impl Drawer {
@@ -417,6 +434,8 @@ impl Drawer {
             metadata_format_version,
             index_file_path,
             meta_file_path,
+            #[cfg(test)]
+            test_metrics: DrawerTestMetrics::default(),
         };
 
         if !drawer_needs_format_migration {
@@ -792,7 +811,7 @@ impl Drawer {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut deleted_count = 0usize;
+        let mut candidates = Vec::new();
         let mut seen_keys = HashSet::new();
 
         for key in keys {
@@ -800,19 +819,21 @@ impl Drawer {
                 continue;
             }
 
-            if self
-                .delete_primary_key_without_lifecycle_side_effects(&key)?
-                .is_some()
-            {
-                deleted_count += 1;
-            }
+            let Some(offset) = self.primary_memory_index.get(&key).copied() else {
+                continue;
+            };
+            let Some(record) = self.data_reader.read_record_at_offset(offset)? else {
+                self.primary_memory_index.remove(&key);
+                continue;
+            };
+            candidates.push(DeleteCandidate {
+                key,
+                offset,
+                record,
+            });
         }
 
-        if deleted_count > 0 {
-            self.invalidate_materialized_query_indexes()?;
-        }
-
-        Ok(deleted_count)
+        self.delete_candidates_set_based(candidates)
     }
 
     pub fn delete_by_filter_set_based(
@@ -820,20 +841,8 @@ impl Drawer {
         filter_map: &Map<String, Value>,
         drawer_namespace: Option<&str>,
     ) -> std::io::Result<usize> {
-        let keys = self.primary_keys_matching_filter(filter_map, drawer_namespace)?;
-        self.delete_by_primary_keys_set_based(keys)
-    }
-
-    pub(crate) fn primary_keys_matching_filter(
-        &mut self,
-        filter_map: &Map<String, Value>,
-        drawer_namespace: Option<&str>,
-    ) -> std::io::Result<Vec<String>> {
-        let records = self.records_matching_filter_candidates(filter_map, drawer_namespace)?;
-        records
-            .iter()
-            .map(|record| self.primary_key_for_record(record))
-            .collect()
+        let candidates = self.delete_candidates_matching_filter(filter_map, drawer_namespace)?;
+        self.delete_candidates_set_based(candidates)
     }
 
     pub(crate) fn records_matching_filter_candidates(
@@ -851,6 +860,114 @@ impl Drawer {
         Ok(records)
     }
 
+    fn delete_candidates_matching_filter(
+        &mut self,
+        filter_map: &Map<String, Value>,
+        drawer_namespace: Option<&str>,
+    ) -> std::io::Result<Vec<DeleteCandidate>> {
+        if let Some(offsets) = self.indexed_candidate_offsets(filter_map)? {
+            return self.delete_candidates_from_indexed_offsets(
+                offsets,
+                filter_map,
+                drawer_namespace,
+            );
+        }
+
+        let mut candidates = Vec::new();
+        for record in self.find_all_records_with_migration()? {
+            if !query::record_matches_filter(&record, filter_map, drawer_namespace) {
+                continue;
+            }
+
+            let key = self.primary_key_for_record(&record)?;
+            if let Some(offset) = self.primary_memory_index.get(&key).copied() {
+                candidates.push(DeleteCandidate {
+                    key,
+                    offset,
+                    record,
+                });
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    fn delete_candidates_from_indexed_offsets<I>(
+        &mut self,
+        offsets: I,
+        filter_map: &Map<String, Value>,
+        drawer_namespace: Option<&str>,
+    ) -> std::io::Result<Vec<DeleteCandidate>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut offsets = offsets.into_iter().collect::<Vec<_>>();
+        offsets.sort_unstable();
+        offsets.dedup();
+
+        let mut candidates = Vec::new();
+        for offset in offsets {
+            let Some(record) = self.read_record_at_offset_with_lazy_migration(offset)? else {
+                continue;
+            };
+            if !query::record_matches_filter(&record, filter_map, drawer_namespace) {
+                continue;
+            }
+
+            let key = self.primary_key_for_record(&record)?;
+            if self.primary_memory_index.get(&key).copied() == Some(offset) {
+                candidates.push(DeleteCandidate {
+                    key,
+                    offset,
+                    record,
+                });
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    fn delete_candidates_set_based<I>(&mut self, candidates: I) -> std::io::Result<usize>
+    where
+        I: IntoIterator<Item = DeleteCandidate>,
+    {
+        let mut deleted_count = 0usize;
+        let mut seen_keys = HashSet::new();
+        let mut seen_offsets = HashSet::new();
+
+        for candidate in candidates {
+            if self.primary_memory_index.get(&candidate.key).copied() != Some(candidate.offset) {
+                continue;
+            }
+            if !seen_keys.insert(candidate.key.clone()) {
+                continue;
+            }
+            if !seen_offsets.insert(candidate.offset) {
+                continue;
+            }
+
+            if self
+                .delete_known_primary_key_without_lifecycle_side_effects(
+                    &candidate.key,
+                    candidate.offset,
+                    candidate.record,
+                    false,
+                )?
+                .is_some()
+            {
+                deleted_count += 1;
+            }
+        }
+
+        if deleted_count > 0 {
+            self.mark_metadata_dirty();
+            self.invalidate_materialized_query_indexes()?;
+            self.flush_metadata_if_dirty()?;
+        }
+
+        Ok(deleted_count)
+    }
+
     fn delete_primary_key_without_lifecycle_side_effects(
         &mut self,
         key: &str,
@@ -864,6 +981,21 @@ impl Drawer {
             return Ok(None);
         };
 
+        self.delete_known_primary_key_without_lifecycle_side_effects(
+            key,
+            stale_offset,
+            deleted_record,
+            true,
+        )
+    }
+
+    fn delete_known_primary_key_without_lifecycle_side_effects(
+        &mut self,
+        key: &str,
+        stale_offset: u64,
+        deleted_record: Value,
+        mark_metadata_dirty: bool,
+    ) -> std::io::Result<Option<Value>> {
         let Some((_stale_offset, old_block)) =
             self.historical_block_entry(stale_offset, Some(&deleted_record))?
         else {
@@ -881,7 +1013,9 @@ impl Drawer {
         self.data_recycler
             .register_free_slot(old_block.size_class, stale_offset);
         self.record_count = self.record_count.saturating_sub(1);
-        self.mark_metadata_dirty();
+        if mark_metadata_dirty {
+            self.mark_metadata_dirty();
+        }
 
         let fields_to_clear = self.unique_constraints.clone();
         for indexed_field in fields_to_clear {
@@ -1464,6 +1598,12 @@ impl Drawer {
     }
 
     fn invalidate_materialized_query_indexes(&mut self) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            self.test_metrics
+                .invalidate_materialized_query_indexes_calls += 1;
+        }
+
         if self.materialized_secondary_indexes.is_empty() {
             return Ok(());
         }
@@ -2643,6 +2783,11 @@ impl Drawer {
     }
 
     pub fn find_all_records_with_migration(&mut self) -> std::io::Result<Vec<Value>> {
+        #[cfg(test)]
+        {
+            self.test_metrics.find_all_records_with_migration_calls += 1;
+        }
+
         if !self.needs_format_migration() {
             return self.find_all_records();
         }
@@ -2661,6 +2806,11 @@ impl Drawer {
         self.metadata_dirty = true;
     }
 
+    #[cfg(test)]
+    fn reset_test_metrics(&mut self) {
+        self.test_metrics = DrawerTestMetrics::default();
+    }
+
     pub(crate) fn flush_metadata_if_dirty(&mut self) -> std::io::Result<()> {
         if self.metadata_dirty {
             self.persist_metadata()?;
@@ -2669,6 +2819,11 @@ impl Drawer {
     }
 
     fn persist_metadata(&mut self) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            self.test_metrics.persist_metadata_calls += 1;
+        }
+
         let metadata = DrawerMetadata::from_configuration(
             &self.primary_key,
             self.record_count,
@@ -2967,6 +3122,163 @@ mod tests {
 
         let records = live_index_records(&mut reopened);
         assert_compact_index_records(&records);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn filter_delete_uses_indexed_offsets_and_batches_side_effects() {
+        let path = temp_dir("set_based_indexed_delete");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer =
+            Drawer::open(&path, "book", "_id", vec!["serial".to_string()]).expect("drawer opens");
+
+        for record in [
+            json!({"_id": "book-0", "serial": "serial-0", "purge_bucket": 0}),
+            json!({"_id": "book-1", "serial": "serial-1", "purge_bucket": 0}),
+            json!({"_id": "book-2", "serial": "serial-2", "purge_bucket": 0}),
+            json!({"_id": "book-3", "serial": "serial-3", "purge_bucket": 1}),
+            json!({"_id": "book-4", "serial": "serial-4", "purge_bucket": 1}),
+        ] {
+            drawer
+                .upsert_record(record)
+                .expect("upsert should write")
+                .expect("upsert should validate");
+        }
+
+        drawer.record_schema_extension("indexes", "purge_bucket", json!({"type": "hash"}));
+        drawer
+            .materialize_query_index("purge_bucket")
+            .expect("query index should materialize");
+
+        let deleted_offsets = ["book-0", "book-1", "book-2"]
+            .into_iter()
+            .map(|key| {
+                drawer
+                    .primary_memory_index
+                    .get(key)
+                    .copied()
+                    .expect("primary offset should exist")
+            })
+            .collect::<Vec<_>>();
+
+        let duplicate_offset = deleted_offsets[0];
+        drawer
+            .secondary_memory_index
+            .get_mut("purge_bucket")
+            .expect("purge index should exist")
+            .get_mut("0")
+            .expect("purge bucket should exist")
+            .push(duplicate_offset);
+
+        drawer.reset_test_metrics();
+        let mut filter = Map::new();
+        filter.insert("purge_bucket".to_string(), json!(0));
+
+        let deleted = drawer
+            .delete_by_filter_set_based(&filter, None)
+            .expect("indexed delete should succeed");
+
+        assert_eq!(deleted, 3);
+        assert_eq!(drawer.record_count(), 2);
+        assert_eq!(drawer.test_metrics.find_all_records_with_migration_calls, 0);
+        assert_eq!(
+            drawer
+                .test_metrics
+                .invalidate_materialized_query_indexes_calls,
+            1
+        );
+        assert_eq!(drawer.test_metrics.persist_metadata_calls, 1);
+
+        for key in ["book-0", "book-1", "book-2"] {
+            assert!(!drawer.primary_memory_index.contains_key(key));
+        }
+        for key in ["book-3", "book-4"] {
+            assert!(drawer.primary_memory_index.contains_key(key));
+        }
+
+        for offset in deleted_offsets {
+            assert!(
+                drawer
+                    .data_reader
+                    .read_record_at_offset(offset)
+                    .expect("tombstoned offset should read")
+                    .is_none()
+            );
+            assert!(!drawer.data_block_index.contains_key(&offset));
+        }
+
+        let serial_index = drawer
+            .secondary_memory_index
+            .get("serial")
+            .expect("serial index should remain materialized");
+        for serial in ["serial-0", "serial-1", "serial-2"] {
+            assert!(
+                !serial_index.contains_key(serial),
+                "empty secondary index bucket should be removed"
+            );
+        }
+        for serial in ["serial-3", "serial-4"] {
+            assert!(serial_index.contains_key(serial));
+        }
+        assert!(
+            !drawer.secondary_memory_index.contains_key("purge_bucket"),
+            "query index should be invalidated once after the batch"
+        );
+
+        let metadata = DrawerMetadata::load(&drawer.meta_file_path)
+            .expect("metadata should load")
+            .expect("metadata should exist");
+        assert_eq!(metadata.record_count, 2);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn primary_key_batch_delete_deduplicates_keys_and_flushes_metadata_once() {
+        let path = temp_dir("set_based_primary_delete");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer = Drawer::open(&path, "gem", "_id", vec![]).expect("drawer opens");
+
+        for record in [
+            json!({"_id": "ruby", "element": "fire"}),
+            json!({"_id": "sapphire", "element": "water"}),
+            json!({"_id": "emerald", "element": "earth"}),
+        ] {
+            drawer
+                .upsert_record(record)
+                .expect("upsert should write")
+                .expect("upsert should validate");
+        }
+        drawer.commit().expect("baseline metadata should persist");
+        drawer.reset_test_metrics();
+
+        let deleted = drawer
+            .delete_by_primary_keys_set_based(vec![
+                "ruby".to_string(),
+                "ruby".to_string(),
+                "sapphire".to_string(),
+                "missing".to_string(),
+            ])
+            .expect("batch delete should succeed");
+
+        assert_eq!(deleted, 2);
+        assert_eq!(drawer.record_count(), 1);
+        assert_eq!(
+            drawer
+                .test_metrics
+                .invalidate_materialized_query_indexes_calls,
+            1
+        );
+        assert_eq!(drawer.test_metrics.persist_metadata_calls, 1);
+        assert!(!drawer.primary_memory_index.contains_key("ruby"));
+        assert!(!drawer.primary_memory_index.contains_key("sapphire"));
+        assert!(drawer.primary_memory_index.contains_key("emerald"));
+
+        let metadata = DrawerMetadata::load(&drawer.meta_file_path)
+            .expect("metadata should load")
+            .expect("metadata should exist");
+        assert_eq!(metadata.record_count, 1);
 
         let _ = std::fs::remove_dir_all(path);
     }
