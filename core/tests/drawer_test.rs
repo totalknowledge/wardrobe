@@ -2,6 +2,7 @@ mod common;
 
 use common::TempDatabase;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use wardrobe_core::{
     BsonBinaryFormat, DatabaseReader, DatabaseWriter, Drawer, NativeBinaryIndexFormat, Recycler,
@@ -58,12 +59,15 @@ fn load_index_records(
     let mut records = Vec::new();
     index_reader
         .stream_with_offsets(|_offset, slot| {
-            let is_dead = BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
+            let is_dead =
+                BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
             if !is_dead {
                 let entry_opt = if BsonBinaryFormat::is_binary_frame(slot) {
                     BsonBinaryFormat::deserialize_record(slot).ok().flatten()
                 } else if NativeBinaryIndexFormat::is_binary_frame(slot) {
-                    NativeBinaryIndexFormat::deserialize_index_entry(slot, &name_map).ok().flatten()
+                    NativeBinaryIndexFormat::deserialize_index_entry(slot, &name_map)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 };
@@ -152,14 +156,27 @@ fn count_tombstones(path: &std::path::Path) -> usize {
 fn reopened_records_from_file(path: &std::path::Path) -> Vec<serde_json::Value> {
     let reader = DatabaseReader::open_drawer(path).expect("reader should open");
     let mut records = Vec::new();
+    let field_name_map = field_name_map_from_data_path(path);
+    let native_field_name_map = field_name_map.as_ref().map(|field_name_map| {
+        field_name_map
+            .iter()
+            .filter_map(|(token, logical_name)| {
+                logical_name
+                    .as_str()
+                    .map(|logical_name| (token.clone(), logical_name.to_string()))
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
     reader
         .stream_with_offsets(|_offset, slot| {
-            if let Ok(Some(record)) = BsonBinaryFormat::deserialize_record(slot) {
+            if let Ok(Some(record)) =
+                BsonBinaryFormat::deserialize_record_with_map(slot, native_field_name_map.as_ref())
+            {
                 records.push(record);
             }
         })
         .expect("stream should succeed");
-    let Some(field_name_map) = field_name_map_from_data_path(path) else {
+    let Some(field_name_map) = field_name_map else {
         return records;
     };
     records
@@ -1003,8 +1020,13 @@ fn us_047_recycler_cache_is_built_lazily_from_merged_index() {
         "_": "@socks:lnk_reclaimed",
         "a": "Gold"
     });
-    let serialized_record = BsonBinaryFormat::serialize_record(&stored_reclaimed_record)
-        .expect("record should serialize");
+    let seed_field_name_map = BTreeMap::from([
+        ("_".to_string(), "_id".to_string()),
+        ("a".to_string(), "color".to_string()),
+    ]);
+    let serialized_record =
+        BsonBinaryFormat::serialize_native_record(&stored_reclaimed_record, &seed_field_name_map)
+            .expect("record should serialize");
     let target_size_class = Recycler::new().calculate_aligned_size(serialized_record.len());
     let dead_offset = {
         let mut data_writer =

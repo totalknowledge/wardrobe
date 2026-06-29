@@ -167,9 +167,11 @@ impl Database {
         let reverse_relationship_index_available = reverse_relationship_index_path.exists();
         let reverse_relationship_index =
             ReverseRelationshipIndex::load(&reverse_relationship_index_path)?;
-        let reverse_relationship_writer = DatabaseWriter::open_drawer(&reverse_relationship_index_path)?;
+        let reverse_relationship_writer =
+            DatabaseWriter::open_drawer(&reverse_relationship_index_path)?;
 
-        let wal_journal = WalJournal::at_database_path_with_policy(&storage_directory, durability_policy.clone());
+        let wal_journal =
+            WalJournal::at_database_path_with_policy(&storage_directory, durability_policy.clone());
 
         let mut database = Self {
             storage_directory,
@@ -381,14 +383,18 @@ impl Database {
     pub(crate) fn flush_all_drawers_metadata(&self) -> std::io::Result<()> {
         let drawers = self.get_all_drawers();
         for (_name, drawer) in drawers {
-            let mut guard = drawer.write().map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "lock poisoned"))?;
+            let mut guard = drawer
+                .write()
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "lock poisoned"))?;
             guard.flush_metadata_if_dirty()?;
         }
         Ok(())
     }
 
     pub fn get_drawer(&self, name: &str) -> Option<Arc<RwLock<Drawer>>> {
-        self.active_drawers.get(name).map(|cached| cached.drawer.clone())
+        self.active_drawers
+            .get(name)
+            .map(|cached| cached.drawer.clone())
     }
 
     fn drawer_names_on_disk(&self) -> std::io::Result<Vec<String>> {

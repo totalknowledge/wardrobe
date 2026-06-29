@@ -287,7 +287,8 @@ impl Drawer {
             block_entry,
         );
 
-        let serialized_index = NativeBinaryIndexFormat::serialize_index_entry(&index_entry, &self.field_name_map)?;
+        let serialized_index =
+            NativeBinaryIndexFormat::serialize_index_entry(&index_entry, &self.field_name_map)?;
         let entry_raw_len = serialized_index.len();
         let target_size_class = self.index_recycler.calculate_aligned_size(entry_raw_len);
 

@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,7 +33,7 @@ fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let record = reader
-        .read_record_at_offset(0)
+        .read_record_at_offset(0, None)
         .expect("read should succeed")
         .expect("record should exist");
     assert_eq!(record["element"], "Fire");
@@ -44,7 +45,7 @@ fn read_record_and_raw_bytes_at_offset_handle_live_and_dead_lines() {
     assert!(raw_bytes.starts_with(b"WRDB"));
 
     let tombstoned = reader
-        .read_record_at_offset(raw_bytes.len() as u64)
+        .read_record_at_offset(raw_bytes.len() as u64, None)
         .expect("read should succeed");
     assert!(tombstoned.is_none());
 }
@@ -71,11 +72,11 @@ fn us_071_reader_reuses_handle_for_successive_reads_and_closes_cleanly() {
         .expect("first raw read should succeed")
         .expect("first record should exist");
     let first = reader
-        .read_record_at_offset(0)
+        .read_record_at_offset(0, None)
         .expect("first read should succeed")
         .expect("first record should exist");
     let second = reader
-        .read_record_at_offset(first_raw.len() as u64)
+        .read_record_at_offset(first_raw.len() as u64, None)
         .expect("second read should succeed")
         .expect("second record should exist");
 
@@ -111,12 +112,52 @@ fn read_records_at_offsets_batches_ordered_live_reads() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let records = reader
-        .read_records_at_offsets(vec![0, tombstone_offset, second_offset])
+        .read_records_at_offsets(vec![0, tombstone_offset, second_offset], None)
         .expect("batch read should succeed");
 
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["element"], "Fire");
     assert_eq!(records[1]["element"], "Water");
+}
+
+#[test]
+fn us_134_reader_passes_field_map_to_native_record_decoder() {
+    let file_path = temp_file_path("reader_native_records_with_field_map");
+    let field_name_map = BTreeMap::from([
+        ("_".to_string(), "_id".to_string()),
+        ("a".to_string(), "name".to_string()),
+    ]);
+    let first_payload = BsonBinaryFormat::serialize_native_record(
+        &json!({"_": "one", "a": "First"}),
+        &field_name_map,
+    )
+    .expect("first native record should serialize");
+    let second_payload = BsonBinaryFormat::serialize_native_record(
+        &json!({"_": "two", "a": "Second"}),
+        &field_name_map,
+    )
+    .expect("second native record should serialize");
+    let second_offset = first_payload.len() as u64;
+
+    let mut file = fs::File::create(&file_path).expect("file should create");
+    file.write_all(&first_payload)
+        .expect("first write should succeed");
+    file.write_all(&second_payload)
+        .expect("second write should succeed");
+    file.flush().expect("sync should succeed");
+
+    let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
+    let first = reader
+        .read_record_at_offset(0, Some(&field_name_map))
+        .expect("native read should succeed")
+        .expect("native record should exist");
+    assert_eq!(first["a"], "First");
+
+    let records = reader
+        .read_records_at_offsets(vec![0, second_offset], Some(&field_name_map))
+        .expect("native batch read should succeed");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1]["a"], "Second");
 }
 
 #[test]
@@ -174,7 +215,7 @@ fn reader_offset_out_of_bounds_returns_none() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
     assert!(reader.read_raw_bytes_at_offset(100).unwrap().is_none());
-    assert!(reader.read_record_at_offset(100).unwrap().is_none());
+    assert!(reader.read_record_at_offset(100, None).unwrap().is_none());
 }
 
 #[test]
@@ -207,7 +248,7 @@ fn read_record_at_offset_deserialization_failure() {
         .expect("write");
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
-    assert!(reader.read_record_at_offset(0).is_err());
+    assert!(reader.read_record_at_offset(0, None).is_err());
 }
 
 #[test]
@@ -218,7 +259,7 @@ fn us_072_read_record_at_offset_rejects_legacy_plaintext() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
     let error = reader
-        .read_record_at_offset(0)
+        .read_record_at_offset(0, None)
         .expect_err("legacy plaintext should be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
@@ -246,7 +287,7 @@ fn read_record_at_offset_valid_binary_parsing() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("open");
     let record = reader
-        .read_record_at_offset(0)
+        .read_record_at_offset(0, None)
         .expect("read should succeed")
         .expect("record should exist");
     assert_eq!(record["valid"], true);

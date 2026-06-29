@@ -305,8 +305,6 @@ pub(super) fn checkpoint_sequence(database_core: &RwLock<Database>) -> Result<u6
         .unwrap_or(0))
 }
 
-
-
 fn wal_path(database_core: &RwLock<Database>) -> Result<PathBuf> {
     Ok(database_path(database_core)?.join(WAL_FILE_NAME))
 }

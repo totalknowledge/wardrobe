@@ -1,6 +1,8 @@
 use crate::wrdb_lib::core::reader::DatabaseReader;
 use crate::wrdb_lib::core::recycler::Recycler;
-use crate::wrdb_lib::core::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat};
+use crate::wrdb_lib::core::storage_format::{
+    BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat,
+};
 use crate::wrdb_lib::core::writer::DatabaseWriter;
 use crate::wrdb_lib::query;
 use crate::wrdb_lib::wal::TransactionCoordinator;
@@ -273,13 +275,18 @@ mod tests {
         let mut records = Vec::new();
         reader
             .stream_with_offsets(|_, line| {
-                let is_dead = BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
+                let is_dead = BsonBinaryFormat::is_tombstone(line)
+                    || NativeBinaryIndexFormat::is_tombstone(line);
                 if !is_dead {
                     let record_opt = if BsonBinaryFormat::is_binary_frame(line) {
-                        BsonBinaryFormat::deserialize_record(line).expect("index record should deserialize")
-                    } else if NativeBinaryIndexFormat::is_binary_frame(line) {
-                        NativeBinaryIndexFormat::deserialize_index_entry(line, &drawer.field_name_map)
+                        BsonBinaryFormat::deserialize_record(line)
                             .expect("index record should deserialize")
+                    } else if NativeBinaryIndexFormat::is_binary_frame(line) {
+                        NativeBinaryIndexFormat::deserialize_index_entry(
+                            line,
+                            &drawer.field_name_map,
+                        )
+                        .expect("index record should deserialize")
                     } else {
                         panic!("Unknown index frame magic in test");
                     };
@@ -300,14 +307,33 @@ mod tests {
             .stream_with_offsets(|_, line| {
                 if !BsonBinaryFormat::is_tombstone(line) {
                     records.push(
-                        BsonBinaryFormat::deserialize_record(line)
-                            .expect("data record should deserialize")
-                            .expect("data record should contain a value"),
+                        BsonBinaryFormat::deserialize_record_with_map(
+                            line,
+                            Some(&drawer.field_name_map),
+                        )
+                        .expect("data record should deserialize")
+                        .expect("data record should contain a value"),
                     );
                 }
             })
             .expect("data should stream");
         records
+    }
+
+    fn live_data_frame_versions(drawer: &mut Drawer) -> Vec<u8> {
+        drawer.commit().expect("drawer should commit before read");
+
+        let reader =
+            DatabaseReader::open_drawer(&drawer.data_file_path).expect("data reader opens");
+        let mut versions = Vec::new();
+        reader
+            .stream_with_offsets(|_, line| {
+                if !BsonBinaryFormat::is_tombstone(line) {
+                    versions.push(line[4]);
+                }
+            })
+            .expect("data should stream");
+        versions
     }
 
     fn assert_record_keys(record: &Value, expected: &[&str]) {
@@ -461,9 +487,12 @@ mod tests {
             3
         );
         let compact_index_start = compact_payload.len();
-        let (index_offset, index_len) =
-            Drawer::append_compact_index_entry(&mut compact_payload, &index_entry, &loaded.field_name_map)
-                .expect("compact index entry should append");
+        let (index_offset, index_len) = Drawer::append_compact_index_entry(
+            &mut compact_payload,
+            &index_entry,
+            &loaded.field_name_map,
+        )
+        .expect("compact index entry should append");
         assert_eq!(index_offset, compact_index_start as u64);
         assert!(index_len > 0);
 
@@ -519,6 +548,7 @@ mod tests {
 
         let report = drawer.vacuum().expect("vacuum should compact");
         assert_eq!(report.records_rewritten, 1);
+        assert_eq!(live_data_frame_versions(&mut drawer), vec![2]);
 
         let records = live_index_records(&mut drawer);
         assert_compact_index_records(&records);
@@ -586,6 +616,7 @@ mod tests {
 
         let raw_records = live_data_records(&mut drawer);
         assert_eq!(raw_records.len(), 1);
+        assert_eq!(live_data_frame_versions(&mut drawer), vec![2]);
         assert_eq!(raw_records[0][&id_token], "person-1");
         assert_eq!(raw_records[0][&name_token], "Bob");
         assert_eq!(raw_records[0][&age_token], 56);
@@ -740,6 +771,7 @@ mod tests {
             .expect("vacuum should encode legacy records");
         let raw_records = live_data_records(&mut drawer);
         assert_eq!(raw_records.len(), 2);
+        assert_eq!(live_data_frame_versions(&mut drawer), vec![2, 2]);
         assert!(raw_records.iter().all(|record| record.get("_id").is_none()));
         assert!(
             raw_records
@@ -844,7 +876,7 @@ mod tests {
             assert!(
                 drawer
                     .data_reader
-                    .read_record_at_offset(offset)
+                    .read_record_at_offset(offset, Some(&drawer.field_name_map))
                     .expect("tombstoned offset should read")
                     .is_none()
             );

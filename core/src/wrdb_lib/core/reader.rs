@@ -1,4 +1,4 @@
-use super::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat};
+use super::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -26,15 +26,23 @@ impl DatabaseReader {
         Ok(())
     }
 
-    pub fn read_record_at_offset(&self, byte_offset: u64) -> std::io::Result<Option<Value>> {
+    pub fn read_record_at_offset(
+        &self,
+        byte_offset: u64,
+        field_name_map: Option<&std::collections::BTreeMap<String, String>>,
+    ) -> std::io::Result<Option<Value>> {
         if let Some(record_bytes) = self.read_raw_bytes_at_offset(byte_offset)? {
-            return BsonBinaryFormat::deserialize_record(&record_bytes);
+            return BsonBinaryFormat::deserialize_record_with_map(&record_bytes, field_name_map);
         }
 
         Ok(None)
     }
 
-    pub fn read_records_at_offsets<I>(&self, offsets: I) -> std::io::Result<Vec<Value>>
+    pub fn read_records_at_offsets<I>(
+        &self,
+        offsets: I,
+        field_name_map: Option<&std::collections::BTreeMap<String, String>>,
+    ) -> std::io::Result<Vec<Value>>
     where
         I: IntoIterator<Item = u64>,
     {
@@ -48,7 +56,9 @@ impl DatabaseReader {
             if let Some(record_bytes) =
                 Self::read_raw_bytes_at_offset_locked(&mut reader, file_len, offset)?
             {
-                if let Some(record) = BsonBinaryFormat::deserialize_record(&record_bytes)? {
+                if let Some(record) =
+                    BsonBinaryFormat::deserialize_record_with_map(&record_bytes, field_name_map)?
+                {
                     records.push(record);
                 }
             }
@@ -81,7 +91,8 @@ impl DatabaseReader {
             let mut probe = vec![0u8; probe_len];
             reader.seek(SeekFrom::Start(byte_offset))?;
             reader.read_exact(&mut probe)?;
-            let matches_magic = (probe.as_slice() == &b"WRDB"[..probe_len]) || (probe.as_slice() == &b"WIDX"[..probe_len]);
+            let matches_magic = (probe.as_slice() == &b"WRDB"[..probe_len])
+                || (probe.as_slice() == &b"WIDX"[..probe_len]);
             if !matches_magic {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -145,7 +156,8 @@ impl DatabaseReader {
                 let mut probe = vec![0u8; probe_len];
                 reader.seek(SeekFrom::Start(track_offset))?;
                 reader.read_exact(&mut probe)?;
-                let matches_magic = (probe.as_slice() == &b"WRDB"[..probe_len]) || (probe.as_slice() == &b"WIDX"[..probe_len]);
+                let matches_magic = (probe.as_slice() == &b"WRDB"[..probe_len])
+                    || (probe.as_slice() == &b"WIDX"[..probe_len]);
                 if !matches_magic {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,

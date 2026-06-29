@@ -22,7 +22,10 @@ impl Drawer {
         &mut self,
         offset: u64,
     ) -> std::io::Result<Option<Value>> {
-        let Some(record) = self.data_reader.read_record_at_offset(offset)? else {
+        let Some(record) = self
+            .data_reader
+            .read_record_at_offset(offset, Some(&self.field_name_map))?
+        else {
             return Ok(None);
         };
 
@@ -81,7 +84,8 @@ impl Drawer {
 
         self.ensure_field_tokens_for_record_write(migrated_record)?;
         let stored_record = self.encode_record_for_storage(migrated_record);
-        let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
+        let serialized_record =
+            BsonBinaryFormat::serialize_native_record(&stored_record, &self.field_name_map)?;
         let (resolved_offset, resolved_size_class) =
             if serialized_record.len() <= old_block.size_class {
                 self.data_writer.overwrite_at_offset(

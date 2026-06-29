@@ -18,7 +18,8 @@ impl Drawer {
         let size_class = self.estimate_data_slot_size(stale_offset, current_file_len);
         let (payload_len, crc) = if let Some(record) = old_record {
             let stored_record = self.encode_record_for_storage(record);
-            let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
+            let serialized_record =
+                BsonBinaryFormat::serialize_native_record(&stored_record, &self.field_name_map)?;
             (serialized_record.len(), crc32(&serialized_record))
         } else {
             (size_class, 0)
@@ -94,7 +95,8 @@ impl Drawer {
         let mut registered_data_slots = HashSet::new();
 
         index_reader.stream_with_offsets(|_offset, line| {
-            let is_dead = BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
+            let is_dead =
+                BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
             if !is_dead {
                 index_lines.push(line.to_vec());
             }
@@ -169,7 +171,8 @@ impl Drawer {
         field_name_map: &BTreeMap<String, String>,
     ) -> std::io::Result<(u64, usize)> {
         let starting_offset = target.len() as u64;
-        let serialized_index = NativeBinaryIndexFormat::serialize_index_entry(index_entry, field_name_map)?;
+        let serialized_index =
+            NativeBinaryIndexFormat::serialize_index_entry(index_entry, field_name_map)?;
         target.extend_from_slice(&serialized_index);
 
         Ok((starting_offset, serialized_index.len()))

@@ -61,12 +61,7 @@ pub(super) fn execute(
         &command,
     )?;
     let database_path = routing::coordinate_database_path(&engine.root_directory, &coordinate)?;
-    wal::append_command(
-        engine,
-        &database_path,
-        Some(coordinate.schema()),
-        &command,
-    )?;
+    wal::append_command(engine, &database_path, Some(coordinate.schema()), &command)?;
     let database = engine.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
     command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
 }
@@ -90,34 +85,19 @@ pub(super) fn execute_in_scope(
         } => execute_for_tenant(engine, &tenant_id, &database, &schema, command),
         StorageScope::Database { database } => {
             let database_path = routing::database_scope_path(&engine.root_directory, &database)?;
-            wal::append_command(
-                engine,
-                &database_path,
-                None,
-                &command,
-            )?;
+            wal::append_command(engine, &database_path, None, &command)?;
             let database = engine.database_for_route(DatabaseRoute::Database(database))?;
             command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
         }
         StorageScope::Schema { database, schema } => {
             let database_path =
                 routing::schema_scope_path(&engine.root_directory, &database, &schema)?;
-            wal::append_command(
-                engine,
-                &database_path,
-                Some(&schema),
-                &command,
-            )?;
+            wal::append_command(engine, &database_path, Some(&schema), &command)?;
             let database = engine.database_for_route(DatabaseRoute::Schema { database, schema })?;
             command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
         }
         StorageScope::Drawer { namespace } => {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                Some(&namespace),
-                &command,
-            )?;
+            wal::append_command(engine, &engine.root_directory, Some(&namespace), &command)?;
             command_dispatch::execute_in_database::<WardrobeEngine>(
                 &engine.database_core,
                 command,
@@ -135,14 +115,7 @@ pub(super) fn create_database(
         &engine.root_directory,
         &engine.registry,
         database_name,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -156,14 +129,7 @@ pub(super) fn create_schema(
         &engine.registry,
         database_name,
         schema_name,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -179,14 +145,7 @@ pub(super) fn create_drawer(
         database_name,
         schema_name,
         drawer_name,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -202,14 +161,7 @@ pub(super) fn register_tenant_route(
         tenant_id,
         database_name,
         location,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -218,14 +170,7 @@ pub(super) fn drop_database(engine: &WardrobeEngine, database_name: &str) -> Res
         &engine.root_directory,
         &engine.registry,
         database_name,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -239,14 +184,7 @@ pub(super) fn drop_schema(
         &engine.registry,
         database_name,
         schema_name,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -262,14 +200,7 @@ pub(super) fn drop_drawer(
         database_name,
         schema_name,
         drawer_name,
-        |command| {
-            wal::append_command(
-                engine,
-                &engine.root_directory,
-                None,
-                command,
-            )
-        },
+        |command| wal::append_command(engine, &engine.root_directory, None, command),
     )
 }
 
@@ -312,12 +243,7 @@ pub(super) fn execute_for_tenant(
     let route_path =
         catalog_validation::catalog_location_path(&engine.root_directory, &tenant_route.location);
     let schema_path = routing::tenant_schema_path(&route_path, schema_name);
-    wal::append_command(
-        engine,
-        &schema_path,
-        Some(schema_name),
-        &command,
-    )?;
+    wal::append_command(engine, &schema_path, Some(schema_name), &command)?;
     let routed_database = RwLock::new(
         Database::initialize_with_cache_limit_wal_thresholds_and_durability(
             &schema_path,
@@ -337,12 +263,7 @@ pub(super) fn execute_command(engine: &WardrobeEngine, command: Command) -> Resu
 
 impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
     fn append_boundary_wal(&self, command: &Command) -> Result<()> {
-        wal::append_command(
-            self,
-            &self.root_directory,
-            None,
-            command,
-        )
+        wal::append_command(self, &self.root_directory, None, command)
     }
 
     fn show_tenants(&self) -> Result<Vec<String>> {

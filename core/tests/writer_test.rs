@@ -37,7 +37,7 @@ fn append_overwrite_and_tombstone_work() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let decoded = reader
-        .read_record_at_offset(first_offset)
+        .read_record_at_offset(first_offset, None)
         .expect("read should succeed");
     assert!(decoded.is_none());
 }

@@ -8,7 +8,7 @@ use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::routing::{DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::storage_lock::{self, StorageRootLockGuard};
-use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalVerification, WalJournal};
+use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalJournal, WalVerification};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -523,12 +523,16 @@ impl WardrobeEngine {
     }
 
     pub(crate) fn logical_wal_journal(&self, database_path: &Path) -> Result<WalJournal> {
-        let mut journals = self.logical_wal_journals.write().map_err(|_| Error::other("Lock poisoned"))?;
+        let mut journals = self
+            .logical_wal_journals
+            .write()
+            .map_err(|_| Error::other("Lock poisoned"))?;
         let path = database_path.to_path_buf();
         if let Some(journal) = journals.get(&path) {
             return Ok(journal.clone());
         }
-        let journal = WalJournal::at_database_path_with_policy(database_path, self.durability_policy.clone());
+        let journal =
+            WalJournal::at_database_path_with_policy(database_path, self.durability_policy.clone());
         journals.insert(path, journal.clone());
         Ok(journal)
     }

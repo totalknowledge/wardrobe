@@ -334,7 +334,8 @@ impl Drawer {
 
         let mut index_entries = Vec::new();
         index_reader.stream_with_offsets(|offset, line| {
-            let is_dead = BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
+            let is_dead =
+                BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
             index_entries.push((offset, is_dead, line.to_vec()));
         })?;
 
@@ -363,84 +364,87 @@ impl Drawer {
                 };
 
                 if let Some(index_entry) = index_entry_opt {
-                if let Some((data_offset, block_entry)) =
-                    DataBlockIndexEntry::from_index_entry(&index_entry)
-                {
-                    data_block_journal.insert(data_offset, block_entry);
-                }
+                    if let Some((data_offset, block_entry)) =
+                        DataBlockIndexEntry::from_index_entry(&index_entry)
+                    {
+                        data_block_journal.insert(data_offset, block_entry);
+                    }
 
-                if index_entry
-                    .get(INDEX_STATUS_KEY)
-                    .and_then(|value| value.as_u64())
-                    == Some(DATA_BLOCK_STATUS_DEAD as u64)
-                {
-                    if let (Some(stored_field), Some(key), Some(data_offset)) = (
-                        index_entry
-                            .get(INDEX_FIELD_KEY)
-                            .and_then(|value| value.as_str()),
-                        index_entry
-                            .get(INDEX_VALUE_KEY)
-                            .and_then(|value| value.as_str()),
-                        index_entry
-                            .get(INDEX_OFFSET_KEY)
-                            .and_then(|value| value.as_u64()),
+                    if index_entry
+                        .get(INDEX_STATUS_KEY)
+                        .and_then(|value| value.as_u64())
+                        == Some(DATA_BLOCK_STATUS_DEAD as u64)
+                    {
+                        if let (Some(stored_field), Some(key), Some(data_offset)) = (
+                            index_entry
+                                .get(INDEX_FIELD_KEY)
+                                .and_then(|value| value.as_str()),
+                            index_entry
+                                .get(INDEX_VALUE_KEY)
+                                .and_then(|value| value.as_str()),
+                            index_entry
+                                .get(INDEX_OFFSET_KEY)
+                                .and_then(|value| value.as_u64()),
+                        ) {
+                            let field =
+                                Self::decode_field_name_from_map(&field_name_map, stored_field);
+                            if field == primary_key
+                                && primary_memory_index.get(key).copied() == Some(data_offset)
+                            {
+                                primary_memory_index.remove(key);
+                            }
+                        }
+                        index_writer.write_tombstone_at_offset(current_offset, actual_slot_size)?;
+                        continue;
+                    }
+
+                    if let (Some(stored_field), Some(key), Some(data_offset_val)) = (
+                        index_entry.get(INDEX_FIELD_KEY).and_then(|v| v.as_str()),
+                        index_entry.get(INDEX_VALUE_KEY).and_then(|v| v.as_str()),
+                        index_entry.get(INDEX_OFFSET_KEY),
                     ) {
                         let field = Self::decode_field_name_from_map(&field_name_map, stored_field);
-                        if field == primary_key
-                            && primary_memory_index.get(key).copied() == Some(data_offset)
+                        let map_key = format!("{}:{}", field, key);
+                        if let Some((stale_index_offset, stale_slot_size)) =
+                            index_file_offsets.insert(map_key, (current_offset, actual_slot_size))
                         {
-                            primary_memory_index.remove(key);
+                            index_writer
+                                .write_tombstone_at_offset(stale_index_offset, stale_slot_size)?;
                         }
-                    }
-                    index_writer.write_tombstone_at_offset(current_offset, actual_slot_size)?;
-                    continue;
-                }
 
-                if let (Some(stored_field), Some(key), Some(data_offset_val)) = (
-                    index_entry.get(INDEX_FIELD_KEY).and_then(|v| v.as_str()),
-                    index_entry.get(INDEX_VALUE_KEY).and_then(|v| v.as_str()),
-                    index_entry.get(INDEX_OFFSET_KEY),
-                ) {
-                    let field = Self::decode_field_name_from_map(&field_name_map, stored_field);
-                    let map_key = format!("{}:{}", field, key);
-                    if let Some((stale_index_offset, stale_slot_size)) =
-                        index_file_offsets.insert(map_key, (current_offset, actual_slot_size))
-                    {
-                        index_writer
-                            .write_tombstone_at_offset(stale_index_offset, stale_slot_size)?;
-                    }
-
-                    if field == primary_key {
-                        if let Some(data_offset) = data_offset_val.as_u64() {
-                            let index_key = if drawer_needs_format_migration {
-                                Self::clean_legacy_identifier(key)
-                            } else {
-                                key.to_string()
-                            };
-                            primary_memory_index.insert(index_key, data_offset);
-                        } else if data_offset_val
-                            .as_array()
-                            .is_some_and(|offset_array| offset_array.is_empty())
+                        if field == primary_key {
+                            if let Some(data_offset) = data_offset_val.as_u64() {
+                                let index_key = if drawer_needs_format_migration {
+                                    Self::clean_legacy_identifier(key)
+                                } else {
+                                    key.to_string()
+                                };
+                                primary_memory_index.insert(index_key, data_offset);
+                            } else if data_offset_val
+                                .as_array()
+                                .is_some_and(|offset_array| offset_array.is_empty())
+                            {
+                                primary_memory_index.remove(key);
+                                primary_memory_index.remove(&Self::clean_legacy_identifier(key));
+                            }
+                        } else if let Some(field_map) =
+                            secondary_memory_index.get_mut(field.as_str())
                         {
-                            primary_memory_index.remove(key);
-                            primary_memory_index.remove(&Self::clean_legacy_identifier(key));
-                        }
-                    } else if let Some(field_map) = secondary_memory_index.get_mut(field.as_str()) {
-                        if let Some(data_offset) = data_offset_val.as_u64() {
-                            field_map.insert(key.to_string(), vec![data_offset]);
-                        } else if let Some(offset_array) = data_offset_val.as_array() {
-                            if offset_array.is_empty() {
-                                field_map.remove(key);
-                            } else {
-                                let offsets: Vec<u64> =
-                                    offset_array.iter().filter_map(|v| v.as_u64()).collect();
-                                field_map.insert(key.to_string(), offsets);
+                            if let Some(data_offset) = data_offset_val.as_u64() {
+                                field_map.insert(key.to_string(), vec![data_offset]);
+                            } else if let Some(offset_array) = data_offset_val.as_array() {
+                                if offset_array.is_empty() {
+                                    field_map.remove(key);
+                                } else {
+                                    let offsets: Vec<u64> =
+                                        offset_array.iter().filter_map(|v| v.as_u64()).collect();
+                                    field_map.insert(key.to_string(), offsets);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
         }
 
         let mut data_block_index = HashMap::new();

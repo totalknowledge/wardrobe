@@ -6,7 +6,7 @@ impl Drawer {
         offset: u64,
     ) -> std::io::Result<Option<Value>> {
         self.data_reader
-            .read_record_at_offset(offset)
+            .read_record_at_offset(offset, Some(&self.field_name_map))
             .map(|record| record.map(|record| self.decode_record_from_storage(record)))
     }
 
@@ -128,7 +128,9 @@ impl Drawer {
 
         let mut live_records = Vec::with_capacity(raw_slots.len());
         for slot in raw_slots {
-            if let Some(record_value) = BsonBinaryFormat::deserialize_record(&slot)? {
+            if let Some(record_value) =
+                BsonBinaryFormat::deserialize_record_with_map(&slot, Some(&self.field_name_map))?
+            {
                 live_records.push(self.decode_record_from_storage(record_value));
             }
         }
@@ -138,9 +140,10 @@ impl Drawer {
 
     pub fn find_all_records(&self) -> std::io::Result<Vec<Value>> {
         if self.should_read_by_primary_offsets()? {
-            let records = self
-                .data_reader
-                .read_records_at_offsets(self.sorted_live_primary_offsets())?;
+            let records = self.data_reader.read_records_at_offsets(
+                self.sorted_live_primary_offsets(),
+                Some(&self.field_name_map),
+            )?;
             return Ok(records
                 .into_iter()
                 .map(|record| self.decode_record_from_storage(record))

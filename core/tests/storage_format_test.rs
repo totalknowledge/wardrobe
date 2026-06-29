@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use wardrobe_core::{BsonBinaryFormat, DatabaseReader, DatabaseWriter, StorageFormat};
@@ -69,7 +70,7 @@ fn us_045_bson_storage_format_preserves_reader_writer_flow() {
 
     let reader = DatabaseReader::open_drawer(&file_path).expect("reader should open");
     let decoded = reader
-        .read_record_at_offset(offset)
+        .read_record_at_offset(offset, None)
         .expect("read should succeed");
     assert_eq!(decoded, Some(record));
 
@@ -103,4 +104,117 @@ fn us_045_bson_binary_rejects_invalid_slot_mutations() {
 
     let invalid_header = BsonBinaryFormat::with_slot_size(b"{}", 32);
     assert!(invalid_header.is_err());
+}
+
+#[test]
+fn us_134_native_record_round_trips_supported_value_types() {
+    let field_name_map = BTreeMap::from([
+        ("_".to_string(), "_id".to_string()),
+        ("a".to_string(), "name".to_string()),
+        ("b".to_string(), "missing".to_string()),
+        ("c".to_string(), "enabled".to_string()),
+        ("d".to_string(), "disabled".to_string()),
+        ("e".to_string(), "signed".to_string()),
+        ("f".to_string(), "unsigned".to_string()),
+        ("g".to_string(), "ratio".to_string()),
+        ("h".to_string(), "nothing".to_string()),
+        ("i".to_string(), "tags".to_string()),
+        ("j".to_string(), "nested".to_string()),
+    ]);
+    let stored_record = json!({
+        "_": "record-1",
+        "a": "Bob",
+        "c": true,
+        "d": false,
+        "e": -42,
+        "f": 42_u64,
+        "g": 1.5,
+        "h": null,
+        "i": ["alpha", 2, true],
+        "j": {"inner": "value"}
+    });
+
+    let encoded = BsonBinaryFormat::serialize_native_record(&stored_record, &field_name_map)
+        .expect("native record should serialize");
+    assert_eq!(encoded[4], 2);
+
+    let decoded = BsonBinaryFormat::deserialize_record_with_map(&encoded, Some(&field_name_map))
+        .expect("native record should deserialize")
+        .expect("native record should be live");
+
+    assert_eq!(decoded, stored_record);
+    assert!(decoded.get("b").is_none(), "missing fields stay absent");
+}
+
+#[test]
+fn us_134_native_record_presence_bitmap_uses_lsb_field_order() {
+    let field_name_map = BTreeMap::from([
+        ("_".to_string(), "_id".to_string()),
+        ("a".to_string(), "name".to_string()),
+        ("b".to_string(), "age".to_string()),
+        ("c".to_string(), "weight".to_string()),
+    ]);
+    let stored_record = json!({
+        "_": "record-1",
+        "b": 56
+    });
+
+    let encoded = BsonBinaryFormat::serialize_native_record(&stored_record, &field_name_map)
+        .expect("native record should serialize");
+
+    assert_eq!(
+        encoded[16], 4,
+        "field_count_at_write should be encoded as a single-byte varint"
+    );
+    assert_eq!(
+        encoded[17], 0b0000_0101,
+        "presence bitmap should mark field ordinals 0 and 2"
+    );
+}
+
+#[test]
+fn us_134_native_record_decodes_after_field_map_growth() {
+    let original_field_name_map = BTreeMap::from([
+        ("_".to_string(), "_id".to_string()),
+        ("a".to_string(), "name".to_string()),
+        ("b".to_string(), "age".to_string()),
+    ]);
+    let grown_field_name_map = BTreeMap::from([
+        ("_".to_string(), "_id".to_string()),
+        ("a".to_string(), "name".to_string()),
+        ("b".to_string(), "age".to_string()),
+        ("A".to_string(), "new_after_lowercase_tokens".to_string()),
+    ]);
+    let stored_record = json!({
+        "_": "record-1",
+        "a": "Bob",
+        "b": 56
+    });
+
+    let encoded =
+        BsonBinaryFormat::serialize_native_record(&stored_record, &original_field_name_map)
+            .expect("native record should serialize");
+    let decoded =
+        BsonBinaryFormat::deserialize_record_with_map(&encoded, Some(&grown_field_name_map))
+            .expect("native record should deserialize with grown map")
+            .expect("native record should be live");
+
+    assert_eq!(decoded, stored_record);
+}
+
+#[test]
+fn us_134_native_record_requires_field_map_and_bson_still_reads_with_map() {
+    let field_name_map = BTreeMap::from([("_".to_string(), "_id".to_string())]);
+    let native =
+        BsonBinaryFormat::serialize_native_record(&json!({"_": "record-1"}), &field_name_map)
+            .expect("native record should serialize");
+    let err = BsonBinaryFormat::deserialize_record_with_map(&native, None)
+        .expect_err("native records need a field map");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    let bson_record = json!({"_": "record-1"});
+    let bson = BsonBinaryFormat::serialize_record(&bson_record).expect("bson should serialize");
+    let decoded = BsonBinaryFormat::deserialize_record_with_map(&bson, Some(&field_name_map))
+        .expect("bson should deserialize with ignored map");
+    assert_eq!(decoded, Some(bson_record));
 }

@@ -81,7 +81,8 @@ impl Drawer {
 
         self.ensure_field_tokens_for_record_write(&record)?;
         let stored_record = self.encode_record_for_storage(&record);
-        let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
+        let serialized_record =
+            BsonBinaryFormat::serialize_native_record(&stored_record, &self.field_name_map)?;
         let raw_len = serialized_record.len();
         let target_size_class = self.data_recycler.calculate_aligned_size(raw_len);
         let live_block = DataBlockIndexEntry::live(&serialized_record, target_size_class);

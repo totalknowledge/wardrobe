@@ -9,11 +9,12 @@ use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
     AlterRequest, BsonBinaryFormat, Command, CommandResult, CompactMode, CompactRequest,
-    CreateRequest, CreateResult, DatabaseReader, DeleteResult, NativeBinaryIndexFormat, OperationFilter,
-    OperationOptions, OrderDirection, QueryModifiers, ReadResult, ReturnShape, StatusRequest,
-    StatusResult, StorageCoordinate, StorageFormat, StorageInventory, StorageLocator, StorageScope,
-    UpsertResult, WAL_FILE_NAME, WalJournal, WalOperation, WardrobeConfig, WardrobeEngine,
-    application_logging_is_configured, shutdown_application_logging,
+    CreateRequest, CreateResult, DatabaseReader, DeleteResult, NativeBinaryIndexFormat,
+    OperationFilter, OperationOptions, OrderDirection, QueryModifiers, ReadResult, ReturnShape,
+    StatusRequest, StatusResult, StorageCoordinate, StorageFormat, StorageInventory,
+    StorageLocator, StorageScope, UpsertResult, WAL_FILE_NAME, WalJournal, WalOperation,
+    WardrobeConfig, WardrobeEngine, application_logging_is_configured,
+    shutdown_application_logging,
 };
 
 const INDEX_FIELD_KEY: &str = "f";
@@ -213,13 +214,21 @@ fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
         .and_then(|stem| stem.to_str())
         .is_some_and(|stem| stem.ends_with("_index"));
 
+    let native_field_name_map = drawer_field_name_map_from_disk(path).map(|field_name_map| {
+        field_name_map
+            .iter()
+            .filter_map(|(token, logical_name)| {
+                logical_name
+                    .as_str()
+                    .map(|logical_name| (token.clone(), logical_name.to_string()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
     let mut name_map = std::collections::BTreeMap::new();
     if is_index {
-        if let Some(map) = drawer_field_name_map_from_disk(path) {
+        if let Some(map) = native_field_name_map.as_ref() {
             for (k, v) in map {
-                if let Some(s) = v.as_str() {
-                    name_map.insert(k, s.to_string());
-                }
+                name_map.insert(k.clone(), v.clone());
             }
         }
     }
@@ -228,12 +237,20 @@ fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
     let mut records = Vec::new();
     reader
         .stream_with_offsets(|_offset, slot| {
-            let is_dead = BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
+            let is_dead =
+                BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
             if !is_dead {
                 let entry_opt = if BsonBinaryFormat::is_binary_frame(slot) {
-                    BsonBinaryFormat::deserialize_record(slot).ok().flatten()
+                    BsonBinaryFormat::deserialize_record_with_map(
+                        slot,
+                        native_field_name_map.as_ref(),
+                    )
+                    .ok()
+                    .flatten()
                 } else if NativeBinaryIndexFormat::is_binary_frame(slot) {
-                    NativeBinaryIndexFormat::deserialize_index_entry(slot, &name_map).ok().flatten()
+                    NativeBinaryIndexFormat::deserialize_index_entry(slot, &name_map)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 };

@@ -50,7 +50,8 @@ impl Drawer {
                     )
                 })?;
             let stored_record = self.encode_record_for_storage(record);
-            let serialized_record = BsonBinaryFormat::serialize_record(&stored_record)?;
+            let serialized_record =
+                BsonBinaryFormat::serialize_native_record(&stored_record, &self.field_name_map)?;
             let data_offset = Self::append_compact_payload(&mut compact_data, &serialized_record);
             let block_entry =
                 DataBlockIndexEntry::live(&serialized_record, serialized_record.len());
@@ -61,8 +62,11 @@ impl Drawer {
                 Value::from(data_offset),
                 Some(block_entry),
             );
-            let (index_offset, index_slot_size) =
-                Self::append_compact_index_entry(&mut compact_index, &primary_index_entry, &self.field_name_map)?;
+            let (index_offset, index_slot_size) = Self::append_compact_index_entry(
+                &mut compact_index,
+                &primary_index_entry,
+                &self.field_name_map,
+            )?;
 
             primary_memory_index.insert(primary_key_value.to_string(), data_offset);
             index_file_offsets.insert(
@@ -104,8 +108,11 @@ impl Drawer {
                 Self::offsets_index_value(&offsets),
                 None,
             );
-            let (index_offset, index_slot_size) =
-                Self::append_compact_index_entry(&mut compact_index, &secondary_index_entry, &self.field_name_map)?;
+            let (index_offset, index_slot_size) = Self::append_compact_index_entry(
+                &mut compact_index,
+                &secondary_index_entry,
+                &self.field_name_map,
+            )?;
 
             index_file_offsets.insert(
                 format!("{}:{}", field, field_value),
