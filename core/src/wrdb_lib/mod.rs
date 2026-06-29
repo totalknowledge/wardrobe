@@ -11,6 +11,7 @@ pub mod database;
 pub mod drawer;
 pub(crate) mod pointer;
 pub(crate) mod query;
+pub(crate) mod reverse_relationships;
 pub(crate) mod storage_lock;
 pub mod transport;
 pub(crate) use transport::driver;

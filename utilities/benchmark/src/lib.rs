@@ -6,7 +6,7 @@ use mongodb::sync::{Client as MongoClient, Collection};
 use mysql::prelude::Queryable;
 use mysql::{OptsBuilder, Pool, PooledConn, Row};
 use neo4rs::{BoltList, BoltType, Graph, query};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
@@ -21,8 +21,8 @@ use tokio::runtime::Runtime;
 use wardrobe_core::{
     AlterRequest, Command, CommandResult, CompactRequest, ConnectionTarget, CreateRequest,
     DurabilityPolicy, OperationFilter, OperationOptions, ProtocolFrame, ProtocolOpcode, ReadResult,
-    StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageScope, UpsertResult,
-    WardrobeEngine,
+    ReturnShape, StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageScope,
+    UpsertResult, WardrobeEngine,
 };
 
 const DEFAULT_WARDROBE_DATABASE_PREFIX: &str = "wardrobe_benchmark";
@@ -34,6 +34,8 @@ const DEFAULT_ENTITY_RECORDS: usize = 10_000;
 const DEFAULT_BOOK_RECORDS: usize = 50_000;
 const DEFAULT_CHUNK_SIZE: usize = 500;
 const DEFAULT_TRAVERSAL_QUERIES: usize = 100;
+const DEFAULT_POINT_LOOKUPS: usize = 1_000;
+const DEFAULT_DELETE_BY_ID_OPERATIONS: usize = 100;
 const DEFAULT_PURGE_BUCKETS: usize = 10;
 const DEFAULT_MYSQL_USER: &str = "wardrobe_benchmark";
 const DEFAULT_MYSQL_PASSWORD: &str = "wardrobe_benchmark";
@@ -69,6 +71,16 @@ FROM books b
 JOIN entities author ON author.id = b.author_id
 JOIN entities editor ON editor.id = b.editor_id
 WHERE b.author_id = ?1 AND b.editor_id = ?1;
+"#;
+const SQLITE_BOOK_BY_ID_QUERY: &str = r#"
+SELECT id, isbn, title, author_id, editor_id, branch, quantity, purge_bucket
+FROM books
+WHERE id = ?1;
+"#;
+const MYSQL_BOOK_BY_ID_QUERY: &str = r#"
+SELECT id, isbn, title, author_id, editor_id, branch, quantity, purge_bucket
+FROM books
+WHERE id = ?
 "#;
 const NEO4J_BULK_ENTITY_UPSERT_QUERY: &str = r#"
 UNWIND $rows AS row
@@ -192,6 +204,14 @@ impl BenchmarkConfig {
                 }
                 "--traversal-queries" => {
                     config.profile.traversal_queries =
+                        parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
+                }
+                "--point-lookups" => {
+                    config.profile.point_lookups =
+                        parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
+                }
+                "--delete-by-id" => {
+                    config.profile.delete_by_id_operations =
                         parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
                 }
                 "--purge-buckets" => {
@@ -361,6 +381,8 @@ pub struct LibraryProfile {
     pub book_records: usize,
     pub chunk_size: usize,
     pub traversal_queries: usize,
+    pub point_lookups: usize,
+    pub delete_by_id_operations: usize,
     pub purge_buckets: usize,
 }
 
@@ -371,6 +393,8 @@ impl Default for LibraryProfile {
             book_records: DEFAULT_BOOK_RECORDS,
             chunk_size: DEFAULT_CHUNK_SIZE,
             traversal_queries: DEFAULT_TRAVERSAL_QUERIES,
+            point_lookups: DEFAULT_POINT_LOOKUPS,
+            delete_by_id_operations: DEFAULT_DELETE_BY_ID_OPERATIONS,
             purge_buckets: DEFAULT_PURGE_BUCKETS,
         }
     }
@@ -383,6 +407,8 @@ impl LibraryProfile {
             ("books", self.book_records),
             ("chunk-size", self.chunk_size),
             ("traversal-queries", self.traversal_queries),
+            ("point-lookups", self.point_lookups),
+            ("delete-by-id", self.delete_by_id_operations),
             ("purge-buckets", self.purge_buckets),
         ] {
             if value == 0 {
@@ -443,12 +469,39 @@ impl LibraryProfile {
         self.entity_id(query_index % self.entity_records)
     }
 
+    fn point_lookup_book_ids(&self) -> Vec<String> {
+        repeated_shuffled_indices(self.book_records, self.point_lookups, 0x9E37_79B9_7F4A_7C15)
+            .into_iter()
+            .map(|index| self.book_id(index))
+            .collect()
+    }
+
+    fn delete_by_id_book_ids(&self) -> Vec<String> {
+        let candidates = (0..self.book_records)
+            .filter(|index| index % self.purge_buckets != 0)
+            .collect::<Vec<_>>();
+        shuffled_take(
+            candidates,
+            self.delete_by_id_operations,
+            0xD1B5_4A32_D192_ED03,
+        )
+        .into_iter()
+        .map(|index| self.book_id(index))
+        .collect()
+    }
+
     fn expected_purge_count(&self) -> usize {
         if self.book_records == 0 {
             0
         } else {
             ((self.book_records - 1) / self.purge_buckets) + 1
         }
+    }
+
+    fn expected_book_records_after_mutating_phases(&self) -> usize {
+        self.book_records
+            .saturating_sub(self.delete_by_id_book_ids().len())
+            .saturating_sub(self.expected_purge_count())
     }
 }
 
@@ -465,11 +518,13 @@ impl BenchmarkReport {
         out.push_str("# Cross-Engine Performance Benchmark\n\n");
         out.push_str(&format!("- Run directory: `{}`\n", self.run_dir.display()));
         out.push_str(&format!(
-            "- Profile: {} entity records, {} book records, chunk size {}, {} traversal queries\n\n",
+            "- Profile: {} entity records, {} book records, chunk size {}, {} traversal queries, {} point lookups, {} delete-by-ID operations\n\n",
             self.profile.entity_records,
             self.profile.book_records,
             self.profile.chunk_size,
             self.profile.traversal_queries,
+            self.profile.point_lookups,
+            self.profile.delete_by_id_operations,
         ));
         out.push_str("| Target | Phase | Operations | Total us | OPS | Mean us | p95 us | p99 us | Storage bytes |\n");
         out.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
@@ -540,7 +595,9 @@ pub struct PhaseMetrics {
 pub enum PhaseName {
     MassiveIngestion,
     IndexMutation,
+    PointLookup,
     ComplexTraversal,
+    DeleteById,
     TargetedPurge,
     Compaction,
 }
@@ -550,7 +607,9 @@ impl PhaseName {
         match self {
             Self::MassiveIngestion => "Massive Ingestion",
             Self::IndexMutation => "Index Mutation",
+            Self::PointLookup => "Point Lookup",
             Self::ComplexTraversal => "Complex Traversal",
+            Self::DeleteById => "Delete by ID",
             Self::TargetedPurge => "Targeted Purge",
             Self::Compaction => "Compaction",
         }
@@ -684,11 +743,13 @@ fn run_benchmark_with_builder(
     ));
     fs::create_dir_all(&run_dir)?;
     progress.log(format!(
-        "profile: {} entities, {} books, chunk size {}, {} traversal queries",
+        "profile: {} entities, {} books, chunk size {}, {} traversal queries, {} point lookups, {} delete-by-ID operations",
         config.profile.entity_records,
         config.profile.book_records,
         config.profile.chunk_size,
-        config.profile.traversal_queries
+        config.profile.traversal_queries,
+        config.profile.point_lookups,
+        config.profile.delete_by_id_operations
     ));
     if config.targets.iter().any(|target| {
         matches!(
@@ -787,6 +848,12 @@ pub fn print_help() {
     println!(
         "  --traversal-queries <count>     Complex traversal query repetitions, default {DEFAULT_TRAVERSAL_QUERIES}"
     );
+    println!(
+        "  --point-lookups <count>         Random primary-key lookup operations, default {DEFAULT_POINT_LOOKUPS}"
+    );
+    println!(
+        "  --delete-by-id <count>          Random primary-key delete operations, default {DEFAULT_DELETE_BY_ID_OPERATIONS}"
+    );
     println!("  --wardrobe-embedded-path <path> Override embedded Wardrobe storage path");
     println!(
         "  --wardrobe-remote-uri <uri>     Use an existing Wardrobe TCP server instead of auto-spawning one"
@@ -846,7 +913,19 @@ trait BenchmarkTarget {
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64>;
+    fn point_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64>;
     fn complex_traversal(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64>;
+    fn delete_by_id(
         &mut self,
         profile: &LibraryProfile,
         recorder: &mut PhaseRecorder,
@@ -883,7 +962,9 @@ fn run_target(
     let phases = [
         PhaseName::MassiveIngestion,
         PhaseName::IndexMutation,
+        PhaseName::PointLookup,
         PhaseName::ComplexTraversal,
+        PhaseName::DeleteById,
         PhaseName::TargetedPurge,
         PhaseName::Compaction,
     ];
@@ -899,8 +980,14 @@ fn run_target(
             PhaseName::IndexMutation => {
                 target.index_mutation(profile, &mut recorder, progress)?;
             }
+            PhaseName::PointLookup => {
+                target.point_lookup(profile, &mut recorder, progress)?;
+            }
             PhaseName::ComplexTraversal => {
                 target.complex_traversal(profile, &mut recorder, progress)?;
+            }
+            PhaseName::DeleteById => {
+                target.delete_by_id(profile, &mut recorder, progress)?;
             }
             PhaseName::TargetedPurge => {
                 target.targeted_purge(profile, &mut recorder, progress)?;
@@ -1105,9 +1192,7 @@ impl WardrobeStorageSnapshot {
         ));
 
         if let Some(profile) = profile {
-            let expected_book_records = profile
-                .book_records
-                .saturating_sub(profile.expected_purge_count());
+            let expected_book_records = profile.expected_book_records_after_mutating_phases();
             let entity_records = self
                 .drawers
                 .iter()
@@ -1500,6 +1585,36 @@ impl BenchmarkTarget for WardrobeTarget {
         Ok(3)
     }
 
+    fn point_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.point_lookup_book_ids();
+        progress.log(format!(
+            "{}: reading {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let record = expect_record(self.execute_scoped(Command::Read {
+                    filter: OperationFilter::pointer(format!("@{BOOK_DRAWER}:{id}")),
+                    options: OperationOptions::new().return_shape(ReturnShape::Record),
+                })?)?;
+                verify_record_id(&record, id)
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: point lookups completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -1545,6 +1660,43 @@ impl BenchmarkTarget for WardrobeTarget {
             );
         }
         Ok(profile.traversal_queries as u64)
+    }
+
+    fn delete_by_id(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.delete_by_id_book_ids();
+        progress.log(format!(
+            "{}: deleting {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let pointer = format!("@{BOOK_DRAWER}:{id}");
+                verify_deleted_count(
+                    expect_delete(self.execute_scoped(Command::Delete {
+                        filter: OperationFilter::pointer(pointer.clone()),
+                        options: OperationOptions::default(),
+                    })?)?,
+                    id,
+                )?;
+                expect_missing_record(self.execute_scoped(Command::Read {
+                    filter: OperationFilter::pointer(pointer),
+                    options: OperationOptions::new().return_shape(ReturnShape::Record),
+                })?)
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: delete-by-ID operations completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
     }
 
     fn targeted_purge(
@@ -1819,6 +1971,46 @@ CREATE TABLE books (
         Ok(3)
     }
 
+    fn point_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.point_lookup_book_ids();
+        progress.log(format!(
+            "{}: reading {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        let mut statement = self
+            .connection
+            .prepare(SQLITE_BOOK_BY_ID_QUERY)
+            .map_err(to_io_error)?;
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let record = statement
+                    .query_row([id.as_str()], sqlite_book_value)
+                    .optional()
+                    .map_err(to_io_error)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::NotFound,
+                            format!("SQLite point lookup did not find book '{id}'"),
+                        )
+                    })?;
+                verify_record_id(&record, id)
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: point lookups completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -1848,6 +2040,53 @@ CREATE TABLE books (
             );
         }
         Ok(profile.traversal_queries as u64)
+    }
+
+    fn delete_by_id(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.delete_by_id_book_ids();
+        progress.log(format!(
+            "{}: deleting {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                verify_deleted_count(
+                    self.connection
+                        .execute("DELETE FROM books WHERE id = ?1;", [id.as_str()])
+                        .map_err(to_io_error)?,
+                    id,
+                )?;
+                let remaining = self
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM books WHERE id = ?1;",
+                        [id.as_str()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(to_io_error)?;
+                if remaining == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("SQLite delete-by-ID left book '{id}' behind"),
+                    ))
+                }
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: delete-by-ID operations completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
     }
 
     fn targeted_purge(
@@ -2048,6 +2287,49 @@ impl BenchmarkTarget for MongoTarget {
         Ok(3)
     }
 
+    fn point_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.point_lookup_book_ids();
+        progress.log(format!(
+            "{}: reading {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let document = self
+                    .books()
+                    .find_one(doc! { "_id": id }, None)
+                    .map_err(to_io_error)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::NotFound,
+                            format!("MongoDB point lookup did not find book '{id}'"),
+                        )
+                    })?;
+                match document.get_str("_id") {
+                    Ok(actual_id) if actual_id == id => Ok(()),
+                    Ok(actual_id) => Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Expected MongoDB book id '{id}', got '{actual_id}'"),
+                    )),
+                    Err(error) => Err(to_io_error(error)),
+                }
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: point lookups completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -2074,6 +2356,48 @@ impl BenchmarkTarget for MongoTarget {
             );
         }
         Ok(profile.traversal_queries as u64)
+    }
+
+    fn delete_by_id(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.delete_by_id_book_ids();
+        progress.log(format!(
+            "{}: deleting {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let result = self
+                    .books()
+                    .delete_one(doc! { "_id": id }, None)
+                    .map_err(to_io_error)?;
+                verify_deleted_count(result.deleted_count as usize, id)?;
+                let remaining = self
+                    .books()
+                    .count_documents(doc! { "_id": id }, None)
+                    .map_err(to_io_error)?;
+                if remaining == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("MongoDB delete-by-ID left book '{id}' behind"),
+                    ))
+                }
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: delete-by-ID operations completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
     }
 
     fn targeted_purge(
@@ -2318,6 +2642,43 @@ CREATE TABLE books (
         Ok(3)
     }
 
+    fn point_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.point_lookup_book_ids();
+        progress.log(format!(
+            "{}: reading {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let row = self
+                    .connection
+                    .exec_first::<Row, _, _>(MYSQL_BOOK_BY_ID_QUERY, (id.as_str(),))
+                    .map_err(to_io_error)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::NotFound,
+                            format!("MySQL point lookup did not find book '{id}'"),
+                        )
+                    })?;
+                let record = mysql_book_value(&row)?;
+                verify_record_id(&record, id)
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: point lookups completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -2345,6 +2706,51 @@ CREATE TABLE books (
             );
         }
         Ok(profile.traversal_queries as u64)
+    }
+
+    fn delete_by_id(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.delete_by_id_book_ids();
+        progress.log(format!(
+            "{}: deleting {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                self.connection
+                    .exec_drop("DELETE FROM books WHERE id = ?", (id.as_str(),))
+                    .map_err(to_io_error)?;
+                verify_deleted_count(self.connection.affected_rows() as usize, id)?;
+                let remaining = self
+                    .connection
+                    .exec_first::<u64, _, _>(
+                        "SELECT COUNT(*) FROM books WHERE id = ?",
+                        (id.as_str(),),
+                    )
+                    .map_err(to_io_error)?
+                    .unwrap_or(0);
+                if remaining == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("MySQL delete-by-ID left book '{id}' behind"),
+                    ))
+                }
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: delete-by-ID operations completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
     }
 
     fn targeted_purge(
@@ -2627,6 +3033,73 @@ impl BenchmarkTarget for Neo4jTarget {
         Ok(3)
     }
 
+    fn point_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.point_lookup_book_ids();
+        progress.log(format!(
+            "{}: reading {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                self.runtime.block_on(async {
+                    let mut stream = self
+                        .graph
+                        .execute(
+                            query(
+                                "MATCH (b:BenchNode:Book {bench_marker: $marker, id: $id}) RETURN b.id AS id, b.isbn AS isbn, b.title AS title, b.author_id AS author_id, b.editor_id AS editor_id, b.branch AS branch, b.quantity AS quantity, b.purge_bucket AS purge_bucket",
+                            )
+                            .param("marker", self.marker.clone())
+                            .param("id", id.clone()),
+                        )
+                        .await
+                        .map_err(to_io_error)?;
+                    let mut found = 0_usize;
+                    while let Some(row) = stream.next().await.map_err(to_io_error)? {
+                        let actual_id: String = row.get("id").map_err(to_io_error)?;
+                        let _record = book_value(
+                            actual_id.clone(),
+                            row.get("isbn").map_err(to_io_error)?,
+                            row.get("title").map_err(to_io_error)?,
+                            row.get("author_id").map_err(to_io_error)?,
+                            row.get("editor_id").map_err(to_io_error)?,
+                            row.get("branch").map_err(to_io_error)?,
+                            row.get("quantity").map_err(to_io_error)?,
+                            row.get("purge_bucket").map_err(to_io_error)?,
+                        );
+                        if actual_id != *id {
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                format!("Expected Neo4j book id '{id}', got '{actual_id}'"),
+                            ));
+                        }
+                        found = found.saturating_add(1);
+                    }
+                    if found == 1 {
+                        Ok(())
+                    } else {
+                        Err(Error::new(
+                            ErrorKind::NotFound,
+                            format!("Neo4j point lookup found {found} records for book '{id}'"),
+                        ))
+                    }
+                })
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: point lookups completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -2660,6 +3133,56 @@ impl BenchmarkTarget for Neo4jTarget {
             );
         }
         Ok(profile.traversal_queries as u64)
+    }
+
+    fn delete_by_id(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let ids = profile.delete_by_id_book_ids();
+        progress.log(format!(
+            "{}: deleting {} book records by primary id",
+            self.name(),
+            ids.len()
+        ));
+        for (index, id) in ids.iter().enumerate() {
+            recorder.measure(1, || {
+                let deleted = self.count_query(
+                    query(
+                        "MATCH (b:BenchNode:Book {bench_marker: $marker, id: $id}) WITH collect(b) AS nodes FOREACH (node IN nodes | DETACH DELETE node) RETURN size(nodes) AS deleted_count",
+                    )
+                    .param("marker", self.marker.clone())
+                    .param("id", id.clone()),
+                    "deleted_count",
+                )?;
+                verify_deleted_count(deleted as usize, id)?;
+                let remaining = self.count_query(
+                    query(
+                        "MATCH (b:BenchNode:Book {bench_marker: $marker, id: $id}) RETURN count(b) AS remaining_count",
+                    )
+                    .param("marker", self.marker.clone())
+                    .param("id", id.clone()),
+                    "remaining_count",
+                )?;
+                if remaining == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Neo4j delete-by-ID left book '{id}' behind"),
+                    ))
+                }
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: delete-by-ID operations completed", self.name()),
+                index + 1,
+                ids.len(),
+            );
+        }
+        Ok(ids.len() as u64)
     }
 
     fn targeted_purge(
@@ -3073,6 +3596,24 @@ fn expect_records(result: CommandResult) -> io::Result<Vec<Value>> {
     }
 }
 
+fn expect_record(result: CommandResult) -> io::Result<Value> {
+    match result {
+        CommandResult::Read(ReadResult::Record(Some(record))) => Ok(record),
+        CommandResult::Read(ReadResult::Records(records)) if records.len() == 1 => {
+            Ok(records.into_iter().next().unwrap_or(Value::Null))
+        }
+        other => unexpected_wardrobe_result("single record", other),
+    }
+}
+
+fn expect_missing_record(result: CommandResult) -> io::Result<()> {
+    match result {
+        CommandResult::Read(ReadResult::Record(None)) => Ok(()),
+        CommandResult::Read(ReadResult::Records(records)) if records.is_empty() => Ok(()),
+        other => unexpected_wardrobe_result("missing record", other),
+    }
+}
+
 fn expect_count(result: CommandResult) -> io::Result<usize> {
     match result {
         CommandResult::Count(count) => Ok(count),
@@ -3091,6 +3632,36 @@ fn expect_vacuumed(result: CommandResult) -> io::Result<()> {
     match result {
         CommandResult::Compact(_) => Ok(()),
         other => unexpected_wardrobe_result("vacuum report", other),
+    }
+}
+
+fn verify_record_id(record: &Value, expected_id: &str) -> io::Result<()> {
+    let actual = ["_id", "book_id", "entity_id", "id"]
+        .into_iter()
+        .find_map(|field| record.get(field).and_then(Value::as_str));
+    match actual {
+        Some(actual_id) if actual_id == expected_id => Ok(()),
+        Some(actual_id) => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Expected record id '{expected_id}', got '{actual_id}'"),
+        )),
+        None => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Record is missing expected primary id '{expected_id}'"),
+        )),
+    }
+}
+
+fn verify_deleted_count(deleted: usize, expected_id: &str) -> io::Result<()> {
+    if deleted == 1 {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Expected delete-by-ID for '{expected_id}' to remove 1 record, removed {deleted}"
+            ),
+        ))
     }
 }
 
@@ -3121,6 +3692,41 @@ fn chunk_ranges(total: usize, chunk_size: usize) -> Vec<(usize, usize)> {
         start = end;
     }
     ranges
+}
+
+fn repeated_shuffled_indices(total: usize, count: usize, seed: u64) -> Vec<usize> {
+    if total == 0 || count == 0 {
+        return Vec::new();
+    }
+    let mut order = (0..total).collect::<Vec<_>>();
+    deterministic_shuffle(&mut order, seed);
+    (0..count).map(|index| order[index % order.len()]).collect()
+}
+
+fn shuffled_take(mut values: Vec<usize>, count: usize, seed: u64) -> Vec<usize> {
+    deterministic_shuffle(&mut values, seed);
+    values.truncate(count.min(values.len()));
+    values
+}
+
+fn deterministic_shuffle(values: &mut [usize], seed: u64) {
+    if values.len() <= 1 {
+        return;
+    }
+    let mut state = seed ^ ((values.len() as u64) << 32);
+    for index in (1..values.len()).rev() {
+        let swap_with = (next_shuffle_u64(&mut state) as usize) % (index + 1);
+        values.swap(index, swap_with);
+    }
+}
+
+fn next_shuffle_u64(state: &mut u64) -> u64 {
+    let mut value = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    value
 }
 
 fn materialized_book_value(
@@ -3166,6 +3772,42 @@ fn materialized_book_value(
             "cohort": editor_cohort,
         },
     })
+}
+
+fn book_value(
+    book_id: String,
+    isbn: String,
+    title: String,
+    author_id: String,
+    editor_id: String,
+    branch: String,
+    quantity: i64,
+    purge_bucket: i64,
+) -> Value {
+    json!({
+        "_id": book_id.clone(),
+        "book_id": book_id,
+        "isbn": isbn,
+        "title": title,
+        "author_id": author_id,
+        "editor_id": editor_id,
+        "branch": branch,
+        "quantity": quantity,
+        "purge_bucket": purge_bucket,
+    })
+}
+
+fn sqlite_book_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(book_value(
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
 }
 
 fn sqlite_materialized_book_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -3286,6 +3928,19 @@ fn mysql_materialized_book_value(row: &Row) -> io::Result<Value> {
         mysql_string(row, "editor_display_name")?,
         mysql_string(row, "editor_role")?,
         mysql_i64(row, "editor_cohort")?,
+    ))
+}
+
+fn mysql_book_value(row: &Row) -> io::Result<Value> {
+    Ok(book_value(
+        mysql_string(row, "id")?,
+        mysql_string(row, "isbn")?,
+        mysql_string(row, "title")?,
+        mysql_string(row, "author_id")?,
+        mysql_string(row, "editor_id")?,
+        mysql_string(row, "branch")?,
+        mysql_i64(row, "quantity")?,
+        mysql_i64(row, "purge_bucket")?,
     ))
 }
 
@@ -3558,6 +4213,8 @@ mod tests {
             book_records: 6,
             chunk_size: 2,
             traversal_queries: 2,
+            point_lookups: 3,
+            delete_by_id_operations: 2,
             purge_buckets: 2,
         }
     }
@@ -3650,6 +4307,16 @@ mod tests {
             self.maybe_fail(PhaseName::IndexMutation)
         }
 
+        fn point_lookup(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::PointLookup);
+            self.maybe_fail(PhaseName::PointLookup)
+        }
+
         fn complex_traversal(
             &mut self,
             _profile: &LibraryProfile,
@@ -3658,6 +4325,16 @@ mod tests {
         ) -> io::Result<u64> {
             self.calls.push(PhaseName::ComplexTraversal);
             self.maybe_fail(PhaseName::ComplexTraversal)
+        }
+
+        fn delete_by_id(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::DeleteById);
+            self.maybe_fail(PhaseName::DeleteById)
         }
 
         fn targeted_purge(
@@ -3718,6 +4395,10 @@ mod tests {
             "3".to_string(),
             "--traversal-queries".to_string(),
             "5".to_string(),
+            "--point-lookups".to_string(),
+            "13".to_string(),
+            "--delete-by-id".to_string(),
+            "7".to_string(),
             "--purge-buckets".to_string(),
             "4".to_string(),
             "--wardrobe-embedded-path".to_string(),
@@ -3774,6 +4455,8 @@ mod tests {
         assert_eq!(config.profile.book_records, 11);
         assert_eq!(config.profile.chunk_size, 3);
         assert_eq!(config.profile.traversal_queries, 5);
+        assert_eq!(config.profile.point_lookups, 13);
+        assert_eq!(config.profile.delete_by_id_operations, 7);
         assert_eq!(config.profile.purge_buckets, 4);
         assert_eq!(
             config.wardrobe_embedded_path,
@@ -4017,10 +4700,14 @@ IGNORED=value
             book_records: 11,
             chunk_size: 2,
             traversal_queries: 3,
+            point_lookups: 4,
+            delete_by_id_operations: 2,
             purge_buckets: 4,
         };
 
         assert_eq!(profile.expected_purge_count(), 3);
+        assert_eq!(profile.delete_by_id_book_ids().len(), 2);
+        assert_eq!(profile.expected_book_records_after_mutating_phases(), 6);
     }
 
     #[test]
@@ -4224,7 +4911,9 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
 
         assert_eq!(PhaseName::MassiveIngestion.label(), "Massive Ingestion");
         assert_eq!(PhaseName::IndexMutation.label(), "Index Mutation");
+        assert_eq!(PhaseName::PointLookup.label(), "Point Lookup");
         assert_eq!(PhaseName::ComplexTraversal.label(), "Complex Traversal");
+        assert_eq!(PhaseName::DeleteById.label(), "Delete by ID");
         assert_eq!(PhaseName::TargetedPurge.label(), "Targeted Purge");
         assert_eq!(PhaseName::Compaction.label(), "Compaction");
 
@@ -4238,14 +4927,16 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let report = run_target(&mut target, &tiny_profile(), &ProgressReporter::new(false))
             .expect("fake target should run");
         assert_eq!(report.name, "Fake Target");
-        assert_eq!(report.phases.len(), 5);
+        assert_eq!(report.phases.len(), 7);
         assert_eq!(report.storage_bytes, 123);
         assert_eq!(
             target.calls,
             vec![
                 PhaseName::MassiveIngestion,
                 PhaseName::IndexMutation,
+                PhaseName::PointLookup,
                 PhaseName::ComplexTraversal,
+                PhaseName::DeleteById,
                 PhaseName::TargetedPurge,
                 PhaseName::Compaction,
             ]
@@ -4446,6 +5137,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 book_records: 1,
                 chunk_size: 1,
                 traversal_queries: 1,
+                point_lookups: 1,
+                delete_by_id_operations: 1,
                 purge_buckets: 1,
             },
             run_dir: PathBuf::from("target/test"),
@@ -4533,6 +5226,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 book_records: 6,
                 chunk_size: 2,
                 traversal_queries: 2,
+                point_lookups: 3,
+                delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
             work_dir: work_dir.clone(),
@@ -4542,7 +5237,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let report = run_benchmark(config).expect("tiny benchmark should run");
 
         assert_eq!(report.targets.len(), 1);
-        assert_eq!(report.targets[0].phases.len(), 5);
+        assert_eq!(report.targets[0].phases.len(), 7);
         assert!(report.targets[0].storage_bytes > 0);
 
         let _ = fs::remove_dir_all(work_dir);
@@ -4561,6 +5256,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 book_records: 6,
                 chunk_size: 2,
                 traversal_queries: 2,
+                point_lookups: 3,
+                delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
             work_dir: work_dir.clone(),
@@ -4591,6 +5288,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 book_records: 6,
                 chunk_size: 2,
                 traversal_queries: 2,
+                point_lookups: 3,
+                delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
             work_dir: work_dir.clone(),
@@ -4600,7 +5299,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let report = run_benchmark(config).expect("tiny remote benchmark should run");
 
         assert_eq!(report.targets.len(), 1);
-        assert_eq!(report.targets[0].phases.len(), 5);
+        assert_eq!(report.targets[0].phases.len(), 7);
         assert!(report.targets[0].storage_bytes > 0);
 
         let _ = fs::remove_dir_all(work_dir);
@@ -4619,6 +5318,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 book_records: 6,
                 chunk_size: 2,
                 traversal_queries: 2,
+                point_lookups: 3,
+                delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
             work_dir: work_dir.clone(),
@@ -4782,6 +5483,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             book_records: 2,
             chunk_size: 1,
             traversal_queries: 2,
+            point_lookups: 2,
+            delete_by_id_operations: 1,
             purge_buckets: 1,
         };
         let progress = ProgressReporter::new(false);
@@ -4818,6 +5521,115 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
     }
 
     #[test]
+    fn wardrobe_point_lookup_uses_pointer_reads() {
+        let profile = tiny_profile();
+        let lookup_ids = profile.point_lookup_book_ids();
+        let state = Rc::new(RefCell::new(MockRunnerState {
+            commands: Vec::new(),
+            responses: VecDeque::from(
+                lookup_ids
+                    .iter()
+                    .map(|id| {
+                        CommandResult::Read(ReadResult::Record(Some(json!({
+                            "book_id": id,
+                        }))))
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        }));
+
+        let mut target = WardrobeTarget {
+            name: "Wardrobe (Remote TCP Server Mode)".to_string(),
+            runner: Some(Box::new(MockWardrobeRunner {
+                state: Rc::clone(&state),
+            })),
+            storage_root: None,
+            server_handle: None,
+            namespace: test_namespace(),
+            profile: None,
+            last_storage_snapshot: None,
+        };
+        let progress = ProgressReporter::new(false);
+        let mut recorder = PhaseRecorder::new(PhaseName::PointLookup);
+
+        let operations = target
+            .point_lookup(&profile, &mut recorder, &progress)
+            .expect("point lookup should complete");
+
+        assert_eq!(operations, lookup_ids.len() as u64);
+        let pointer_reads = state
+            .borrow()
+            .commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Read { filter, .. } if filter_contains_pointer(filter)
+                )
+            })
+            .count();
+        assert_eq!(pointer_reads, lookup_ids.len());
+    }
+
+    #[test]
+    fn wardrobe_delete_by_id_uses_pointer_deletes_and_verifies_missing_records() {
+        let profile = tiny_profile();
+        let delete_ids = profile.delete_by_id_book_ids();
+        let mut responses = VecDeque::new();
+        for _ in &delete_ids {
+            responses.push_back(CommandResult::Delete(wardrobe_core::DeleteResult {
+                deleted: 1,
+            }));
+            responses.push_back(CommandResult::Read(ReadResult::Record(None)));
+        }
+        let state = Rc::new(RefCell::new(MockRunnerState {
+            commands: Vec::new(),
+            responses,
+        }));
+
+        let mut target = WardrobeTarget {
+            name: "Wardrobe (Remote TCP Server Mode)".to_string(),
+            runner: Some(Box::new(MockWardrobeRunner {
+                state: Rc::clone(&state),
+            })),
+            storage_root: None,
+            server_handle: None,
+            namespace: test_namespace(),
+            profile: None,
+            last_storage_snapshot: None,
+        };
+        let progress = ProgressReporter::new(false);
+        let mut recorder = PhaseRecorder::new(PhaseName::DeleteById);
+
+        let operations = target
+            .delete_by_id(&profile, &mut recorder, &progress)
+            .expect("delete by id should complete");
+
+        assert_eq!(operations, delete_ids.len() as u64);
+        let commands = &state.borrow().commands;
+        let pointer_deletes = commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Delete { filter, .. } if filter_contains_pointer(filter)
+                )
+            })
+            .count();
+        let pointer_reads = commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    scoped_command(command),
+                    Command::Read { filter, .. } if filter_contains_pointer(filter)
+                )
+            })
+            .count();
+        assert_eq!(pointer_deletes, delete_ids.len());
+        assert_eq!(pointer_reads, delete_ids.len());
+    }
+
+    #[test]
     fn wardrobe_purge_uses_single_delete_by_filter_command() {
         let state = Rc::new(RefCell::new(MockRunnerState {
             commands: Vec::new(),
@@ -4843,6 +5655,8 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             book_records: 4,
             chunk_size: 1,
             traversal_queries: 1,
+            point_lookups: 2,
+            delete_by_id_operations: 1,
             purge_buckets: 2,
         };
         let progress = ProgressReporter::new(false);

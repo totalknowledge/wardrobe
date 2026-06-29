@@ -291,6 +291,23 @@ fn drawer_tombstone_count(path: &Path) -> usize {
     count
 }
 
+fn reverse_relationship_index(database: &TempDatabase) -> serde_json::Value {
+    let index_path = database.path.join(".reverse_relationships.json");
+    let bytes = fs::read(index_path).expect("reverse relationship index should exist");
+    serde_json::from_slice(&bytes).expect("reverse relationship index should parse")
+}
+
+fn reverse_relationship_entries(
+    database: &TempDatabase,
+    parent_pointer: &str,
+) -> Vec<serde_json::Value> {
+    reverse_relationship_index(database)["references"]
+        .get(parent_pointer)
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 struct ReadTarget {
     filter: OperationFilter,
     options: OperationOptions,
@@ -3667,6 +3684,215 @@ fn us_039_set_null_delete_rule_clears_child_pointer_and_preserves_child_record()
     .expect("weapon should remain");
     assert_eq!(weapon["name"], "SetNull Child");
     assert!(weapon.get("character").is_none());
+}
+
+#[test]
+fn us_129_reverse_relationship_index_tracks_insert_update_delete_and_restart() {
+    let database = TempDatabase::new("us_129_reverse_index_lifecycle");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "book",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "author_id": {
+                    "type": "M:1",
+                    "target_drawer": "entity",
+                    "reverse": true
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+        upsert_one(
+            &engine,
+            "entity",
+            json!({"_id": "entity_a", "display_name": "Author A"}),
+        )
+        .expect("first entity should upsert");
+        upsert_one(
+            &engine,
+            "entity",
+            json!({"_id": "entity_b", "display_name": "Author B"}),
+        )
+        .expect("second entity should upsert");
+        upsert_one(
+            &engine,
+            "book",
+            json!({
+                "_id": "book_001",
+                "title": "Reverse Index Book",
+                "author_id": "@entity:entity_a"
+            }),
+        )
+        .expect("book should upsert");
+
+        let first_author_refs = reverse_relationship_entries(&database, "@entity:entity_a");
+        assert_eq!(first_author_refs.len(), 1);
+        assert_eq!(first_author_refs[0]["child_drawer"], "book");
+        assert_eq!(first_author_refs[0]["child_id"], "book_001");
+        assert_eq!(first_author_refs[0]["child_pointer"], "@book:book_001");
+        assert_eq!(first_author_refs[0]["field_name"], "author_id");
+        assert_eq!(first_author_refs[0]["explicit"], true);
+
+        upsert_one(
+            &engine,
+            "book",
+            json!({
+                "_id": "book_001",
+                "title": "Reverse Index Book",
+                "author_id": "@entity:entity_b"
+            }),
+        )
+        .expect("book update should upsert");
+
+        assert!(reverse_relationship_entries(&database, "@entity:entity_a").is_empty());
+        let second_author_refs = reverse_relationship_entries(&database, "@entity:entity_b");
+        assert_eq!(second_author_refs.len(), 1);
+        assert_eq!(second_author_refs[0]["child_pointer"], "@book:book_001");
+    }
+
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
+    assert_eq!(
+        reverse_relationship_entries(&database, "@entity:entity_b").len(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .delete(
+                OperationFilter::pointer("@book:book_001"),
+                None::<OperationOptions>
+            )
+            .expect("book delete should succeed"),
+        1
+    );
+    assert!(reverse_relationship_entries(&database, "@entity:entity_b").is_empty());
+}
+
+#[test]
+fn us_129_set_null_delete_rule_updates_reverse_relationship_index() {
+    let database = TempDatabase::new("us_129_reverse_index_set_null");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "entity",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "authored_books": {
+                    "type": "1:M",
+                    "target_drawer": "book",
+                    "mapped_by": "author_id",
+                    "reverse": true
+                }
+            },
+            "delete_rules": {
+                "authored_books": {
+                    "action": "SetNull"
+                }
+            },
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    upsert_one(
+        &engine,
+        "entity",
+        json!({"_id": "entity_parent", "display_name": "Parent"}),
+    )
+    .expect("entity should upsert");
+    upsert_one(
+        &engine,
+        "book",
+        json!({
+            "_id": "book_child",
+            "title": "SetNull Child",
+            "author_id": "@entity:entity_parent"
+        }),
+    )
+    .expect("book should upsert");
+    assert_eq!(
+        reverse_relationship_entries(&database, "@entity:entity_parent").len(),
+        1
+    );
+
+    assert_eq!(
+        engine
+            .delete(
+                OperationFilter::pointer("@entity:entity_parent"),
+                None::<OperationOptions>
+            )
+            .expect("set-null parent delete should succeed"),
+        1
+    );
+
+    assert!(reverse_relationship_entries(&database, "@entity:entity_parent").is_empty());
+    let book = read_record(&engine, OperationFilter::pointer("@book:book_child"))
+        .expect("book should read")
+        .expect("book should remain");
+    assert!(book.get("author_id").is_none());
+}
+
+#[test]
+fn us_129_reverse_relationship_index_survives_compaction() {
+    let database = TempDatabase::new("us_129_reverse_index_compaction");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    upsert_one(
+        &engine,
+        "entity",
+        json!({"_id": "entity_compact", "display_name": "Compact Parent"}),
+    )
+    .expect("entity should upsert");
+    upsert_one(
+        &engine,
+        "book",
+        json!({
+            "_id": "book_compact",
+            "title": "Compaction Child",
+            "author_id": "@entity:entity_compact"
+        }),
+    )
+    .expect("book should upsert");
+    upsert_one(
+        &engine,
+        "book",
+        json!({
+            "_id": "book_compact",
+            "title": "Compaction Child Updated",
+            "author_id": "@entity:entity_compact"
+        }),
+    )
+    .expect("book update should upsert");
+
+    engine
+        .compact(CompactRequest::drawer("book"))
+        .expect("book compaction should succeed");
+
+    let compact_refs = reverse_relationship_entries(&database, "@entity:entity_compact");
+    assert_eq!(compact_refs.len(), 1);
+    assert_eq!(compact_refs[0]["child_pointer"], "@book:book_compact");
+
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
+    let book = read_record(&reopened, OperationFilter::pointer("@book:book_compact"))
+        .expect("book should read")
+        .expect("book should remain");
+    assert_eq!(book["author_id"]["display_name"], "Compact Parent");
 }
 
 #[test]

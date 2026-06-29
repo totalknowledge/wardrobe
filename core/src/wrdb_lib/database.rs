@@ -1,6 +1,11 @@
 use crate::wrdb_lib::drawer::Drawer;
+use crate::wrdb_lib::pointer;
+use crate::wrdb_lib::reverse_relationships::{
+    REVERSE_RELATIONSHIP_INDEX_FILE_NAME, ReverseRelationshipEntry, ReverseRelationshipIndex,
+};
 use crate::wrdb_lib::wal::DurabilityPolicy;
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +39,9 @@ impl CachedDrawer {
 pub struct Database {
     storage_directory: PathBuf,
     active_drawers: HashMap<String, CachedDrawer>,
+    reverse_relationship_index: ReverseRelationshipIndex,
+    reverse_relationship_index_path: PathBuf,
+    reverse_relationship_index_available: bool,
     max_cached_drawers: Option<usize>,
     access_clock: AtomicU64,
     wal_bytes_since_checkpoint: AtomicU64,
@@ -150,9 +158,18 @@ impl Database {
             std::fs::create_dir_all(&storage_directory)?;
         }
 
-        Ok(Self {
+        let reverse_relationship_index_path =
+            storage_directory.join(REVERSE_RELATIONSHIP_INDEX_FILE_NAME);
+        let reverse_relationship_index_available = reverse_relationship_index_path.exists();
+        let reverse_relationship_index =
+            ReverseRelationshipIndex::load(&reverse_relationship_index_path)?;
+
+        let mut database = Self {
             storage_directory,
             active_drawers: HashMap::new(),
+            reverse_relationship_index,
+            reverse_relationship_index_path,
+            reverse_relationship_index_available,
             max_cached_drawers,
             access_clock: AtomicU64::new(0),
             wal_bytes_since_checkpoint: AtomicU64::new(0),
@@ -160,7 +177,13 @@ impl Database {
             wal_size_threshold_bytes,
             wal_ops_threshold_count,
             durability_policy,
-        })
+        };
+
+        if !database.reverse_relationship_index_available {
+            database.rebuild_reverse_relationship_index_from_disk()?;
+        }
+
+        Ok(database)
     }
 
     pub fn load_drawer(
@@ -201,6 +224,155 @@ impl Database {
 
     pub fn storage_directory_path(&self) -> PathBuf {
         self.storage_directory.clone()
+    }
+
+    pub(crate) fn reverse_relationship_index_available(&self) -> bool {
+        self.reverse_relationship_index_available
+    }
+
+    pub(crate) fn reverse_relationships_for_parent(
+        &self,
+        parent_pointer: &str,
+    ) -> Vec<ReverseRelationshipEntry> {
+        self.reverse_relationship_index
+            .references_for_parent(parent_pointer)
+    }
+
+    pub(crate) fn replace_reverse_relationships_for_record(
+        &mut self,
+        child_drawer: &str,
+        child_id: &str,
+        record: &Value,
+        relationship_constraints: &BTreeMap<String, Value>,
+        delete_rules: &BTreeMap<String, Value>,
+    ) -> std::io::Result<()> {
+        self.reverse_relationship_index.replace_record(
+            child_drawer,
+            child_id,
+            record,
+            relationship_constraints,
+            delete_rules,
+        );
+        self.persist_reverse_relationship_index()
+    }
+
+    pub(crate) fn replace_reverse_relationships_for_records(
+        &mut self,
+        child_drawer: &str,
+        records: &[(String, Value)],
+        relationship_constraints: &BTreeMap<String, Value>,
+        delete_rules: &BTreeMap<String, Value>,
+    ) -> std::io::Result<()> {
+        for (child_id, record) in records {
+            self.reverse_relationship_index.replace_record(
+                child_drawer,
+                child_id,
+                record,
+                relationship_constraints,
+                delete_rules,
+            );
+        }
+        self.persist_reverse_relationship_index()
+    }
+
+    pub(crate) fn remove_reverse_relationships_for_record_keys(
+        &mut self,
+        child_drawer: &str,
+        child_ids: &[String],
+    ) -> std::io::Result<()> {
+        let mut changed = false;
+        for child_id in child_ids {
+            changed |= self
+                .reverse_relationship_index
+                .remove_child(child_drawer, child_id);
+        }
+
+        if changed {
+            self.persist_reverse_relationship_index()?;
+        }
+
+        Ok(())
+    }
+
+    fn persist_reverse_relationship_index(&mut self) -> std::io::Result<()> {
+        self.reverse_relationship_index
+            .persist(&self.reverse_relationship_index_path)?;
+        self.reverse_relationship_index_available = true;
+        Ok(())
+    }
+
+    fn rebuild_reverse_relationship_index_from_disk(&mut self) -> std::io::Result<()> {
+        self.reverse_relationship_index.clear();
+
+        for drawer_name in self.drawer_names_on_disk()? {
+            let mut drawer =
+                match Drawer::open(&self.storage_directory, &drawer_name, "_id", Vec::new()) {
+                    Ok(drawer) => drawer,
+                    Err(error) if error.kind() == ErrorKind::InvalidData => {
+                        self.reverse_relationship_index.clear();
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+            let relationship_constraints = drawer.relationship_constraints();
+            let delete_rules = drawer.delete_rules();
+
+            let records = match drawer.find_all_records_with_migration() {
+                Ok(records) => records,
+                Err(error) if error.kind() == ErrorKind::InvalidData => {
+                    self.reverse_relationship_index.clear();
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+
+            for record in records {
+                let Some(record_key) = record
+                    .get("_id")
+                    .and_then(Value::as_str)
+                    .map(pointer::clean_primary_key_token)
+                else {
+                    continue;
+                };
+
+                self.reverse_relationship_index.add_record(
+                    &drawer_name,
+                    &record_key,
+                    &record,
+                    &relationship_constraints,
+                    &delete_rules,
+                );
+            }
+        }
+
+        self.persist_reverse_relationship_index()
+    }
+
+    fn drawer_names_on_disk(&self) -> std::io::Result<Vec<String>> {
+        let mut drawer_names = Vec::new();
+
+        for entry_result in std::fs::read_dir(&self.storage_directory)? {
+            let entry = entry_result?;
+            let path = entry.path();
+
+            if path.extension().and_then(|extension| extension.to_str()) != Some("drw") {
+                continue;
+            }
+
+            let Some(drawer_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+
+            if drawer_name != ".catalog"
+                && !drawer_name.ends_with("_index")
+                && !drawer_name.ends_with("_meta")
+            {
+                drawer_names.push(drawer_name.to_string());
+            }
+        }
+
+        drawer_names.sort();
+        Ok(drawer_names)
     }
 
     pub fn active_drawer_or_load_from_disk(

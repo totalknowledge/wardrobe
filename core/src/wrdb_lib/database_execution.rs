@@ -176,6 +176,7 @@ impl WardrobeEngine {
             Vec::new(),
         )?;
         let mut full_records = Vec::with_capacity(prepared_records.len());
+        let mut reverse_records = Vec::with_capacity(prepared_records.len());
 
         for (record_key, map) in prepared_records {
             let mut relationship_constraints =
@@ -209,11 +210,29 @@ impl WardrobeEngine {
                 target_primary_key.to_string(),
                 Value::String(record_key.clone()),
             );
-            full_records.push(Value::Object(full_record));
+            let full_record_value = Value::Object(full_record);
+            reverse_records.push((record_key, full_record_value.clone()));
+            full_records.push(full_record_value);
         }
 
-        match Self::write_lock(&drawer_handle)?.upsert_records_atomic(full_records)? {
-            Ok(_) => Ok(pointers),
+        let (relationship_constraints, delete_rules, upsert_result) = {
+            let mut drawer = Self::write_lock(&drawer_handle)?;
+            let relationship_constraints = drawer.relationship_constraints();
+            let delete_rules = drawer.delete_rules();
+            let upsert_result = drawer.upsert_records_atomic(full_records)?;
+            (relationship_constraints, delete_rules, upsert_result)
+        };
+
+        match upsert_result {
+            Ok(_) => {
+                Self::write_lock(database_core)?.replace_reverse_relationships_for_records(
+                    &physical_drawer_name,
+                    &reverse_records,
+                    &relationship_constraints,
+                    &delete_rules,
+                )?;
+                Ok(pointers)
+            }
             Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
         }
     }
@@ -274,9 +293,27 @@ impl WardrobeEngine {
                 target_primary_key.to_string(),
                 Value::String(record_key.clone()),
             );
+            let full_record_value = Value::Object(full_record);
 
-            match Self::write_lock(&drawer_handle)?.upsert_record(Value::Object(full_record))? {
-                Ok(_) => Ok(record_pointer),
+            let (relationship_constraints, delete_rules, upsert_result) = {
+                let mut drawer = Self::write_lock(&drawer_handle)?;
+                let relationship_constraints = drawer.relationship_constraints();
+                let delete_rules = drawer.delete_rules();
+                let upsert_result = drawer.upsert_record(full_record_value.clone())?;
+                (relationship_constraints, delete_rules, upsert_result)
+            };
+
+            match upsert_result {
+                Ok(_) => {
+                    Self::write_lock(database_core)?.replace_reverse_relationships_for_record(
+                        &physical_drawer_name,
+                        &record_key,
+                        &full_record_value,
+                        &relationship_constraints,
+                        &delete_rules,
+                    )?;
+                    Ok(record_pointer)
+                }
                 Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
             }
         } else {
@@ -635,7 +672,20 @@ impl WardrobeEngine {
             return Ok(0);
         };
 
-        Self::write_lock(&drawer)?.delete_by_primary_keys_set_based(target_keys)
+        let mut unique_target_keys = target_keys.clone();
+        unique_target_keys.sort();
+        unique_target_keys.dedup();
+
+        let deleted_count =
+            Self::write_lock(&drawer)?.delete_by_primary_keys_set_based(target_keys)?;
+        if deleted_count > 0 {
+            Self::write_lock(database_core)?.remove_reverse_relationships_for_record_keys(
+                &physical_drawer_name,
+                &unique_target_keys,
+            )?;
+        }
+
+        Ok(deleted_count)
     }
 
     fn primary_key_from_record_for_delete(record: &Value) -> Result<String> {
@@ -718,6 +768,10 @@ impl WardrobeEngine {
         };
 
         let deleted_record = Self::write_lock(&drawer)?.delete_by_primary_key(&record_key)?;
+        if deleted_record.is_some() {
+            Self::write_lock(database_core)?
+                .remove_reverse_relationships_for_record_keys(&drawer_name, &[record_key])?;
+        }
 
         Ok(deleted_record.is_some())
     }
@@ -821,8 +875,28 @@ impl WardrobeEngine {
                         ));
                     };
 
-                    match Self::write_lock(&drawer)?.upsert_record(child_record)? {
-                        Ok(_) => Ok(()),
+                    let child_key = Self::primary_key_from_record_for_delete(&child_record)?;
+                    let child_record_value = child_record.clone();
+                    let (relationship_constraints, delete_rules, upsert_result) = {
+                        let mut drawer = Self::write_lock(&drawer)?;
+                        let relationship_constraints = drawer.relationship_constraints();
+                        let delete_rules = drawer.delete_rules();
+                        let upsert_result = drawer.upsert_record(child_record)?;
+                        (relationship_constraints, delete_rules, upsert_result)
+                    };
+
+                    match upsert_result {
+                        Ok(_) => {
+                            Self::write_lock(database_core)?
+                                .replace_reverse_relationships_for_record(
+                                    physical_target_drawer,
+                                    &child_key,
+                                    &child_record_value,
+                                    &relationship_constraints,
+                                    &delete_rules,
+                                )?;
+                            Ok(())
+                        }
                         Err(validation_error) => {
                             Err(Error::new(ErrorKind::InvalidData, validation_error))
                         }
@@ -868,6 +942,16 @@ impl WardrobeEngine {
         parent_pointer: &str,
         context: ExecutionContext<'_>,
     ) -> Result<Vec<Value>> {
+        if let Some(records) = Self::records_matching_parent_pointer_from_reverse_index(
+            database_core,
+            target_drawer,
+            mapped_by,
+            parent_pointer,
+            context,
+        )? {
+            return Ok(records);
+        }
+
         let physical_target_drawer =
             routing::scoped_drawer_name(target_drawer, context.drawer_namespace);
         let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
@@ -891,6 +975,65 @@ impl WardrobeEngine {
             .collect();
 
         Ok(records)
+    }
+
+    fn records_matching_parent_pointer_from_reverse_index(
+        database_core: &RwLock<Database>,
+        target_drawer: &str,
+        mapped_by: &str,
+        parent_pointer: &str,
+        context: ExecutionContext<'_>,
+    ) -> Result<Option<Vec<Value>>> {
+        let physical_target_drawer =
+            routing::scoped_drawer_name(target_drawer, context.drawer_namespace);
+        let reverse_entries = {
+            let database = Self::read_lock(database_core)?;
+            if !database.reverse_relationship_index_available() {
+                return Ok(None);
+            }
+            database.reverse_relationships_for_parent(parent_pointer)
+        };
+
+        let mut child_ids = reverse_entries
+            .into_iter()
+            .filter(|entry| {
+                entry.child_drawer == physical_target_drawer && entry.field_name == mapped_by
+            })
+            .map(|entry| entry.child_id)
+            .collect::<Vec<_>>();
+        child_ids.sort();
+        child_ids.dedup();
+
+        if child_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            &physical_target_drawer,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Ok(Some(Vec::new()));
+        };
+
+        let mut drawer = Self::write_lock(&drawer)?;
+        let mut records = Vec::with_capacity(child_ids.len());
+        for child_id in child_ids {
+            let Some(record) = drawer.find_by_primary_key_with_migration(&child_id)? else {
+                continue;
+            };
+
+            if record
+                .get(mapped_by)
+                .is_some_and(|value| delete_rules::value_contains_pointer(value, parent_pointer))
+            {
+                records.push(record);
+            }
+        }
+
+        Ok(Some(records))
     }
 
     fn fetch_record_for_hydration(
