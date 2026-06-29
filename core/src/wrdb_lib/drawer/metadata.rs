@@ -334,7 +334,8 @@ impl Drawer {
 
         let mut index_entries = Vec::new();
         index_reader.stream_with_offsets(|offset, line| {
-            index_entries.push((offset, BsonBinaryFormat::is_tombstone(line), line.to_vec()));
+            let is_dead = BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
+            index_entries.push((offset, is_dead, line.to_vec()));
         })?;
 
         let total_index_file_len = index_writer.current_length()?;
@@ -349,7 +350,19 @@ impl Drawer {
 
             if is_dead {
                 index_recycler.register_free_slot(actual_slot_size, current_offset);
-            } else if let Some(index_entry) = BsonBinaryFormat::deserialize_record(line_content)? {
+            } else {
+                let index_entry_opt = if BsonBinaryFormat::is_binary_frame(line_content) {
+                    BsonBinaryFormat::deserialize_record(line_content)?
+                } else if NativeBinaryIndexFormat::is_binary_frame(line_content) {
+                    NativeBinaryIndexFormat::deserialize_index_entry(line_content, &field_name_map)?
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Unknown index frame magic",
+                    ));
+                };
+
+                if let Some(index_entry) = index_entry_opt {
                 if let Some((data_offset, block_entry)) =
                     DataBlockIndexEntry::from_index_entry(&index_entry)
                 {
@@ -427,6 +440,7 @@ impl Drawer {
                     }
                 }
             }
+        }
         }
 
         let mut data_block_index = HashMap::new();

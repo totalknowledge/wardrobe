@@ -1,6 +1,6 @@
 use crate::wrdb_lib::core::reader::DatabaseReader;
 use crate::wrdb_lib::core::recycler::Recycler;
-use crate::wrdb_lib::core::storage_format::{BsonBinaryFormat, StorageFormat};
+use crate::wrdb_lib::core::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat};
 use crate::wrdb_lib::core::writer::DatabaseWriter;
 use crate::wrdb_lib::query;
 use crate::wrdb_lib::wal::TransactionCoordinator;
@@ -40,33 +40,33 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct DrawerMetadata {
+pub(crate) struct DrawerMetadata {
     #[serde(default)]
-    format_version: u8,
+    pub(crate) format_version: u8,
     #[serde(default)]
-    primary_key: String,
+    pub(crate) primary_key: String,
     #[serde(default)]
-    record_count: usize,
+    pub(crate) record_count: usize,
     #[serde(default)]
-    unique_constraints: Vec<String>,
+    pub(crate) unique_constraints: Vec<String>,
     #[serde(default)]
-    relationship_constraints: BTreeMap<String, Value>,
+    pub(crate) relationship_constraints: BTreeMap<String, Value>,
     #[serde(default)]
-    delete_rules: BTreeMap<String, Value>,
+    pub(crate) delete_rules: BTreeMap<String, Value>,
     #[serde(default)]
-    cascade_delete_rules: BTreeMap<String, bool>,
+    pub(crate) cascade_delete_rules: BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    schema: Option<Value>,
+    pub(crate) schema: Option<Value>,
     #[serde(default)]
-    secondary_index_generation: u64,
+    pub(crate) secondary_index_generation: u64,
     #[serde(default)]
-    materialized_secondary_indexes: BTreeMap<String, u64>,
+    pub(crate) materialized_secondary_indexes: BTreeMap<String, u64>,
     #[serde(default)]
-    field_name_map: BTreeMap<String, String>,
+    pub(crate) field_name_map: BTreeMap<String, String>,
 }
 
 impl DrawerMetadata {
-    fn load(path: &Path) -> std::io::Result<Option<Self>> {
+    pub(crate) fn load(path: &Path) -> std::io::Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
         }
@@ -224,6 +224,7 @@ pub struct Drawer {
     #[cfg(test)]
     data_file_path: PathBuf,
     index_file_path: PathBuf,
+    #[allow(dead_code)]
     meta_file_path: PathBuf,
     #[cfg(test)]
     test_metrics: DrawerTestMetrics,
@@ -272,12 +273,17 @@ mod tests {
         let mut records = Vec::new();
         reader
             .stream_with_offsets(|_, line| {
-                if !BsonBinaryFormat::is_tombstone(line) {
-                    records.push(
-                        BsonBinaryFormat::deserialize_record(line)
+                let is_dead = BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
+                if !is_dead {
+                    let record_opt = if BsonBinaryFormat::is_binary_frame(line) {
+                        BsonBinaryFormat::deserialize_record(line).expect("index record should deserialize")
+                    } else if NativeBinaryIndexFormat::is_binary_frame(line) {
+                        NativeBinaryIndexFormat::deserialize_index_entry(line, &drawer.field_name_map)
                             .expect("index record should deserialize")
-                            .expect("index record should contain a value"),
-                    );
+                    } else {
+                        panic!("Unknown index frame magic in test");
+                    };
+                    records.push(record_opt.expect("index record should contain a value"));
                 }
             })
             .expect("index should stream");
@@ -456,7 +462,7 @@ mod tests {
         );
         let compact_index_start = compact_payload.len();
         let (index_offset, index_len) =
-            Drawer::append_compact_index_entry(&mut compact_payload, &index_entry)
+            Drawer::append_compact_index_entry(&mut compact_payload, &index_entry, &loaded.field_name_map)
                 .expect("compact index entry should append");
         assert_eq!(index_offset, compact_index_start as u64);
         assert!(index_len > 0);

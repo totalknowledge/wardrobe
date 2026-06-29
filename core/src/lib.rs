@@ -28,7 +28,7 @@ pub use wrdb_lib::config::{
 pub use wrdb_lib::connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use wrdb_lib::core::reader::DatabaseReader;
 pub use wrdb_lib::core::recycler::Recycler;
-pub use wrdb_lib::core::storage_format::{BsonBinaryFormat, StorageFormat};
+pub use wrdb_lib::core::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat};
 pub use wrdb_lib::core::writer::DatabaseWriter;
 pub use wrdb_lib::database::Database;
 pub use wrdb_lib::drawer::{Drawer, VacuumReport};

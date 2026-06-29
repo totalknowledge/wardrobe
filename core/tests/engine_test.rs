@@ -9,10 +9,10 @@ use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
     AlterRequest, BsonBinaryFormat, Command, CommandResult, CompactMode, CompactRequest,
-    CreateRequest, CreateResult, DatabaseReader, DeleteResult, OperationFilter, OperationOptions,
-    OrderDirection, QueryModifiers, ReadResult, ReturnShape, StatusRequest, StatusResult,
-    StorageCoordinate, StorageFormat, StorageInventory, StorageLocator, StorageScope, UpsertResult,
-    WAL_FILE_NAME, WalJournal, WalOperation, WardrobeConfig, WardrobeEngine,
+    CreateRequest, CreateResult, DatabaseReader, DeleteResult, NativeBinaryIndexFormat, OperationFilter,
+    OperationOptions, OrderDirection, QueryModifiers, ReadResult, ReturnShape, StatusRequest,
+    StatusResult, StorageCoordinate, StorageFormat, StorageInventory, StorageLocator, StorageScope,
+    UpsertResult, WAL_FILE_NAME, WalJournal, WalOperation, WardrobeConfig, WardrobeEngine,
     application_logging_is_configured, shutdown_application_logging,
 };
 
@@ -208,20 +208,43 @@ fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
         return Vec::new();
     }
 
+    let is_index = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.ends_with("_index"));
+
+    let mut name_map = std::collections::BTreeMap::new();
+    if is_index {
+        if let Some(map) = drawer_field_name_map_from_disk(path) {
+            for (k, v) in map {
+                if let Some(s) = v.as_str() {
+                    name_map.insert(k, s.to_string());
+                }
+            }
+        }
+    }
+
     let reader = DatabaseReader::open_drawer(path).expect("drawer should open");
     let mut records = Vec::new();
     reader
         .stream_with_offsets(|_offset, slot| {
-            if let Ok(Some(record)) = BsonBinaryFormat::deserialize_record(slot) {
-                records.push(record);
+            let is_dead = BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
+            if !is_dead {
+                let entry_opt = if BsonBinaryFormat::is_binary_frame(slot) {
+                    BsonBinaryFormat::deserialize_record(slot).ok().flatten()
+                } else if NativeBinaryIndexFormat::is_binary_frame(slot) {
+                    NativeBinaryIndexFormat::deserialize_index_entry(slot, &name_map).ok().flatten()
+                } else {
+                    None
+                };
+                if let Some(record) = entry_opt {
+                    records.push(record);
+                }
             }
         })
         .expect("drawer should stream");
-    if path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.ends_with("_index"))
-    {
+
+    if is_index {
         return records;
     }
 
@@ -237,7 +260,10 @@ fn drawer_records_from_disk(path: &Path) -> Vec<serde_json::Value> {
 fn drawer_field_name_map_from_disk(
     path: &Path,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let drawer_name = path.file_stem()?.to_str()?;
+    let mut drawer_name = path.file_stem()?.to_str()?.to_string();
+    if drawer_name.ends_with("_index") {
+        drawer_name = drawer_name.replace("_index", "");
+    }
     let metadata_path = path.with_file_name(format!("{drawer_name}_meta.drw"));
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(metadata_path).ok()?).ok()?;

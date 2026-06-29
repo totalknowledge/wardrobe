@@ -1,4 +1,4 @@
-use super::storage_format::{BsonBinaryFormat, StorageFormat};
+use super::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -74,23 +74,24 @@ impl DatabaseReader {
             return Ok(None);
         }
 
-        let header_len = BsonBinaryFormat::frame_header_len();
+        let header_len = 16;
         if byte_offset + header_len as u64 > file_len {
             let remaining = file_len - byte_offset;
             let probe_len = remaining.min(4) as usize;
             let mut probe = vec![0u8; probe_len];
             reader.seek(SeekFrom::Start(byte_offset))?;
             reader.read_exact(&mut probe)?;
-            if probe.as_slice() != &b"WRDB"[..probe_len] {
+            let matches_magic = (probe.as_slice() == &b"WRDB"[..probe_len]) || (probe.as_slice() == &b"WIDX"[..probe_len]);
+            if !matches_magic {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
+                    "Legacy newline-delimited records are no longer supported; migrate to WRDB/WIDX binary frames",
                 ));
             }
 
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "WRDB binary frame header exceeds file length",
+                "WRDB/WIDX binary frame header exceeds file length",
             ));
         }
 
@@ -98,12 +99,16 @@ impl DatabaseReader {
         let mut header = vec![0u8; header_len];
         reader.read_exact(&mut header)?;
 
-        let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
-            std::io::Error::new(
+        let slot_size = if BsonBinaryFormat::is_binary_frame(&header) {
+            BsonBinaryFormat::parse_slot_size(&header)?.unwrap()
+        } else if NativeBinaryIndexFormat::is_binary_frame(&header) {
+            NativeBinaryIndexFormat::parse_slot_size(&header)?.unwrap()
+        } else {
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
-            )
-        })?;
+                "Legacy newline-delimited records are no longer supported; migrate to WRDB/WIDX binary frames",
+            ));
+        };
         if byte_offset + slot_size as u64 > file_len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -133,35 +138,40 @@ impl DatabaseReader {
         let mut track_offset = 0u64;
         while track_offset < file_len {
             reader.seek(SeekFrom::Start(track_offset))?;
-            let header_len = BsonBinaryFormat::frame_header_len();
+            let header_len = 16;
             if track_offset + header_len as u64 > file_len {
                 let remaining = file_len - track_offset;
                 let probe_len = remaining.min(4) as usize;
                 let mut probe = vec![0u8; probe_len];
                 reader.seek(SeekFrom::Start(track_offset))?;
                 reader.read_exact(&mut probe)?;
-                if probe.as_slice() != &b"WRDB"[..probe_len] {
+                let matches_magic = (probe.as_slice() == &b"WRDB"[..probe_len]) || (probe.as_slice() == &b"WIDX"[..probe_len]);
+                if !matches_magic {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
+                        "Legacy newline-delimited records are no longer supported; migrate to WRDB/WIDX binary frames",
                     ));
                 }
 
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "WRDB binary frame header exceeds file length",
+                    "WRDB/WIDX binary frame header exceeds file length",
                 ));
             }
 
             reader.seek(SeekFrom::Start(track_offset))?;
             let mut header = vec![0u8; header_len];
             reader.read_exact(&mut header)?;
-            let slot_size = BsonBinaryFormat::parse_slot_size(&header)?.ok_or_else(|| {
-                std::io::Error::new(
+            let slot_size = if BsonBinaryFormat::is_binary_frame(&header) {
+                BsonBinaryFormat::parse_slot_size(&header)?.unwrap()
+            } else if NativeBinaryIndexFormat::is_binary_frame(&header) {
+                NativeBinaryIndexFormat::parse_slot_size(&header)?.unwrap()
+            } else {
+                return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Legacy newline-delimited records are no longer supported; migrate to WRDB binary frames",
-                )
-            })?;
+                    "Legacy newline-delimited records are no longer supported; migrate to WRDB/WIDX binary frames",
+                ));
+            };
             if track_offset + slot_size as u64 > file_len {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,

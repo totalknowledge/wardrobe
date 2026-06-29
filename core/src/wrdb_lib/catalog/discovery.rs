@@ -2,9 +2,9 @@ use super::registry::{CatalogEntry, CatalogRegistry};
 use super::storage::StorageInventory;
 use super::validation as catalog_validation;
 use crate::wrdb_lib::core::reader::DatabaseReader;
-use crate::wrdb_lib::core::storage_format::{BsonBinaryFormat, StorageFormat};
+use crate::wrdb_lib::core::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat, StorageFormat};
 use crate::wrdb_lib::drawer::{
-    INDEX_FIELD_KEY, INDEX_OFFSET_KEY, INDEX_STATUS_KEY, INDEX_VALUE_KEY,
+    INDEX_FIELD_KEY, INDEX_OFFSET_KEY, INDEX_STATUS_KEY, INDEX_VALUE_KEY, DrawerMetadata,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -361,13 +361,34 @@ fn drawer_record_count_from_index(index_path: &Path) -> Result<Option<usize>> {
 
     let mut index_entries = Vec::new();
     reader.stream_with_offsets(|_offset, slot| {
-        if !BsonBinaryFormat::is_tombstone(slot) {
+        let is_dead = BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
+        if !is_dead {
             index_entries.push(slot.to_vec());
         }
     })?;
 
+    let meta_path = index_path.with_file_name(
+        index_path.file_name().unwrap().to_str().unwrap().replace("_index.drw", "_meta.drw")
+    );
+    let field_name_map = if let Ok(Some(meta)) = DrawerMetadata::load(&meta_path) {
+        meta.field_name_map
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
     for slot in index_entries {
-        let Some(index_entry) = BsonBinaryFormat::deserialize_record(&slot)? else {
+        let index_entry_opt = if BsonBinaryFormat::is_binary_frame(&slot) {
+            BsonBinaryFormat::deserialize_record(&slot)?
+        } else if NativeBinaryIndexFormat::is_binary_frame(&slot) {
+            NativeBinaryIndexFormat::deserialize_index_entry(&slot, &field_name_map)?
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Unknown index frame magic in catalog discovery",
+            ));
+        };
+
+        let Some(index_entry) = index_entry_opt else {
             continue;
         };
 

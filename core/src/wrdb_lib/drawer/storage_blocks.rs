@@ -94,13 +94,25 @@ impl Drawer {
         let mut registered_data_slots = HashSet::new();
 
         index_reader.stream_with_offsets(|_offset, line| {
-            if !BsonBinaryFormat::is_tombstone(line) {
+            let is_dead = BsonBinaryFormat::is_tombstone(line) || NativeBinaryIndexFormat::is_tombstone(line);
+            if !is_dead {
                 index_lines.push(line.to_vec());
             }
         })?;
 
         for line in index_lines {
-            if let Some(index_entry) = BsonBinaryFormat::deserialize_record(&line)? {
+            let index_entry_opt = if BsonBinaryFormat::is_binary_frame(&line) {
+                BsonBinaryFormat::deserialize_record(&line)?
+            } else if NativeBinaryIndexFormat::is_binary_frame(&line) {
+                NativeBinaryIndexFormat::deserialize_index_entry(&line, &self.field_name_map)?
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unknown index frame magic in free list cache builder",
+                ));
+            };
+
+            if let Some(index_entry) = index_entry_opt {
                 if let Some((data_offset, block_entry)) =
                     DataBlockIndexEntry::from_index_entry(&index_entry)
                 {
@@ -154,9 +166,10 @@ impl Drawer {
     pub(super) fn append_compact_index_entry(
         target: &mut Vec<u8>,
         index_entry: &Value,
+        field_name_map: &BTreeMap<String, String>,
     ) -> std::io::Result<(u64, usize)> {
         let starting_offset = target.len() as u64;
-        let serialized_index = BsonBinaryFormat::serialize_record(index_entry)?;
+        let serialized_index = NativeBinaryIndexFormat::serialize_index_entry(index_entry, field_name_map)?;
         target.extend_from_slice(&serialized_index);
 
         Ok((starting_offset, serialized_index.len()))

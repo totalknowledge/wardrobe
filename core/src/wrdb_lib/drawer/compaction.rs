@@ -62,7 +62,7 @@ impl Drawer {
                 Some(block_entry),
             );
             let (index_offset, index_slot_size) =
-                Self::append_compact_index_entry(&mut compact_index, &primary_index_entry)?;
+                Self::append_compact_index_entry(&mut compact_index, &primary_index_entry, &self.field_name_map)?;
 
             primary_memory_index.insert(primary_key_value.to_string(), data_offset);
             index_file_offsets.insert(
@@ -105,7 +105,7 @@ impl Drawer {
                 None,
             );
             let (index_offset, index_slot_size) =
-                Self::append_compact_index_entry(&mut compact_index, &secondary_index_entry)?;
+                Self::append_compact_index_entry(&mut compact_index, &secondary_index_entry, &self.field_name_map)?;
 
             index_file_offsets.insert(
                 format!("{}:{}", field, field_value),

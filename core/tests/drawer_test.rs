@@ -4,7 +4,8 @@ use common::TempDatabase;
 use serde_json::json;
 use std::fs;
 use wardrobe_core::{
-    BsonBinaryFormat, DatabaseReader, DatabaseWriter, Drawer, Recycler, StorageFormat,
+    BsonBinaryFormat, DatabaseReader, DatabaseWriter, Drawer, NativeBinaryIndexFormat, Recycler,
+    StorageFormat,
 };
 
 const INDEX_FIELD_KEY: &str = "f";
@@ -46,11 +47,27 @@ fn load_index_records(
         .path
         .join(format!("{}_index.drw", drawer_name));
     let index_reader = DatabaseReader::open_drawer(index_path).expect("index reader should open");
+    let mut name_map = std::collections::BTreeMap::new();
+    if let Some(map) = field_name_map_from_metadata(database_directory, drawer_name) {
+        for (k, v) in map {
+            if let Some(s) = v.as_str() {
+                name_map.insert(k, s.to_string());
+            }
+        }
+    }
     let mut records = Vec::new();
     index_reader
         .stream_with_offsets(|_offset, slot| {
-            if !BsonBinaryFormat::is_tombstone(slot) {
-                if let Ok(Some(value)) = BsonBinaryFormat::deserialize_record(slot) {
+            let is_dead = BsonBinaryFormat::is_tombstone(slot) || NativeBinaryIndexFormat::is_tombstone(slot);
+            if !is_dead {
+                let entry_opt = if BsonBinaryFormat::is_binary_frame(slot) {
+                    BsonBinaryFormat::deserialize_record(slot).ok().flatten()
+                } else if NativeBinaryIndexFormat::is_binary_frame(slot) {
+                    NativeBinaryIndexFormat::deserialize_index_entry(slot, &name_map).ok().flatten()
+                } else {
+                    None
+                };
+                if let Some(value) = entry_opt {
                     records.push(value);
                 }
             }

@@ -1,8 +1,8 @@
-﻿use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
-use super::storage_format::BsonBinaryFormat;
+use super::storage_format::{BsonBinaryFormat, NativeBinaryIndexFormat};
 
 const PADDING_BUFFER_SIZE: usize = 512;
 
@@ -106,13 +106,6 @@ impl DatabaseWriter {
             ));
         }
 
-        if !BsonBinaryFormat::is_binary_frame(payload) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "WRDB binary frame expected; legacy text storage is no longer supported",
-            ));
-        }
-
         let slot_size = if alignment_chunk_size < payload.len() {
             let remainder = payload.len() % alignment_chunk_size;
             if remainder == 0 {
@@ -124,9 +117,19 @@ impl DatabaseWriter {
             alignment_chunk_size
         };
 
-        let payload = BsonBinaryFormat::with_slot_size(payload, slot_size)?;
-        let padding_needed = slot_size - payload.len();
-        self.file_handle.write_all(&payload)?;
+        let processed_payload = if BsonBinaryFormat::is_binary_frame(payload) {
+            BsonBinaryFormat::with_slot_size(payload, slot_size)?
+        } else if NativeBinaryIndexFormat::is_binary_frame(payload) {
+            NativeBinaryIndexFormat::with_slot_size(payload, slot_size)?
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WRDB or WIDX binary frame expected; legacy text storage is no longer supported",
+            ));
+        };
+
+        let padding_needed = slot_size - processed_payload.len();
+        self.file_handle.write_all(&processed_payload)?;
         self.write_padding(padding_needed)?;
         Ok(())
     }
