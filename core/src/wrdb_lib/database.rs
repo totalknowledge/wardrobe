@@ -1,9 +1,10 @@
+use crate::wrdb_lib::core::writer::DatabaseWriter;
 use crate::wrdb_lib::drawer::Drawer;
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::reverse_relationships::{
     REVERSE_RELATIONSHIP_INDEX_FILE_NAME, ReverseRelationshipEntry, ReverseRelationshipIndex,
 };
-use crate::wrdb_lib::wal::DurabilityPolicy;
+use crate::wrdb_lib::wal::{DurabilityPolicy, WalJournal};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Error, ErrorKind};
@@ -40,7 +41,7 @@ pub struct Database {
     storage_directory: PathBuf,
     active_drawers: HashMap<String, CachedDrawer>,
     reverse_relationship_index: ReverseRelationshipIndex,
-    reverse_relationship_index_path: PathBuf,
+    reverse_relationship_writer: DatabaseWriter,
     reverse_relationship_index_available: bool,
     reverse_relationship_index_dirty: bool,
     mutated_drawers: Mutex<HashSet<String>>,
@@ -51,6 +52,7 @@ pub struct Database {
     wal_size_threshold_bytes: u64,
     wal_ops_threshold_count: u64,
     durability_policy: DurabilityPolicy,
+    pub(crate) wal_journal: WalJournal,
 }
 
 impl Database {
@@ -165,12 +167,15 @@ impl Database {
         let reverse_relationship_index_available = reverse_relationship_index_path.exists();
         let reverse_relationship_index =
             ReverseRelationshipIndex::load(&reverse_relationship_index_path)?;
+        let reverse_relationship_writer = DatabaseWriter::open_drawer(&reverse_relationship_index_path)?;
+
+        let wal_journal = WalJournal::at_database_path_with_policy(&storage_directory, durability_policy.clone());
 
         let mut database = Self {
             storage_directory,
             active_drawers: HashMap::new(),
             reverse_relationship_index,
-            reverse_relationship_index_path,
+            reverse_relationship_writer,
             reverse_relationship_index_available,
             reverse_relationship_index_dirty: false,
             mutated_drawers: Mutex::new(HashSet::new()),
@@ -181,6 +186,7 @@ impl Database {
             wal_size_threshold_bytes,
             wal_ops_threshold_count,
             durability_policy,
+            wal_journal,
         };
 
         if !database.reverse_relationship_index_available {
@@ -302,8 +308,8 @@ impl Database {
 
     pub(crate) fn persist_reverse_relationship_index(&mut self) -> std::io::Result<()> {
         if self.reverse_relationship_index_dirty {
-            self.reverse_relationship_index
-                .persist(&self.reverse_relationship_index_path)?;
+            let bytes = serde_json::to_vec_pretty(&self.reverse_relationship_index)?;
+            self.reverse_relationship_writer.rewrite_all(&bytes)?;
             self.reverse_relationship_index_dirty = false;
         }
         self.reverse_relationship_index_available = true;
@@ -370,6 +376,15 @@ impl Database {
         } else {
             HashSet::new()
         }
+    }
+
+    pub(crate) fn flush_all_drawers_metadata(&self) -> std::io::Result<()> {
+        let drawers = self.get_all_drawers();
+        for (_name, drawer) in drawers {
+            let mut guard = drawer.write().map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "lock poisoned"))?;
+            guard.flush_metadata_if_dirty()?;
+        }
+        Ok(())
     }
 
     pub fn get_drawer(&self, name: &str) -> Option<Arc<RwLock<Drawer>>> {

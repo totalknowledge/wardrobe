@@ -8,7 +8,7 @@ use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::routing::{DatabaseRoute, ExecutionContext};
 use crate::wrdb_lib::storage_lock::{self, StorageRootLockGuard};
-use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalVerification};
+use crate::wrdb_lib::wal::{self, DurabilityPolicy, WalVerification, WalJournal};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -45,6 +45,7 @@ pub struct WardrobeEngine {
     wal_ops_threshold_count: u64,
     durability_policy: DurabilityPolicy,
     server_lock: Option<StorageRootLockGuard>,
+    logical_wal_journals: RwLock<HashMap<PathBuf, WalJournal>>,
 }
 
 #[derive(Debug, Clone)]
@@ -517,7 +518,19 @@ impl WardrobeEngine {
             wal_ops_threshold_count,
             durability_policy,
             server_lock,
+            logical_wal_journals: RwLock::new(HashMap::new()),
         })
+    }
+
+    pub(crate) fn logical_wal_journal(&self, database_path: &Path) -> Result<WalJournal> {
+        let mut journals = self.logical_wal_journals.write().map_err(|_| Error::other("Lock poisoned"))?;
+        let path = database_path.to_path_buf();
+        if let Some(journal) = journals.get(&path) {
+            return Ok(journal.clone());
+        }
+        let journal = WalJournal::at_database_path_with_policy(database_path, self.durability_policy.clone());
+        journals.insert(path, journal.clone());
+        Ok(journal)
     }
 
     #[deprecated(note = "Use WardrobeEngine::open for filesystem-backed initialization")]
@@ -1057,10 +1070,26 @@ impl WardrobeEngine {
         self.manage_user_authorization("revoke_permission", request.into_payload())
     }
 
+    pub(crate) fn flush_all_metadata(&self) -> Result<()> {
+        {
+            let db = Self::read_lock(&self.database_core)?;
+            db.flush_all_drawers_metadata()?;
+        }
+        {
+            let routed = Self::read_lock(&self.routed_databases)?;
+            for db_lock in routed.values() {
+                let db = Self::read_lock(db_lock)?;
+                db.flush_all_drawers_metadata()?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn status<S>(&self, request: S) -> Result<StatusResult>
     where
         S: Into<StatusRequest>,
     {
+        let _ = self.flush_all_metadata();
         match request.into() {
             StatusRequest::Tenants => {
                 boundary_execution::show_tenants(self).map(StatusResult::Tenants)
@@ -1096,18 +1125,22 @@ impl WardrobeEngine {
     }
 
     pub(crate) fn inspect_drawer(&self, drawer_name: &str) -> Result<DrawerInspectionMetrics> {
+        let _ = self.flush_all_metadata();
         diagnostics::inspect_drawer(self, drawer_name)
     }
 
     pub(crate) fn check_path(&self, raw_path: &str) -> Result<CheckReport> {
+        let _ = self.flush_all_metadata();
         diagnostics::check_path(self, raw_path)
     }
 
     pub(crate) fn diagnose_storage(&self) -> Result<StorageDiagnosis> {
+        let _ = self.flush_all_metadata();
         diagnostics::diagnose_storage(self)
     }
 
     pub(crate) fn list_drawer_names(&self) -> Result<Vec<String>> {
+        let _ = self.flush_all_metadata();
         diagnostics::list_drawer_names(self)
     }
 

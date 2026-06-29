@@ -7,8 +7,6 @@ use crate::wrdb_lib::wal::TransactionCoordinator;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const DRAWER_METADATA_FORMAT_VERSION: u8 = 1;
@@ -111,19 +109,10 @@ impl DrawerMetadata {
         }
     }
 
+    #[cfg(test)]
     fn persist(&self, path: &Path) -> std::io::Result<()> {
         let serialized = serde_json::to_vec_pretty(self)?;
-        let temporary_path = path.with_extension("drw.tmp");
-        let mut temporary_file = File::create(&temporary_path)?;
-        temporary_file.write_all(&serialized)?;
-        temporary_file.flush()?;
-        temporary_file.flush()?;
-
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-
-        std::fs::rename(temporary_path, path)?;
+        std::fs::write(path, &serialized)?;
         Ok(())
     }
 }
@@ -211,6 +200,7 @@ pub struct Drawer {
     data_writer: DatabaseWriter,
     data_reader: DatabaseReader,
     index_writer: DatabaseWriter,
+    metadata_writer: DatabaseWriter,
 
     data_recycler: Recycler,
     data_recycler_cache_initialized: bool,
@@ -253,6 +243,12 @@ mod retrieval;
 mod schema;
 mod storage_blocks;
 mod validation;
+
+impl Drop for Drawer {
+    fn drop(&mut self) {
+        let _ = self.flush_metadata_if_dirty();
+    }
+}
 
 #[cfg(test)]
 mod tests {

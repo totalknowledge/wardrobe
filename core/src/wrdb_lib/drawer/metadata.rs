@@ -263,6 +263,7 @@ impl Drawer {
         let data_reader = DatabaseReader::open_drawer(&data_file_path)?;
         let mut index_writer = DatabaseWriter::open_drawer(&index_file_path)?;
         let index_reader = DatabaseReader::open_drawer(&index_file_path)?;
+        let metadata_writer = DatabaseWriter::open_drawer(&meta_file_path)?;
 
         let data_recycler = Recycler::new();
         let mut index_recycler = Recycler::new();
@@ -444,6 +445,7 @@ impl Drawer {
             data_writer,
             data_reader,
             index_writer,
+            metadata_writer,
             data_recycler,
             data_recycler_cache_initialized: false,
             index_recycler,
@@ -515,7 +517,8 @@ impl Drawer {
             self.materialized_secondary_indexes.clone(),
             self.field_name_map.clone(),
         );
-        metadata.persist(&self.meta_file_path)?;
+        let serialized = serde_json::to_vec_pretty(&metadata)?;
+        self.metadata_writer.rewrite_all(&serialized)?;
         self.metadata_dirty = false;
         Ok(())
     }

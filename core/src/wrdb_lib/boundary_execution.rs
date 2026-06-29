@@ -62,10 +62,10 @@ pub(super) fn execute(
     )?;
     let database_path = routing::coordinate_database_path(&engine.root_directory, &coordinate)?;
     wal::append_command(
+        engine,
         &database_path,
         Some(coordinate.schema()),
         &command,
-        engine.durability_policy.clone(),
     )?;
     let database = engine.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
     command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
@@ -91,10 +91,10 @@ pub(super) fn execute_in_scope(
         StorageScope::Database { database } => {
             let database_path = routing::database_scope_path(&engine.root_directory, &database)?;
             wal::append_command(
+                engine,
                 &database_path,
                 None,
                 &command,
-                engine.durability_policy.clone(),
             )?;
             let database = engine.database_for_route(DatabaseRoute::Database(database))?;
             command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
@@ -103,20 +103,20 @@ pub(super) fn execute_in_scope(
             let database_path =
                 routing::schema_scope_path(&engine.root_directory, &database, &schema)?;
             wal::append_command(
+                engine,
                 &database_path,
                 Some(&schema),
                 &command,
-                engine.durability_policy.clone(),
             )?;
             let database = engine.database_for_route(DatabaseRoute::Schema { database, schema })?;
             command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
         }
         StorageScope::Drawer { namespace } => {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 Some(&namespace),
                 &command,
-                engine.durability_policy.clone(),
             )?;
             command_dispatch::execute_in_database::<WardrobeEngine>(
                 &engine.database_core,
@@ -137,10 +137,10 @@ pub(super) fn create_database(
         database_name,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -158,10 +158,10 @@ pub(super) fn create_schema(
         schema_name,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -181,10 +181,10 @@ pub(super) fn create_drawer(
         drawer_name,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -204,10 +204,10 @@ pub(super) fn register_tenant_route(
         location,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -220,10 +220,10 @@ pub(super) fn drop_database(engine: &WardrobeEngine, database_name: &str) -> Res
         database_name,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -241,10 +241,10 @@ pub(super) fn drop_schema(
         schema_name,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -264,10 +264,10 @@ pub(super) fn drop_drawer(
         drawer_name,
         |command| {
             wal::append_command(
+                engine,
                 &engine.root_directory,
                 None,
                 command,
-                engine.durability_policy.clone(),
             )
         },
     )
@@ -313,10 +313,10 @@ pub(super) fn execute_for_tenant(
         catalog_validation::catalog_location_path(&engine.root_directory, &tenant_route.location);
     let schema_path = routing::tenant_schema_path(&route_path, schema_name);
     wal::append_command(
+        engine,
         &schema_path,
         Some(schema_name),
         &command,
-        engine.durability_policy.clone(),
     )?;
     let routed_database = RwLock::new(
         Database::initialize_with_cache_limit_wal_thresholds_and_durability(
@@ -338,10 +338,10 @@ pub(super) fn execute_command(engine: &WardrobeEngine, command: Command) -> Resu
 impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
     fn append_boundary_wal(&self, command: &Command) -> Result<()> {
         wal::append_command(
+            self,
             &self.root_directory,
             None,
             command,
-            self.durability_policy.clone(),
         )
     }
 

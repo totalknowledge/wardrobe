@@ -15,11 +15,13 @@ impl Default for DurabilityPolicy {
     }
 }
 
+use crate::engine::WardrobeEngine;
+
 pub(crate) fn append_command(
+    engine: &WardrobeEngine,
     database_path: &Path,
     schema_name: Option<&str>,
     command: &Command,
-    durability_policy: DurabilityPolicy,
 ) -> Result<()> {
     let Some(operation) = command_operation(command) else {
         return Ok(());
@@ -35,8 +37,8 @@ pub(crate) fn append_command(
         )
     })?;
 
-    WalJournal::at_database_path_with_policy(database_path, durability_policy)
-        .append(operation, &scope, &payload)?;
+    let journal = engine.logical_wal_journal(database_path)?;
+    journal.append(operation, &scope, &payload)?;
     Ok(())
 }
 

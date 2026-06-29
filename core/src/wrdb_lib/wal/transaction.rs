@@ -74,11 +74,10 @@ impl<'a> TransactionCoordinator<'a> {
         });
 
         if result.is_ok() {
-            let commit_entry = append_transaction_record(
+            let _commit_entry = append_transaction_record(
                 self.database_core,
                 &TransactionWalRecord::Commit { tx_id },
             )?;
-            record_applied_checkpoint(self.database_core, commit_entry.sequence)?;
         } else {
             let _ = append_transaction_record(
                 self.database_core,
@@ -289,10 +288,7 @@ pub(super) fn flush_checkpoint(database_core: &RwLock<Database>) -> Result<()> {
 
 pub(super) fn journal_for_database(database_core: &RwLock<Database>) -> Result<WalJournal> {
     let db = read_lock(database_core)?;
-    Ok(WalJournal::at_database_path_with_policy(
-        db.storage_directory_path(),
-        db.durability_policy(),
-    ))
+    Ok(db.wal_journal.clone())
 }
 
 pub(super) fn checkpoint_sequence(database_core: &RwLock<Database>) -> Result<u64> {
@@ -309,13 +305,7 @@ pub(super) fn checkpoint_sequence(database_core: &RwLock<Database>) -> Result<u6
         .unwrap_or(0))
 }
 
-fn record_applied_checkpoint(database_core: &RwLock<Database>, sequence: u64) -> Result<()> {
-    let checkpoint_path = wal_checkpoint_path(database_core)?;
-    let checkpoint_body =
-        serde_json::json!({"last_checkpoint": now_secs(), "last_checkpoint_sequence": sequence});
-    let serialized = serde_json::to_vec(&checkpoint_body)?;
-    fs::write(checkpoint_path, serialized)
-}
+
 
 fn wal_path(database_core: &RwLock<Database>) -> Result<PathBuf> {
     Ok(database_path(database_core)?.join(WAL_FILE_NAME))

@@ -43,20 +43,6 @@ impl ReverseRelationshipIndex {
         })
     }
 
-    pub(crate) fn persist(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let bytes = serde_json::to_vec_pretty(self).map_err(|error| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Reverse relationship index could not be serialized: {error}"),
-            )
-        })?;
-        fs::write(path, bytes)
-    }
-
     pub(crate) fn clear(&mut self) {
         self.references.clear();
     }
