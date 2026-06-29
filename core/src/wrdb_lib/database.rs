@@ -5,11 +5,11 @@ use crate::wrdb_lib::reverse_relationships::{
 };
 use crate::wrdb_lib::wal::DurabilityPolicy;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 const DEFAULT_WAL_SIZE_THRESHOLD: u64 = 1_048_576;
 const DEFAULT_WAL_OPS_THRESHOLD: u64 = 1000;
@@ -42,6 +42,8 @@ pub struct Database {
     reverse_relationship_index: ReverseRelationshipIndex,
     reverse_relationship_index_path: PathBuf,
     reverse_relationship_index_available: bool,
+    reverse_relationship_index_dirty: bool,
+    mutated_drawers: Mutex<HashSet<String>>,
     max_cached_drawers: Option<usize>,
     access_clock: AtomicU64,
     wal_bytes_since_checkpoint: AtomicU64,
@@ -170,6 +172,8 @@ impl Database {
             reverse_relationship_index,
             reverse_relationship_index_path,
             reverse_relationship_index_available,
+            reverse_relationship_index_dirty: false,
+            mutated_drawers: Mutex::new(HashSet::new()),
             max_cached_drawers,
             access_clock: AtomicU64::new(0),
             wal_bytes_since_checkpoint: AtomicU64::new(0),
@@ -253,7 +257,8 @@ impl Database {
             relationship_constraints,
             delete_rules,
         );
-        self.persist_reverse_relationship_index()
+        self.reverse_relationship_index_dirty = true;
+        Ok(())
     }
 
     pub(crate) fn replace_reverse_relationships_for_records(
@@ -272,7 +277,8 @@ impl Database {
                 delete_rules,
             );
         }
-        self.persist_reverse_relationship_index()
+        self.reverse_relationship_index_dirty = true;
+        Ok(())
     }
 
     pub(crate) fn remove_reverse_relationships_for_record_keys(
@@ -288,15 +294,18 @@ impl Database {
         }
 
         if changed {
-            self.persist_reverse_relationship_index()?;
+            self.reverse_relationship_index_dirty = true;
         }
 
         Ok(())
     }
 
-    fn persist_reverse_relationship_index(&mut self) -> std::io::Result<()> {
-        self.reverse_relationship_index
-            .persist(&self.reverse_relationship_index_path)?;
+    pub(crate) fn persist_reverse_relationship_index(&mut self) -> std::io::Result<()> {
+        if self.reverse_relationship_index_dirty {
+            self.reverse_relationship_index
+                .persist(&self.reverse_relationship_index_path)?;
+            self.reverse_relationship_index_dirty = false;
+        }
         self.reverse_relationship_index_available = true;
         Ok(())
     }
@@ -345,7 +354,26 @@ impl Database {
             }
         }
 
+        self.reverse_relationship_index_dirty = true;
         self.persist_reverse_relationship_index()
+    }
+
+    pub(crate) fn mark_drawer_mutated(&self, name: &str) {
+        if let Ok(mut guard) = self.mutated_drawers.lock() {
+            guard.insert(name.to_string());
+        }
+    }
+
+    pub(crate) fn take_mutated_drawers(&self) -> HashSet<String> {
+        if let Ok(mut guard) = self.mutated_drawers.lock() {
+            std::mem::take(&mut *guard)
+        } else {
+            HashSet::new()
+        }
+    }
+
+    pub fn get_drawer(&self, name: &str) -> Option<Arc<RwLock<Drawer>>> {
+        self.active_drawers.get(name).map(|cached| cached.drawer.clone())
     }
 
     fn drawer_names_on_disk(&self) -> std::io::Result<Vec<String>> {
@@ -491,5 +519,11 @@ impl Database {
 
             self.active_drawers.remove(&candidate_name);
         }
+    }
+}
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        let _ = self.persist_reverse_relationship_index();
     }
 }

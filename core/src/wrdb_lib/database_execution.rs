@@ -231,6 +231,7 @@ impl WardrobeEngine {
                     &relationship_constraints,
                     &delete_rules,
                 )?;
+                Self::read_lock(database_core)?.mark_drawer_mutated(&physical_drawer_name);
                 Ok(pointers)
             }
             Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
@@ -312,6 +313,7 @@ impl WardrobeEngine {
                         &relationship_constraints,
                         &delete_rules,
                     )?;
+                    Self::read_lock(database_core)?.mark_drawer_mutated(&physical_drawer_name);
                     Ok(record_pointer)
                 }
                 Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
@@ -683,6 +685,7 @@ impl WardrobeEngine {
                 &physical_drawer_name,
                 &unique_target_keys,
             )?;
+            Self::read_lock(database_core)?.mark_drawer_mutated(&physical_drawer_name);
         }
 
         Ok(deleted_count)
@@ -771,6 +774,7 @@ impl WardrobeEngine {
         if deleted_record.is_some() {
             Self::write_lock(database_core)?
                 .remove_reverse_relationships_for_record_keys(&drawer_name, &[record_key])?;
+            Self::read_lock(database_core)?.mark_drawer_mutated(&drawer_name);
         }
 
         Ok(deleted_record.is_some())
