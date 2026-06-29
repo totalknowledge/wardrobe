@@ -11,7 +11,7 @@ cargo run -p wardrobe-benchmark
 Run a quick smoke profile:
 
 ```bash
-cargo run -p wardrobe-benchmark -- --entities 100 --books 500 --traversal-queries 10
+cargo run -p wardrobe-benchmark -- --entities 100 --books 500 --traversal-queries 10 --range-lookups 10
 ```
 
 Progress messages are enabled by default and are written to stderr so the Markdown report remains clean on stdout or in `--output`. Pass `--quiet` or `--no-progress` to suppress them.
@@ -75,8 +75,11 @@ The Neo4j helper writes `target/wardrobe-benchmark/neo4j-credentials.env`, which
 The benchmark phases are:
 
 - Massive Ingestion: upsert entity and book records.
-- Index Mutation: create, drop, and rebuild the book ISBN index.
+- Point Lookup: read deterministic random book records by primary id.
+- Range Lookup: read deterministic random `quantity BETWEEN low AND high` ranges, fully materialize matches, and validate returned quantities.
 - Complex Traversal: query books where author and editor criteria overlap using each engine's server-side traversal behavior, without benchmark-side N+1 follow-up fetches.
+- Index Mutation: create, drop, and rebuild the book ISBN index.
+- Delete by ID: delete deterministic random book records by primary id and verify they are gone.
 - Targeted Purge: delete books matching a purge bucket filter using one server-side filter-delete command per target phase sample.
 - Compaction: run the target's compact directive or closest native maintenance equivalent.
 
@@ -95,6 +98,7 @@ Graceful unavailable target behavior:
 Current parity baseline:
 
 - All targets use equivalent set-based traversal and purge operations for the same book relationship and purge-bucket predicates.
+- Range Lookup uses the same deterministic numeric `quantity` bounds for every target. The default is 100 range lookups to keep full matrix runs usable; pass `--range-lookups <count>` for deeper historical samples.
 - The benchmark currently avoids declaring additional non-unique application indexes (`author_id`, `editor_id`, `purge_bucket`) until Wardrobe exposes equivalent non-unique secondary index declarations.
 - The Index Mutation phase exercises the shared ISBN index lifecycle (`books.isbn`) for each target.
 

@@ -35,6 +35,7 @@ const DEFAULT_BOOK_RECORDS: usize = 50_000;
 const DEFAULT_CHUNK_SIZE: usize = 500;
 const DEFAULT_TRAVERSAL_QUERIES: usize = 100;
 const DEFAULT_POINT_LOOKUPS: usize = 1_000;
+const DEFAULT_RANGE_LOOKUPS: usize = 100;
 const DEFAULT_DELETE_BY_ID_OPERATIONS: usize = 100;
 const DEFAULT_PURGE_BUCKETS: usize = 10;
 const DEFAULT_MYSQL_USER: &str = "wardrobe_benchmark";
@@ -210,6 +211,10 @@ impl BenchmarkConfig {
                     config.profile.point_lookups =
                         parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
                 }
+                "--range-lookups" => {
+                    config.profile.range_lookups =
+                        parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
+                }
                 "--delete-by-id" => {
                     config.profile.delete_by_id_operations =
                         parse_positive_usize(&arg, &required_value(&mut args, &arg)?)?;
@@ -382,6 +387,7 @@ pub struct LibraryProfile {
     pub chunk_size: usize,
     pub traversal_queries: usize,
     pub point_lookups: usize,
+    pub range_lookups: usize,
     pub delete_by_id_operations: usize,
     pub purge_buckets: usize,
 }
@@ -394,6 +400,7 @@ impl Default for LibraryProfile {
             chunk_size: DEFAULT_CHUNK_SIZE,
             traversal_queries: DEFAULT_TRAVERSAL_QUERIES,
             point_lookups: DEFAULT_POINT_LOOKUPS,
+            range_lookups: DEFAULT_RANGE_LOOKUPS,
             delete_by_id_operations: DEFAULT_DELETE_BY_ID_OPERATIONS,
             purge_buckets: DEFAULT_PURGE_BUCKETS,
         }
@@ -408,6 +415,7 @@ impl LibraryProfile {
             ("chunk-size", self.chunk_size),
             ("traversal-queries", self.traversal_queries),
             ("point-lookups", self.point_lookups),
+            ("range-lookups", self.range_lookups),
             ("delete-by-id", self.delete_by_id_operations),
             ("purge-buckets", self.purge_buckets),
         ] {
@@ -476,6 +484,10 @@ impl LibraryProfile {
             .collect()
     }
 
+    fn range_lookup_bounds(&self) -> Vec<(i64, i64)> {
+        deterministic_range_bounds(self.range_lookups, 1, 23, 0xC4CE_B9FE_1A85_1C3D)
+    }
+
     fn delete_by_id_book_ids(&self) -> Vec<String> {
         let candidates = (0..self.book_records)
             .filter(|index| index % self.purge_buckets != 0)
@@ -518,12 +530,13 @@ impl BenchmarkReport {
         out.push_str("# Cross-Engine Performance Benchmark\n\n");
         out.push_str(&format!("- Run directory: `{}`\n", self.run_dir.display()));
         out.push_str(&format!(
-            "- Profile: {} entity records, {} book records, chunk size {}, {} traversal queries, {} point lookups, {} delete-by-ID operations\n\n",
+            "- Profile: {} entity records, {} book records, chunk size {}, {} traversal queries, {} point lookups, {} range lookups, {} delete-by-ID operations\n\n",
             self.profile.entity_records,
             self.profile.book_records,
             self.profile.chunk_size,
             self.profile.traversal_queries,
             self.profile.point_lookups,
+            self.profile.range_lookups,
             self.profile.delete_by_id_operations,
         ));
         out.push_str("| Target | Phase | Operations | Total us | OPS | Mean us | p95 us | p99 us | Storage bytes |\n");
@@ -596,6 +609,7 @@ pub enum PhaseName {
     MassiveIngestion,
     IndexMutation,
     PointLookup,
+    RangeLookup,
     ComplexTraversal,
     DeleteById,
     TargetedPurge,
@@ -608,6 +622,7 @@ impl PhaseName {
             Self::MassiveIngestion => "Massive Ingestion",
             Self::IndexMutation => "Index Mutation",
             Self::PointLookup => "Point Lookup",
+            Self::RangeLookup => "Range Lookup",
             Self::ComplexTraversal => "Complex Traversal",
             Self::DeleteById => "Delete by ID",
             Self::TargetedPurge => "Targeted Purge",
@@ -743,12 +758,13 @@ fn run_benchmark_with_builder(
     ));
     fs::create_dir_all(&run_dir)?;
     progress.log(format!(
-        "profile: {} entities, {} books, chunk size {}, {} traversal queries, {} point lookups, {} delete-by-ID operations",
+        "profile: {} entities, {} books, chunk size {}, {} traversal queries, {} point lookups, {} range lookups, {} delete-by-ID operations",
         config.profile.entity_records,
         config.profile.book_records,
         config.profile.chunk_size,
         config.profile.traversal_queries,
         config.profile.point_lookups,
+        config.profile.range_lookups,
         config.profile.delete_by_id_operations
     ));
     if config.targets.iter().any(|target| {
@@ -852,6 +868,9 @@ pub fn print_help() {
         "  --point-lookups <count>         Random primary-key lookup operations, default {DEFAULT_POINT_LOOKUPS}"
     );
     println!(
+        "  --range-lookups <count>         Random numeric range lookup operations, default {DEFAULT_RANGE_LOOKUPS}"
+    );
+    println!(
         "  --delete-by-id <count>          Random primary-key delete operations, default {DEFAULT_DELETE_BY_ID_OPERATIONS}"
     );
     println!("  --wardrobe-embedded-path <path> Override embedded Wardrobe storage path");
@@ -919,6 +938,12 @@ trait BenchmarkTarget {
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64>;
+    fn range_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64>;
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -961,9 +986,10 @@ fn run_target(
 
     let phases = [
         PhaseName::MassiveIngestion,
-        PhaseName::IndexMutation,
         PhaseName::PointLookup,
+        PhaseName::RangeLookup,
         PhaseName::ComplexTraversal,
+        PhaseName::IndexMutation,
         PhaseName::DeleteById,
         PhaseName::TargetedPurge,
         PhaseName::Compaction,
@@ -982,6 +1008,9 @@ fn run_target(
             }
             PhaseName::PointLookup => {
                 target.point_lookup(profile, &mut recorder, progress)?;
+            }
+            PhaseName::RangeLookup => {
+                target.range_lookup(profile, &mut recorder, progress)?;
             }
             PhaseName::ComplexTraversal => {
                 target.complex_traversal(profile, &mut recorder, progress)?;
@@ -1615,6 +1644,42 @@ impl BenchmarkTarget for WardrobeTarget {
         Ok(ids.len() as u64)
     }
 
+    fn range_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let bounds = profile.range_lookup_bounds();
+        progress.log(format!(
+            "{}: reading {} book records with numeric quantity ranges",
+            self.name(),
+            bounds.len()
+        ));
+        for (index, (low, high)) in bounds.iter().enumerate() {
+            recorder.measure(1, || {
+                let records = expect_records(self.execute_scoped(Command::Read {
+                    filter: OperationFilter::query_in(
+                        BOOK_DRAWER,
+                        json!({ "quantity": { "$gte": low, "$lte": high } }),
+                    ),
+                    options: OperationOptions::new().return_shape(ReturnShape::Records),
+                })?)?;
+                for record in records {
+                    verify_record_range(&record, "quantity", *low, *high)?;
+                }
+                Ok(())
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: range lookups completed", self.name()),
+                index + 1,
+                bounds.len(),
+            );
+        }
+        Ok(bounds.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -2015,6 +2080,45 @@ CREATE TABLE books (
         Ok(ids.len() as u64)
     }
 
+    fn range_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let bounds = profile.range_lookup_bounds();
+        progress.log(format!(
+            "{}: reading {} book records with numeric quantity ranges",
+            self.name(),
+            bounds.len()
+        ));
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, isbn, title, author_id, editor_id, branch, quantity, purge_bucket FROM books WHERE quantity BETWEEN ?1 AND ?2 ORDER BY id;",
+            )
+            .map_err(to_io_error)?;
+        for (index, (low, high)) in bounds.iter().enumerate() {
+            recorder.measure(1, || {
+                let rows = statement
+                    .query_map([low, high], sqlite_book_value)
+                    .map_err(to_io_error)?;
+                for row in rows {
+                    let record = row.map_err(to_io_error)?;
+                    verify_record_range(&record, "quantity", *low, *high)?;
+                }
+                Ok(())
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: range lookups completed", self.name()),
+                index + 1,
+                bounds.len(),
+            );
+        }
+        Ok(bounds.len() as u64)
+    }
+
     fn complex_traversal(
         &mut self,
         profile: &LibraryProfile,
@@ -2332,6 +2436,40 @@ impl BenchmarkTarget for MongoTarget {
             );
         }
         Ok(ids.len() as u64)
+    }
+
+    fn range_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let bounds = profile.range_lookup_bounds();
+        progress.log(format!(
+            "{}: reading {} book records with numeric quantity ranges",
+            self.name(),
+            bounds.len()
+        ));
+        for (index, (low, high)) in bounds.iter().enumerate() {
+            recorder.measure(1, || {
+                let cursor = self
+                    .books()
+                    .find(doc! { "quantity": { "$gte": low, "$lte": high } }, None)
+                    .map_err(to_io_error)?;
+                for document in cursor {
+                    let document = document.map_err(to_io_error)?;
+                    verify_mongo_record_range(&document, "quantity", *low, *high)?;
+                }
+                Ok(())
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: range lookups completed", self.name()),
+                index + 1,
+                bounds.len(),
+            );
+        }
+        Ok(bounds.len() as u64)
     }
 
     fn complex_traversal(
@@ -2681,6 +2819,41 @@ CREATE TABLE books (
             );
         }
         Ok(ids.len() as u64)
+    }
+
+    fn range_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let bounds = profile.range_lookup_bounds();
+        progress.log(format!(
+            "{}: reading {} book records with numeric quantity ranges",
+            self.name(),
+            bounds.len()
+        ));
+        for (index, (low, high)) in bounds.iter().enumerate() {
+            recorder.measure(1, || {
+                let sql = format!(
+                    "SELECT id, isbn, title, author_id, editor_id, branch, quantity, purge_bucket FROM books WHERE quantity BETWEEN {low} AND {high} ORDER BY id"
+                );
+                let rows = self.connection.query_iter(sql).map_err(to_io_error)?;
+                for row in rows {
+                    let row = row.map_err(to_io_error)?;
+                    let record = mysql_book_value(&row)?;
+                    verify_record_range(&record, "quantity", *low, *high)?;
+                }
+                Ok(())
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: range lookups completed", self.name()),
+                index + 1,
+                bounds.len(),
+            );
+        }
+        Ok(bounds.len() as u64)
     }
 
     fn complex_traversal(
@@ -3102,6 +3275,60 @@ impl BenchmarkTarget for Neo4jTarget {
             );
         }
         Ok(ids.len() as u64)
+    }
+
+    fn range_lookup(
+        &mut self,
+        profile: &LibraryProfile,
+        recorder: &mut PhaseRecorder,
+        progress: &ProgressReporter,
+    ) -> io::Result<u64> {
+        let bounds = profile.range_lookup_bounds();
+        progress.log(format!(
+            "{}: reading {} book records with numeric quantity ranges",
+            self.name(),
+            bounds.len()
+        ));
+        for (index, (low, high)) in bounds.iter().enumerate() {
+            recorder.measure(1, || {
+                self.runtime.block_on(async {
+                    let mut stream = self
+                        .graph
+                        .execute(
+                            query(
+                                "MATCH (b:BenchNode:Book {bench_marker: $marker}) WHERE b.quantity >= $low AND b.quantity <= $high RETURN b.id AS id, b.isbn AS isbn, b.title AS title, b.author_id AS author_id, b.editor_id AS editor_id, b.branch AS branch, b.quantity AS quantity, b.purge_bucket AS purge_bucket",
+                            )
+                            .param("marker", self.marker.clone())
+                            .param("low", *low)
+                            .param("high", *high),
+                        )
+                        .await
+                        .map_err(to_io_error)?;
+                    while let Some(row) = stream.next().await.map_err(to_io_error)? {
+                        let actual_id: String = row.get("id").map_err(to_io_error)?;
+                        let record = book_value(
+                            actual_id,
+                            row.get("isbn").map_err(to_io_error)?,
+                            row.get("title").map_err(to_io_error)?,
+                            row.get("author_id").map_err(to_io_error)?,
+                            row.get("editor_id").map_err(to_io_error)?,
+                            row.get("branch").map_err(to_io_error)?,
+                            row.get("quantity").map_err(to_io_error)?,
+                            row.get("purge_bucket").map_err(to_io_error)?,
+                        );
+                        verify_record_range(&record, "quantity", *low, *high)?;
+                    }
+                    Ok(())
+                })
+            })?;
+            report_record_progress(
+                progress,
+                &format!("{}: range lookups completed", self.name()),
+                index + 1,
+                bounds.len(),
+            );
+        }
+        Ok(bounds.len() as u64)
     }
 
     fn complex_traversal(
@@ -3656,6 +3883,40 @@ fn verify_record_id(record: &Value, expected_id: &str) -> io::Result<()> {
     }
 }
 
+fn verify_record_range(record: &Value, field: &str, low: i64, high: i64) -> io::Result<()> {
+    let actual = record
+        .get(field)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("record is missing {field}")))?;
+    if actual < low || actual > high {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "record field '{field}' value {actual} fell outside requested range {low}..={high}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_mongo_record_range(
+    record: &Document,
+    field: &str,
+    low: i64,
+    high: i64,
+) -> io::Result<()> {
+    let actual = record.get_i64(field).map_err(to_io_error)?;
+    if actual < low || actual > high {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "record field '{field}' value {actual} fell outside requested range {low}..={high}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_deleted_count(deleted: usize, expected_id: &str) -> io::Result<()> {
     if deleted == 1 {
         Ok(())
@@ -3705,6 +3966,27 @@ fn repeated_shuffled_indices(total: usize, count: usize, seed: u64) -> Vec<usize
     let mut order = (0..total).collect::<Vec<_>>();
     deterministic_shuffle(&mut order, seed);
     (0..count).map(|index| order[index % order.len()]).collect()
+}
+
+fn deterministic_range_bounds(
+    count: usize,
+    min_value: i64,
+    max_value: i64,
+    seed: u64,
+) -> Vec<(i64, i64)> {
+    if count == 0 || min_value > max_value {
+        return Vec::new();
+    }
+    let span = (max_value - min_value + 1) as u64;
+    let mut state = seed ^ ((count as u64) << 32);
+    (0..count)
+        .map(|_| {
+            let low = min_value + (next_shuffle_u64(&mut state) % span) as i64;
+            let width = (next_shuffle_u64(&mut state) % span) as i64;
+            let high = (low + width).min(max_value);
+            (low.min(high), high)
+        })
+        .collect()
 }
 
 fn shuffled_take(mut values: Vec<usize>, count: usize, seed: u64) -> Vec<usize> {
@@ -4218,6 +4500,7 @@ mod tests {
             chunk_size: 2,
             traversal_queries: 2,
             point_lookups: 3,
+            range_lookups: 3,
             delete_by_id_operations: 2,
             purge_buckets: 2,
         }
@@ -4321,6 +4604,16 @@ mod tests {
             self.maybe_fail(PhaseName::PointLookup)
         }
 
+        fn range_lookup(
+            &mut self,
+            _profile: &LibraryProfile,
+            _recorder: &mut PhaseRecorder,
+            _progress: &ProgressReporter,
+        ) -> io::Result<u64> {
+            self.calls.push(PhaseName::RangeLookup);
+            self.maybe_fail(PhaseName::RangeLookup)
+        }
+
         fn complex_traversal(
             &mut self,
             _profile: &LibraryProfile,
@@ -4401,6 +4694,8 @@ mod tests {
             "5".to_string(),
             "--point-lookups".to_string(),
             "13".to_string(),
+            "--range-lookups".to_string(),
+            "17".to_string(),
             "--delete-by-id".to_string(),
             "7".to_string(),
             "--purge-buckets".to_string(),
@@ -4460,6 +4755,7 @@ mod tests {
         assert_eq!(config.profile.chunk_size, 3);
         assert_eq!(config.profile.traversal_queries, 5);
         assert_eq!(config.profile.point_lookups, 13);
+        assert_eq!(config.profile.range_lookups, 17);
         assert_eq!(config.profile.delete_by_id_operations, 7);
         assert_eq!(config.profile.purge_buckets, 4);
         assert_eq!(
@@ -4705,6 +5001,7 @@ IGNORED=value
             chunk_size: 2,
             traversal_queries: 3,
             point_lookups: 4,
+            range_lookups: 4,
             delete_by_id_operations: 2,
             purge_buckets: 4,
         };
@@ -4916,6 +5213,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         assert_eq!(PhaseName::MassiveIngestion.label(), "Massive Ingestion");
         assert_eq!(PhaseName::IndexMutation.label(), "Index Mutation");
         assert_eq!(PhaseName::PointLookup.label(), "Point Lookup");
+        assert_eq!(PhaseName::RangeLookup.label(), "Range Lookup");
         assert_eq!(PhaseName::ComplexTraversal.label(), "Complex Traversal");
         assert_eq!(PhaseName::DeleteById.label(), "Delete by ID");
         assert_eq!(PhaseName::TargetedPurge.label(), "Targeted Purge");
@@ -4931,15 +5229,16 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let report = run_target(&mut target, &tiny_profile(), &ProgressReporter::new(false))
             .expect("fake target should run");
         assert_eq!(report.name, "Fake Target");
-        assert_eq!(report.phases.len(), 7);
+        assert_eq!(report.phases.len(), 8);
         assert_eq!(report.storage_bytes, 123);
         assert_eq!(
             target.calls,
             vec![
                 PhaseName::MassiveIngestion,
-                PhaseName::IndexMutation,
                 PhaseName::PointLookup,
+                PhaseName::RangeLookup,
                 PhaseName::ComplexTraversal,
+                PhaseName::IndexMutation,
                 PhaseName::DeleteById,
                 PhaseName::TargetedPurge,
                 PhaseName::Compaction,
@@ -5142,6 +5441,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 chunk_size: 1,
                 traversal_queries: 1,
                 point_lookups: 1,
+                range_lookups: 1,
                 delete_by_id_operations: 1,
                 purge_buckets: 1,
             },
@@ -5231,6 +5531,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 chunk_size: 2,
                 traversal_queries: 2,
                 point_lookups: 3,
+                range_lookups: 3,
                 delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
@@ -5241,7 +5542,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let report = run_benchmark(config).expect("tiny benchmark should run");
 
         assert_eq!(report.targets.len(), 1);
-        assert_eq!(report.targets[0].phases.len(), 7);
+        assert_eq!(report.targets[0].phases.len(), 8);
         assert!(report.targets[0].storage_bytes > 0);
 
         let _ = fs::remove_dir_all(work_dir);
@@ -5261,6 +5562,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 chunk_size: 2,
                 traversal_queries: 2,
                 point_lookups: 3,
+                range_lookups: 3,
                 delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
@@ -5293,6 +5595,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 chunk_size: 2,
                 traversal_queries: 2,
                 point_lookups: 3,
+                range_lookups: 3,
                 delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
@@ -5303,7 +5606,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let report = run_benchmark(config).expect("tiny remote benchmark should run");
 
         assert_eq!(report.targets.len(), 1);
-        assert_eq!(report.targets[0].phases.len(), 7);
+        assert_eq!(report.targets[0].phases.len(), 8);
         assert!(report.targets[0].storage_bytes > 0);
 
         let _ = fs::remove_dir_all(work_dir);
@@ -5323,6 +5626,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 chunk_size: 2,
                 traversal_queries: 2,
                 point_lookups: 3,
+                range_lookups: 3,
                 delete_by_id_operations: 2,
                 purge_buckets: 2,
             },
@@ -5488,6 +5792,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             chunk_size: 1,
             traversal_queries: 2,
             point_lookups: 2,
+            range_lookups: 2,
             delete_by_id_operations: 1,
             purge_buckets: 1,
         };
@@ -5660,6 +5965,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             chunk_size: 1,
             traversal_queries: 1,
             point_lookups: 2,
+            range_lookups: 2,
             delete_by_id_operations: 1,
             purge_buckets: 2,
         };

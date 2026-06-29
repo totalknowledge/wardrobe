@@ -76,6 +76,10 @@ fn field_matches_filter(
             .as_str()
             .is_some_and(|actual_string| matches_string_filter(actual_string, expected_string)),
         Value::Object(expected_map) => {
+            if expected_map.keys().any(|key| key.starts_with('$')) {
+                return scalar_matches_operator_filter(actual_value, expected_map);
+            }
+
             if let Some(reference_id) = id_only_reference(expected_map) {
                 let relationship_drawer = relationship_drawer_name(field_name);
                 let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
@@ -120,6 +124,28 @@ fn field_matches_filter(
         }
         _ => actual_value == expected_value,
     }
+}
+
+fn scalar_matches_operator_filter(actual_value: &Value, expected_map: &Map<String, Value>) -> bool {
+    expected_map.iter().all(|(operator, expected_value)| {
+        let Some(ordering) = compare_numeric_values(actual_value, expected_value) else {
+            return false;
+        };
+        match operator.as_str() {
+            "$gt" => ordering == Ordering::Greater,
+            "$gte" => matches!(ordering, Ordering::Greater | Ordering::Equal),
+            "$lt" => ordering == Ordering::Less,
+            "$lte" => matches!(ordering, Ordering::Less | Ordering::Equal),
+            "$eq" => ordering == Ordering::Equal,
+            _ => false,
+        }
+    })
+}
+
+fn compare_numeric_values(actual_value: &Value, expected_value: &Value) -> Option<Ordering> {
+    let actual = actual_value.as_f64()?;
+    let expected = expected_value.as_f64()?;
+    actual.partial_cmp(&expected)
 }
 
 pub(crate) fn matches_string_filter(actual_value: &str, expected_filter: &str) -> bool {

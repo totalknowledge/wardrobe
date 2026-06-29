@@ -1944,6 +1944,33 @@ fn us_031_find_by_filter_matches_reference_ids_against_stored_pointers() {
 }
 
 #[test]
+fn us_031_find_by_filter_matches_numeric_range_operators() {
+    let database = TempDatabase::new("us_031_numeric_range_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    upsert_batch(
+        &engine,
+        "book",
+        vec![
+            json!({ "_id": "range_low", "title": "Low", "quantity": 9 }),
+            json!({ "_id": "range_mid", "title": "Mid", "quantity": 15 }),
+            json!({ "_id": "range_high", "title": "High", "quantity": 21 }),
+        ],
+    )
+    .expect("range fixtures should upsert");
+
+    let matched = read_records(
+        &engine,
+        OperationFilter::query_in("book", json!({ "quantity": { "$gte": 10, "$lte": 20 } })),
+    )
+    .expect("numeric range filter should succeed");
+
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0]["_id"], "range_mid");
+}
+
+#[test]
 fn us_031_find_by_filter_rejects_non_object_filters() {
     let database = TempDatabase::new("us_031_rejects_non_object_filters");
     let database_directory = database.path.to_string_lossy().into_owned();
