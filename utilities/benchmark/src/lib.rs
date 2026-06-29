@@ -575,7 +575,11 @@ impl BenchmarkReport {
             for target in diagnostic_targets {
                 out.push_str(&format!("### {}\n\n", target.name));
                 for line in &target.storage_diagnostics {
-                    out.push_str(&format!("- {line}\n"));
+                    if line.starts_with(' ') {
+                        out.push_str(&format!("{line}\n"));
+                    } else {
+                        out.push_str(&format!("- {line}\n"));
+                    }
                 }
                 out.push('\n');
             }
@@ -987,12 +991,12 @@ fn run_target(
     let phases = [
         PhaseName::MassiveIngestion,
         PhaseName::PointLookup,
-        PhaseName::RangeLookup,
         PhaseName::ComplexTraversal,
         PhaseName::IndexMutation,
         PhaseName::DeleteById,
         PhaseName::TargetedPurge,
         PhaseName::Compaction,
+        PhaseName::RangeLookup,
     ];
     let mut phase_metrics = Vec::new();
 
@@ -1168,6 +1172,7 @@ struct WardrobeTarget {
     namespace: WardrobeNamespace,
     profile: Option<LibraryProfile>,
     last_storage_snapshot: Option<WardrobeStorageSnapshot>,
+    pre_compaction_storage_snapshot: Option<WardrobeStorageSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1349,6 +1354,7 @@ impl WardrobeTarget {
             namespace,
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         })
     }
 
@@ -1377,6 +1383,7 @@ impl WardrobeTarget {
             namespace,
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         })
     }
 
@@ -1390,6 +1397,7 @@ impl WardrobeTarget {
             namespace,
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         })
     }
 
@@ -1518,7 +1526,7 @@ impl BenchmarkTarget for WardrobeTarget {
                 drawer,
             )))?)?;
         }
-        for field_name in ["author_id", "editor_id", "purge_bucket"] {
+        for field_name in ["author_id", "editor_id", "purge_bucket", "quantity"] {
             progress.log(format!(
                 "{}: creating book index '{}'",
                 self.name(),
@@ -1792,6 +1800,9 @@ impl BenchmarkTarget for WardrobeTarget {
         recorder: &mut PhaseRecorder,
         progress: &ProgressReporter,
     ) -> io::Result<u64> {
+        let pre_snap = self.capture_storage_snapshot()?;
+        self.pre_compaction_storage_snapshot = Some(pre_snap);
+
         progress.log(format!("{}: vacuuming book drawer", self.name()));
         recorder.measure(1, || {
             expect_vacuumed(
@@ -1827,11 +1838,27 @@ impl BenchmarkTarget for WardrobeTarget {
             let snapshot = self.capture_storage_snapshot()?;
             self.last_storage_snapshot = Some(snapshot);
         }
-        Ok(self
+        let post_lines = self
             .last_storage_snapshot
             .as_ref()
             .map(|snapshot| snapshot.diagnostic_lines(&self.namespace, self.profile.as_ref()))
-            .unwrap_or_default())
+            .unwrap_or_default();
+
+        if let Some(pre_snap) = &self.pre_compaction_storage_snapshot {
+            let pre_lines = pre_snap.diagnostic_lines(&self.namespace, self.profile.as_ref());
+            let mut combined = Vec::new();
+            combined.push("**Pre-Compaction:**".to_string());
+            for line in pre_lines {
+                combined.push(format!("  - {}", line));
+            }
+            combined.push("**Post-Compaction:**".to_string());
+            for line in post_lines {
+                combined.push(format!("  - {}", line));
+            }
+            Ok(combined)
+        } else {
+            Ok(post_lines)
+        }
     }
 }
 
@@ -1965,6 +1992,7 @@ CREATE TABLE books (
     FOREIGN KEY(author_id) REFERENCES entities(id),
     FOREIGN KEY(editor_id) REFERENCES entities(id)
 );
+CREATE INDEX IF NOT EXISTS idx_books_quantity ON books(quantity);
 "#,
             )
             .map_err(to_io_error)?;
@@ -2317,6 +2345,12 @@ impl BenchmarkTarget for MongoTarget {
             .map_err(to_io_error)?;
         database
             .create_collection("books", None)
+            .map_err(to_io_error)?;
+        self.books()
+            .create_index(
+                IndexModel::builder().keys(doc! { "quantity": 1 }).build(),
+                None,
+            )
             .map_err(to_io_error)?;
         progress.log(format!(
             "{}: MongoDB collections are ready; requesting disk sync",
@@ -2716,6 +2750,9 @@ CREATE TABLE books (
 ) ENGINE=InnoDB
 "#,
             )
+            .map_err(to_io_error)?;
+        self.connection
+            .query_drop("CREATE INDEX idx_books_quantity ON books(quantity)")
             .map_err(to_io_error)?;
         self.flush()
     }
@@ -3133,6 +3170,9 @@ impl BenchmarkTarget for Neo4jTarget {
         self.run_query(query("CREATE INDEX IF NOT EXISTS FOR (b:Book) ON (b.isbn)"))?;
         self.run_query(query(
             "CREATE INDEX IF NOT EXISTS FOR (b:Book) ON (b.purge_bucket)",
+        ))?;
+        self.run_query(query(
+            "CREATE INDEX IF NOT EXISTS FOR (b:Book) ON (b.quantity)",
         ))?;
         self.flush()
     }
@@ -5236,12 +5276,12 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             vec![
                 PhaseName::MassiveIngestion,
                 PhaseName::PointLookup,
-                PhaseName::RangeLookup,
                 PhaseName::ComplexTraversal,
                 PhaseName::IndexMutation,
                 PhaseName::DeleteById,
                 PhaseName::TargetedPurge,
                 PhaseName::Compaction,
+                PhaseName::RangeLookup,
             ]
         );
 
@@ -5723,6 +5763,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             namespace: test_namespace(),
             profile: Some(tiny_profile()),
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         };
 
         let storage_bytes = target
@@ -5784,6 +5825,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             namespace: test_namespace(),
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         };
 
         let profile = LibraryProfile {
@@ -5857,6 +5899,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             namespace: test_namespace(),
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         };
         let progress = ProgressReporter::new(false);
         let mut recorder = PhaseRecorder::new(PhaseName::PointLookup);
@@ -5906,6 +5949,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             namespace: test_namespace(),
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         };
         let progress = ProgressReporter::new(false);
         let mut recorder = PhaseRecorder::new(PhaseName::DeleteById);
@@ -5957,6 +6001,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             namespace: test_namespace(),
             profile: None,
             last_storage_snapshot: None,
+            pre_compaction_storage_snapshot: None,
         };
 
         let profile = LibraryProfile {

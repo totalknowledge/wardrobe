@@ -98,8 +98,8 @@ Graceful unavailable target behavior:
 Current parity baseline:
 
 - All targets use equivalent set-based traversal and purge operations for the same book relationship and purge-bucket predicates.
-- Range Lookup uses the same deterministic numeric `quantity` bounds for every target. The default is 100 range lookups to keep full matrix runs usable; pass `--range-lookups <count>` for deeper historical samples.
-- The benchmark currently avoids declaring additional non-unique application indexes (`author_id`, `editor_id`, `purge_bucket`) until Wardrobe exposes equivalent non-unique secondary index declarations.
+- Range Lookup uses the same deterministic numeric `quantity` bounds and a declared `quantity` index for every target. The default is 100 range lookups to keep full matrix runs usable; pass `--range-lookups <count>` for deeper historical samples.
+- The benchmark declares equivalent non-unique application indexes for traversal, purge, and range phases where the target supports them.
 - The Index Mutation phase exercises the shared ISBN index lifecycle (`books.isbn`) for each target.
 
 The Markdown report includes operations per second, mean latency, p95 latency, p99 latency, and final storage footprint in bytes.

@@ -23,6 +23,7 @@ pub(crate) const INDEX_LENGTH_KEY: &str = "l";
 pub(crate) const INDEX_SIZE_CLASS_KEY: &str = "c";
 pub(crate) const INDEX_CRC_KEY: &str = "x";
 pub(crate) const INDEX_STATUS_KEY: &str = "s";
+pub(crate) type SecondaryIndex = BTreeMap<String, Vec<u64>>;
 
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
@@ -209,7 +210,7 @@ pub struct Drawer {
     index_recycler: Recycler,
 
     primary_memory_index: HashMap<String, u64>,
-    secondary_memory_index: HashMap<String, HashMap<String, Vec<u64>>>,
+    secondary_memory_index: HashMap<String, SecondaryIndex>,
     validated_secondary_indexes: HashSet<String>,
     materialized_secondary_indexes: BTreeMap<String, u64>,
     secondary_index_generation: u64,
@@ -842,7 +843,7 @@ mod tests {
             .secondary_memory_index
             .get_mut("purge_bucket")
             .expect("purge index should exist")
-            .get_mut("0")
+            .get_mut(&Drawer::secondary_index_key(&json!(0)).expect("index key"))
             .expect("purge bucket should exist")
             .push(duplicate_offset);
 
@@ -861,7 +862,7 @@ mod tests {
             drawer
                 .test_metrics
                 .invalidate_materialized_query_indexes_calls,
-            1
+            0
         );
         assert_eq!(drawer.test_metrics.persist_metadata_calls, 1);
 
@@ -888,23 +889,146 @@ mod tests {
             .get("serial")
             .expect("serial index should remain materialized");
         for serial in ["serial-0", "serial-1", "serial-2"] {
+            let serial_key = Drawer::secondary_index_key(&json!(serial)).expect("index key");
             assert!(
-                !serial_index.contains_key(serial),
+                !serial_index.contains_key(&serial_key),
                 "empty secondary index bucket should be removed"
             );
         }
         for serial in ["serial-3", "serial-4"] {
-            assert!(serial_index.contains_key(serial));
+            let serial_key = Drawer::secondary_index_key(&json!(serial)).expect("index key");
+            assert!(serial_index.contains_key(&serial_key));
         }
         assert!(
-            !drawer.secondary_memory_index.contains_key("purge_bucket"),
-            "query index should be invalidated once after the batch"
+            drawer.secondary_memory_index.contains_key("purge_bucket"),
+            "materialized query index should be maintained after the batch"
         );
 
         let metadata = DrawerMetadata::load(&drawer.meta_file_path)
             .expect("metadata should load")
             .expect("metadata should exist");
         assert_eq!(metadata.record_count, 2);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn ordered_secondary_index_serves_numeric_ranges_and_stays_current() {
+        let path = temp_dir("ordered_secondary_range_index");
+        std::fs::create_dir_all(&path).expect("drawer directory should create");
+        let mut drawer = Drawer::open(&path, "book", "_id", vec![]).expect("drawer opens");
+
+        for record in [
+            json!({"_id": "book-1", "quantity": 1, "branch": "north"}),
+            json!({"_id": "book-2", "quantity": 2, "branch": "north"}),
+            json!({"_id": "book-7a", "quantity": 7, "branch": "south"}),
+            json!({"_id": "book-7b", "quantity": 7, "branch": "south"}),
+            json!({"_id": "book-10", "quantity": 10, "branch": "central"}),
+            json!({"_id": "book-11", "quantity": 11, "branch": "central"}),
+        ] {
+            drawer
+                .upsert_record(record)
+                .expect("upsert should write")
+                .expect("upsert should validate");
+        }
+
+        drawer.record_schema_extension("indexes", "quantity", json!({"type": "index"}));
+        drawer
+            .materialize_query_index("quantity")
+            .expect("quantity index should materialize");
+        drawer.record_schema_extension("indexes", "branch", json!({"type": "index"}));
+        drawer
+            .materialize_query_index("branch")
+            .expect("branch index should materialize");
+
+        let quantity_index = drawer
+            .secondary_memory_index
+            .get("quantity")
+            .expect("quantity index should be materialized");
+        assert_eq!(
+            quantity_index
+                .get(&Drawer::secondary_index_key(&json!(7)).expect("index key"))
+                .map(Vec::len),
+            Some(2)
+        );
+
+        drawer.reset_test_metrics();
+        let mut filter = Map::new();
+        filter.insert("quantity".to_string(), json!({ "$gte": 2, "$lte": 10 }));
+        let mut matched_ids = drawer
+            .records_matching_filter_candidates(&filter, None)
+            .expect("range lookup should succeed")
+            .into_iter()
+            .map(|record| record["_id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        matched_ids.sort();
+
+        assert_eq!(matched_ids, vec!["book-10", "book-2", "book-7a", "book-7b"]);
+        assert_eq!(drawer.test_metrics.find_all_records_with_migration_calls, 0);
+
+        let mut branch_filter = Map::new();
+        branch_filter.insert(
+            "branch".to_string(),
+            json!({ "$gte": "central", "$lte": "north" }),
+        );
+        let mut branch_matched_ids = drawer
+            .records_matching_filter_candidates(&branch_filter, None)
+            .expect("string range lookup should succeed")
+            .into_iter()
+            .map(|record| record["_id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        branch_matched_ids.sort();
+        assert_eq!(
+            branch_matched_ids,
+            vec!["book-1", "book-10", "book-11", "book-2"]
+        );
+
+        drawer
+            .upsert_record(json!({"_id": "book-2", "quantity": 12, "branch": "north"}))
+            .expect("update should write")
+            .expect("update should validate");
+        drawer
+            .delete_by_primary_key("book-7a")
+            .expect("delete should run")
+            .expect("book-7a should exist");
+
+        let mut updated_matched_ids = drawer
+            .records_matching_filter_candidates(&filter, None)
+            .expect("range lookup after mutation should succeed")
+            .into_iter()
+            .map(|record| record["_id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        updated_matched_ids.sort();
+        assert_eq!(updated_matched_ids, vec!["book-10", "book-7b"]);
+
+        drawer.vacuum().expect("compaction should succeed");
+        assert!(
+            drawer.secondary_memory_index.contains_key("quantity"),
+            "compaction should preserve the materialized range index"
+        );
+        let mut compacted_matched_ids = drawer
+            .records_matching_filter_candidates(&filter, None)
+            .expect("range lookup after compaction should succeed")
+            .into_iter()
+            .map(|record| record["_id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        compacted_matched_ids.sort();
+        assert_eq!(compacted_matched_ids, vec!["book-10", "book-7b"]);
+
+        drop(drawer);
+        let mut reopened = Drawer::open(&path, "book", "_id", vec![]).expect("reopen succeeds");
+        let mut reopened_matched_ids = reopened
+            .records_matching_filter_candidates(&filter, None)
+            .expect("range lookup after reopen should succeed")
+            .into_iter()
+            .map(|record| record["_id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        reopened_matched_ids.sort();
+        assert_eq!(reopened_matched_ids, vec!["book-10", "book-7b"]);
+        assert_eq!(
+            reopened.test_metrics.find_all_records_with_migration_calls,
+            0
+        );
 
         let _ = std::fs::remove_dir_all(path);
     }
@@ -943,7 +1067,7 @@ mod tests {
             drawer
                 .test_metrics
                 .invalidate_materialized_query_indexes_calls,
-            1
+            0
         );
         assert_eq!(drawer.test_metrics.persist_metadata_calls, 1);
         assert!(!drawer.primary_memory_index.contains_key("ruby"));
@@ -998,20 +1122,23 @@ mod tests {
 
         assert_eq!(
             Drawer::secondary_index_key(&Value::String("Fire".to_string())),
-            Some("Fire".to_string())
+            Some("3:Fire".to_string())
         );
         assert_eq!(
             Drawer::secondary_index_key(&Value::from(7)),
-            Some("7".to_string())
+            Some("2:c01c000000000000".to_string())
         );
         assert_eq!(
             Drawer::secondary_index_key(&Value::Bool(true)),
-            Some("true".to_string())
+            Some("1:1".to_string())
         );
-        assert_eq!(Drawer::secondary_index_key(&Value::Null), None);
+        assert_eq!(
+            Drawer::secondary_index_key(&Value::Null),
+            Some("0:".to_string())
+        );
         assert_eq!(
             Drawer::equality_filter_index_key(&Value::String("Water".to_string())),
-            Some("Water".to_string())
+            Some("3:Water".to_string())
         );
         assert_eq!(
             Drawer::equality_filter_index_key(&Value::String("Wa%".to_string())),
@@ -1019,7 +1146,7 @@ mod tests {
         );
         assert_eq!(
             Drawer::equality_filter_index_key(&Value::Bool(false)),
-            Some("false".to_string())
+            Some("1:0".to_string())
         );
 
         assert!(Drawer::value_matches_type(&json!([]), "array"));

@@ -247,6 +247,35 @@ impl Drawer {
         }
     }
 
+    fn secondary_index_key_from_loaded_entry(
+        data_reader: &DatabaseReader,
+        field_name_map: &BTreeMap<String, String>,
+        field: &str,
+        stored_key: &str,
+        offset_value: &Value,
+    ) -> std::io::Result<String> {
+        if Self::secondary_index_key_is_encoded(stored_key) {
+            return Ok(stored_key.to_string());
+        }
+
+        let candidate_offset = offset_value
+            .as_u64()
+            .or_else(|| offset_value.as_array()?.iter().find_map(Value::as_u64));
+        if let Some(offset) = candidate_offset {
+            if let Some(record) = data_reader.read_record_at_offset(offset, Some(field_name_map))? {
+                let decoded = Self::decode_value_from_storage(record, field_name_map);
+                if let Some(index_key) = decoded.get(field).and_then(Self::secondary_index_key) {
+                    return Ok(index_key);
+                }
+            }
+        }
+
+        Ok(
+            Self::secondary_index_key(&Value::String(stored_key.to_string()))
+                .unwrap_or_else(|| stored_key.to_string()),
+        )
+    }
+
     pub fn open<P: AsRef<Path>>(
         directory: P,
         name: &str,
@@ -321,14 +350,14 @@ impl Drawer {
         };
 
         for field in &inferred_unique_constraints {
-            secondary_memory_index.insert(field.clone(), HashMap::new());
+            secondary_memory_index.insert(field.clone(), BTreeMap::new());
         }
         for field in Self::schema_extension_fields(schema.as_ref(), "indexes") {
             if materialized_secondary_indexes
                 .get(&field)
                 .is_some_and(|generation| *generation == secondary_index_generation)
             {
-                secondary_memory_index.insert(field.clone(), HashMap::new());
+                secondary_memory_index.insert(field.clone(), BTreeMap::new());
             }
         }
 
@@ -404,7 +433,18 @@ impl Drawer {
                         index_entry.get(INDEX_OFFSET_KEY),
                     ) {
                         let field = Self::decode_field_name_from_map(&field_name_map, stored_field);
-                        let map_key = format!("{}:{}", field, key);
+                        let loaded_key = if field == primary_key {
+                            key.to_string()
+                        } else {
+                            Self::secondary_index_key_from_loaded_entry(
+                                &data_reader,
+                                &field_name_map,
+                                &field,
+                                key,
+                                data_offset_val,
+                            )?
+                        };
+                        let map_key = format!("{}:{}", field, loaded_key);
                         if let Some((stale_index_offset, stale_slot_size)) =
                             index_file_offsets.insert(map_key, (current_offset, actual_slot_size))
                         {
@@ -431,14 +471,14 @@ impl Drawer {
                             secondary_memory_index.get_mut(field.as_str())
                         {
                             if let Some(data_offset) = data_offset_val.as_u64() {
-                                field_map.insert(key.to_string(), vec![data_offset]);
+                                field_map.insert(loaded_key, vec![data_offset]);
                             } else if let Some(offset_array) = data_offset_val.as_array() {
                                 if offset_array.is_empty() {
-                                    field_map.remove(key);
+                                    field_map.remove(&loaded_key);
                                 } else {
                                     let offsets: Vec<u64> =
                                         offset_array.iter().filter_map(|v| v.as_u64()).collect();
-                                    field_map.insert(key.to_string(), offsets);
+                                    field_map.insert(loaded_key, offsets);
                                 }
                             }
                         }

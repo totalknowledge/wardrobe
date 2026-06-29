@@ -1,4 +1,14 @@
 use super::*;
+use std::ops::Bound;
+
+#[derive(Debug, Clone)]
+pub(super) enum SecondaryIndexPredicate {
+    Equality(String),
+    Range {
+        lower: Option<(String, bool)>,
+        upper: Option<(String, bool)>,
+    },
+}
 
 impl Drawer {
     pub(crate) fn indexed_candidate_offsets(
@@ -11,7 +21,7 @@ impl Drawer {
 
         let mut materialized_for_future_query = false;
         for (field_name, expected_value) in filter_map {
-            if Self::equality_filter_index_key(expected_value).is_none() {
+            if Self::secondary_index_predicate(expected_value).is_none() {
                 return Ok(None);
             }
             if !self.index_can_satisfy_filter(field_name) {
@@ -54,10 +64,10 @@ impl Drawer {
             let Some(field_map) = self.secondary_memory_index.get(field_name) else {
                 return Ok(None);
             };
-            let Some(index_key) = Self::equality_filter_index_key(expected_value) else {
+            let Some(predicate) = Self::secondary_index_predicate(expected_value) else {
                 return Ok(None);
             };
-            let mut offsets = field_map.get(&index_key).cloned().unwrap_or_default();
+            let mut offsets = Self::secondary_index_offsets_for_predicate(field_map, &predicate);
             offsets.sort_unstable();
             offsets.dedup();
 
@@ -74,8 +84,8 @@ impl Drawer {
         &self,
         field_name: &str,
         enforce_unique: bool,
-    ) -> std::io::Result<HashMap<String, Vec<u64>>> {
-        let mut field_index: HashMap<String, Vec<u64>> = HashMap::new();
+    ) -> std::io::Result<SecondaryIndex> {
+        let mut field_index: SecondaryIndex = BTreeMap::new();
         for (primary_key, offset) in &self.primary_memory_index {
             let Some(record) = self.read_logical_record_at_offset(*offset)? else {
                 continue;
@@ -108,7 +118,7 @@ impl Drawer {
     pub(super) fn write_secondary_index_snapshot(
         &mut self,
         field_name: &str,
-        field_index: &HashMap<String, Vec<u64>>,
+        field_index: &SecondaryIndex,
     ) -> std::io::Result<()> {
         self.ensure_field_token_for_field_write(field_name)?;
         let field_prefix = format!("{field_name}:");
@@ -180,7 +190,7 @@ impl Drawer {
     }
 
     pub(super) fn normalized_secondary_index(
-        field_index: &HashMap<String, Vec<u64>>,
+        field_index: &SecondaryIndex,
     ) -> BTreeMap<String, Vec<u64>> {
         field_index
             .iter()
@@ -193,42 +203,18 @@ impl Drawer {
             .collect()
     }
 
-    pub(super) fn invalidate_materialized_query_indexes(&mut self) -> std::io::Result<()> {
-        #[cfg(test)]
-        {
-            self.test_metrics
-                .invalidate_materialized_query_indexes_calls += 1;
-        }
-
-        if self.materialized_secondary_indexes.is_empty() {
-            return Ok(());
-        }
-
-        let query_fields = self.query_index_fields();
-        let mut invalidated = false;
-        for field in query_fields {
-            if self
-                .unique_constraints
-                .iter()
-                .any(|unique| unique == &field)
-            {
-                continue;
-            }
-            invalidated |= self.materialized_secondary_indexes.remove(&field).is_some();
-            invalidated |= self.secondary_memory_index.remove(&field).is_some();
-            self.validated_secondary_indexes.remove(&field);
-        }
-
-        if invalidated {
-            self.secondary_index_generation = self.secondary_index_generation.saturating_add(1);
-            self.persist_metadata()?;
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn query_index_fields(&self) -> Vec<String> {
-        Self::schema_extension_fields(self.schema.as_ref(), "indexes")
+    pub(super) fn materialized_query_index_fields(&self) -> Vec<String> {
+        self.materialized_secondary_indexes
+            .keys()
+            .filter(|field| {
+                self.secondary_memory_index.contains_key(*field)
+                    && !self
+                        .unique_constraints
+                        .iter()
+                        .any(|unique| unique == *field)
+            })
+            .cloned()
+            .collect()
     }
 
     pub(super) fn clear_unique_constraint(&mut self, field_name: &str) -> std::io::Result<()> {
@@ -347,13 +333,25 @@ impl Drawer {
 
     pub(super) fn secondary_index_key(value: &Value) -> Option<String> {
         match value {
-            Value::String(value) => Some(value.clone()),
-            Value::Number(number) if number.as_i64().is_some() || number.as_u64().is_some() => {
-                Some(number.to_string())
-            }
-            Value::Bool(value) => Some(value.to_string()),
+            Value::Null => Some("0:".to_string()),
+            Value::Bool(false) => Some("1:0".to_string()),
+            Value::Bool(true) => Some("1:1".to_string()),
+            Value::Number(number) => number
+                .as_f64()
+                .map(|number| format!("2:{:016x}", Self::sortable_f64_bits(number))),
+            Value::String(value) => Some(format!("3:{value}")),
             _ => None,
         }
+    }
+
+    pub(super) fn secondary_index_key_is_encoded(key: &str) -> bool {
+        key == "0:"
+            || key == "1:0"
+            || key == "1:1"
+            || (key.len() == 18
+                && key.starts_with("2:")
+                && key[2..].chars().all(|ch| ch.is_ascii_hexdigit()))
+            || key.starts_with("3:")
     }
 
     pub(super) fn primary_key_for_record(&self, record: &Value) -> std::io::Result<String> {
@@ -373,13 +371,113 @@ impl Drawer {
     }
 
     pub(super) fn equality_filter_index_key(value: &Value) -> Option<String> {
-        match value {
-            Value::String(value) if !value.contains('%') => Some(value.clone()),
-            Value::Number(number) if number.as_i64().is_some() || number.as_u64().is_some() => {
-                Some(number.to_string())
+        if let Value::String(value) = value {
+            if value.contains('%') {
+                return None;
             }
-            Value::Bool(value) => Some(value.to_string()),
-            _ => None,
+        }
+        Self::secondary_index_key(value)
+    }
+
+    pub(super) fn secondary_index_predicate(value: &Value) -> Option<SecondaryIndexPredicate> {
+        if let Value::Object(map) = value {
+            if map.keys().any(|key| key.starts_with('$')) {
+                return Self::range_filter_index_predicate(map);
+            }
+        }
+
+        Self::equality_filter_index_key(value).map(SecondaryIndexPredicate::Equality)
+    }
+
+    pub(super) fn range_filter_index_predicate(
+        map: &Map<String, Value>,
+    ) -> Option<SecondaryIndexPredicate> {
+        let mut lower: Option<(String, bool)> = None;
+        let mut upper: Option<(String, bool)> = None;
+
+        for (operator, value) in map {
+            let key = Self::secondary_index_key(value)?;
+            match operator.as_str() {
+                "$gt" => lower = Some(Self::stronger_lower_bound(lower, (key, false))),
+                "$gte" => lower = Some(Self::stronger_lower_bound(lower, (key, true))),
+                "$lt" => upper = Some(Self::stronger_upper_bound(upper, (key, false))),
+                "$lte" => upper = Some(Self::stronger_upper_bound(upper, (key, true))),
+                "$eq" => return Some(SecondaryIndexPredicate::Equality(key)),
+                _ => return None,
+            }
+        }
+
+        if lower.is_none() && upper.is_none() {
+            return None;
+        }
+
+        Some(SecondaryIndexPredicate::Range { lower, upper })
+    }
+
+    fn stronger_lower_bound(
+        existing: Option<(String, bool)>,
+        candidate: (String, bool),
+    ) -> (String, bool) {
+        match existing {
+            Some(existing) if existing.0 > candidate.0 => existing,
+            Some(existing) if existing.0 == candidate.0 => (existing.0, existing.1 && candidate.1),
+            _ => candidate,
+        }
+    }
+
+    fn stronger_upper_bound(
+        existing: Option<(String, bool)>,
+        candidate: (String, bool),
+    ) -> (String, bool) {
+        match existing {
+            Some(existing) if existing.0 < candidate.0 => existing,
+            Some(existing) if existing.0 == candidate.0 => (existing.0, existing.1 && candidate.1),
+            _ => candidate,
+        }
+    }
+
+    pub(super) fn secondary_index_offsets_for_predicate(
+        field_map: &SecondaryIndex,
+        predicate: &SecondaryIndexPredicate,
+    ) -> Vec<u64> {
+        match predicate {
+            SecondaryIndexPredicate::Equality(index_key) => {
+                field_map.get(index_key).cloned().unwrap_or_default()
+            }
+            SecondaryIndexPredicate::Range { lower, upper } => {
+                if let (Some((lower_key, lower_inclusive)), Some((upper_key, upper_inclusive))) =
+                    (lower, upper)
+                {
+                    if lower_key > upper_key
+                        || (lower_key == upper_key && (!lower_inclusive || !upper_inclusive))
+                    {
+                        return Vec::new();
+                    }
+                }
+                let lower_bound = match lower {
+                    Some((key, true)) => Bound::Included(key.as_str()),
+                    Some((key, false)) => Bound::Excluded(key.as_str()),
+                    None => Bound::Unbounded,
+                };
+                let upper_bound = match upper {
+                    Some((key, true)) => Bound::Included(key.as_str()),
+                    Some((key, false)) => Bound::Excluded(key.as_str()),
+                    None => Bound::Unbounded,
+                };
+                field_map
+                    .range::<str, _>((lower_bound, upper_bound))
+                    .flat_map(|(_, offsets)| offsets.iter().copied())
+                    .collect()
+            }
+        }
+    }
+
+    fn sortable_f64_bits(value: f64) -> u64 {
+        let bits = value.to_bits();
+        if bits & (1 << 63) == 0 {
+            bits ^ (1 << 63)
+        } else {
+            !bits
         }
     }
 

@@ -4034,7 +4034,7 @@ fn us_112_delete_by_filter_runs_as_single_transaction_and_updates_metadata() {
 }
 
 #[test]
-fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
+fn us_112_delete_by_filter_uses_materialized_index_and_keeps_it_current() {
     let database = TempDatabase::new("us_112_indexed_delete_by_filter");
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
@@ -4099,13 +4099,11 @@ fn us_112_delete_by_filter_uses_materialized_index_and_invalidates_it_once() {
     .expect("metadata should parse after delete");
     assert_eq!(
         metadata_after["secondary_index_generation"].as_u64(),
-        Some(generation_before + 1)
+        Some(generation_before)
     );
-    assert!(
-        !metadata_after["materialized_secondary_indexes"]
-            .as_object()
-            .expect("materialized indexes should be an object")
-            .contains_key("element")
+    assert_eq!(
+        metadata_after["materialized_secondary_indexes"]["element"].as_u64(),
+        Some(generation_before)
     );
     assert_eq!(
         engine

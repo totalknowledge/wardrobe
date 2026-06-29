@@ -128,7 +128,7 @@ fn field_matches_filter(
 
 fn scalar_matches_operator_filter(actual_value: &Value, expected_map: &Map<String, Value>) -> bool {
     expected_map.iter().all(|(operator, expected_value)| {
-        let Some(ordering) = compare_numeric_values(actual_value, expected_value) else {
+        let Some(ordering) = compare_scalar_values(actual_value, expected_value) else {
             return false;
         };
         match operator.as_str() {
@@ -142,10 +142,16 @@ fn scalar_matches_operator_filter(actual_value: &Value, expected_map: &Map<Strin
     })
 }
 
-fn compare_numeric_values(actual_value: &Value, expected_value: &Value) -> Option<Ordering> {
-    let actual = actual_value.as_f64()?;
-    let expected = expected_value.as_f64()?;
-    actual.partial_cmp(&expected)
+fn compare_scalar_values(actual_value: &Value, expected_value: &Value) -> Option<Ordering> {
+    match (actual_value, expected_value) {
+        (Value::Null, Value::Null) => Some(Ordering::Equal),
+        (Value::Bool(actual), Value::Bool(expected)) => Some(actual.cmp(expected)),
+        (Value::Number(actual), Value::Number(expected)) => {
+            actual.as_f64()?.partial_cmp(&expected.as_f64()?)
+        }
+        (Value::String(actual), Value::String(expected)) => Some(actual.cmp(expected)),
+        _ => None,
+    }
 }
 
 pub(crate) fn matches_string_filter(actual_value: &str, expected_filter: &str) -> bool {

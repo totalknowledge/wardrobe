@@ -50,18 +50,54 @@ impl DatabaseReader {
             std::io::Error::other("DatabaseReader lock was poisoned during batch read")
         })?;
         let file_len = reader.get_ref().metadata()?.len();
-        let mut records = Vec::new();
 
-        for offset in offsets {
-            if let Some(record_bytes) =
-                Self::read_raw_bytes_at_offset_locked(&mut reader, file_len, offset)?
-            {
-                if let Some(record) =
-                    BsonBinaryFormat::deserialize_record_with_map(&record_bytes, field_name_map)?
-                {
-                    records.push(record);
-                }
+        let mut offset_list: Vec<u64> = offsets.into_iter().collect();
+        offset_list.sort_unstable();
+
+        let mut records = Vec::with_capacity(offset_list.len());
+        let mut header = [0u8; 16];
+        let mut slot_buf = Vec::new();
+        let mut current_pos = 0u64;
+        let mut is_first = true;
+
+        for offset in offset_list {
+            if offset >= file_len {
+                continue;
             }
+            if offset + 16 > file_len {
+                continue;
+            }
+
+            if is_first || offset != current_pos {
+                reader.seek(SeekFrom::Start(offset))?;
+                is_first = false;
+            }
+
+            reader.read_exact(&mut header)?;
+
+            let slot_size = if BsonBinaryFormat::is_binary_frame(&header) {
+                BsonBinaryFormat::parse_slot_size(&header)?.unwrap()
+            } else if NativeBinaryIndexFormat::is_binary_frame(&header) {
+                NativeBinaryIndexFormat::parse_slot_size(&header)?.unwrap()
+            } else {
+                continue;
+            };
+
+            if offset + slot_size as u64 > file_len {
+                continue;
+            }
+
+            slot_buf.resize(slot_size, 0);
+            slot_buf[..16].copy_from_slice(&header);
+            reader.read_exact(&mut slot_buf[16..])?;
+
+            if let Some(record) =
+                BsonBinaryFormat::deserialize_record_with_map(&slot_buf, field_name_map)?
+            {
+                records.push(record);
+            }
+
+            current_pos = offset + slot_size as u64;
         }
 
         Ok(records)

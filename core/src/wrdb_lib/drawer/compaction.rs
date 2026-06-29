@@ -34,9 +34,12 @@ impl Drawer {
         let mut index_file_offsets = HashMap::new();
         let mut data_block_index = HashMap::new();
 
-        let indexed_fields = self.unique_constraints.clone();
+        let mut indexed_fields = self.unique_constraints.clone();
+        indexed_fields.extend(self.materialized_query_index_fields());
+        indexed_fields.sort();
+        indexed_fields.dedup();
         for field in &indexed_fields {
-            secondary_memory_index.insert(field.clone(), HashMap::new());
+            secondary_memory_index.insert(field.clone(), BTreeMap::new());
         }
 
         for record in &live_records {
@@ -82,7 +85,7 @@ impl Drawer {
                 {
                     secondary_memory_index
                         .entry(indexed_field.clone())
-                        .or_insert_with(HashMap::new)
+                        .or_insert_with(BTreeMap::new)
                         .entry(field_value)
                         .or_insert_with(Vec::new)
                         .push(data_offset);
@@ -131,11 +134,6 @@ impl Drawer {
         self.data_recycler_cache_initialized = true;
         self.index_recycler = Recycler::new();
         self.record_count = self.primary_memory_index.len();
-        if !self.materialized_secondary_indexes.is_empty() {
-            self.secondary_index_generation = self.secondary_index_generation.saturating_add(1);
-            self.materialized_secondary_indexes.clear();
-            self.validated_secondary_indexes.clear();
-        }
         self.persist_metadata()?;
 
         let data_bytes_after = compact_data.len() as u64;

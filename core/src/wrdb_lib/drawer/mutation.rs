@@ -65,13 +65,15 @@ impl Drawer {
         }
 
         for unique_field in &self.unique_constraints {
-            if let Some(field_value) = record.get(unique_field).and_then(|v| v.as_str()) {
+            if let Some(field_value) = record.get(unique_field).and_then(Self::secondary_index_key)
+            {
                 if let Some(field_map) = self.secondary_memory_index.get(unique_field) {
-                    if let Some(offsets) = field_map.get(field_value) {
+                    if let Some(offsets) = field_map.get(&field_value) {
                         if offsets.iter().any(|&o| Some(o) != old_data_offset) {
                             return Ok(Err(format!(
                                 "Unique constraint violation: Field '{}' with value '{}' already exists",
-                                unique_field, field_value
+                                unique_field,
+                                record.get(unique_field).unwrap_or(&Value::Null)
                             )));
                         }
                     }
@@ -102,59 +104,24 @@ impl Drawer {
 
         let unique_fields = self.unique_constraints.clone();
         for indexed_field in unique_fields {
-            let old_field_value = old_record
-                .as_ref()
-                .and_then(|value| value.get(&indexed_field))
-                .and_then(Self::secondary_index_key);
-            let new_field_value = record
-                .get(&indexed_field)
-                .and_then(Self::secondary_index_key);
-            let mut keys_to_write = Vec::new();
+            self.update_secondary_index_for_record_change(
+                &indexed_field,
+                old_record.as_ref(),
+                old_data_offset,
+                Some(&record),
+                data_offset,
+            )?;
+        }
 
-            {
-                let field_map = self
-                    .secondary_memory_index
-                    .entry(indexed_field.clone())
-                    .or_insert_with(HashMap::new);
-
-                if let (Some(previous_value), Some(previous_offset)) =
-                    (old_field_value.as_deref(), old_data_offset)
-                {
-                    if let Some(offsets) = field_map.get_mut(previous_value) {
-                        offsets.retain(|offset| *offset != previous_offset);
-                        if offsets.is_empty() {
-                            field_map.remove(previous_value);
-                        }
-                    }
-                    keys_to_write.push(previous_value.to_string());
-                }
-
-                if let Some(field_value) = new_field_value.as_deref() {
-                    let offsets = field_map.entry(field_value.to_string()).or_default();
-                    if !offsets.contains(&data_offset) {
-                        offsets.push(data_offset);
-                    }
-                    keys_to_write.push(field_value.to_string());
-                }
-            }
-
-            keys_to_write.sort();
-            keys_to_write.dedup();
-
-            for field_value in keys_to_write {
-                let offsets = self
-                    .secondary_memory_index
-                    .get(&indexed_field)
-                    .and_then(|field_map| field_map.get(&field_value))
-                    .cloned()
-                    .unwrap_or_default();
-                self.write_index_log(
-                    &indexed_field,
-                    &field_value,
-                    Self::offsets_index_value(&offsets),
-                    None,
-                )?;
-            }
+        let materialized_query_fields = self.materialized_query_index_fields();
+        for indexed_field in materialized_query_fields {
+            self.update_secondary_index_for_record_change(
+                &indexed_field,
+                old_record.as_ref(),
+                old_data_offset,
+                Some(&record),
+                data_offset,
+            )?;
         }
 
         if let Some((stale_offset, old_block)) = historical_tombstone_block {
@@ -172,9 +139,74 @@ impl Drawer {
             self.mark_metadata_dirty();
         }
 
-        self.invalidate_materialized_query_indexes()?;
-
         Ok(Ok(is_new_record))
+    }
+
+    pub(super) fn update_secondary_index_for_record_change(
+        &mut self,
+        indexed_field: &str,
+        old_record: Option<&Value>,
+        old_data_offset: Option<u64>,
+        new_record: Option<&Value>,
+        new_data_offset: u64,
+    ) -> std::io::Result<()> {
+        if !self.secondary_memory_index.contains_key(indexed_field) {
+            return Ok(());
+        }
+
+        let old_field_value = old_record
+            .and_then(|value| value.get(indexed_field))
+            .and_then(Self::secondary_index_key);
+        let new_field_value = new_record
+            .and_then(|value| value.get(indexed_field))
+            .and_then(Self::secondary_index_key);
+        let mut keys_to_write = Vec::new();
+
+        {
+            let field_map = self
+                .secondary_memory_index
+                .entry(indexed_field.to_string())
+                .or_insert_with(BTreeMap::new);
+
+            if let (Some(previous_value), Some(previous_offset)) =
+                (old_field_value.as_deref(), old_data_offset)
+            {
+                if let Some(offsets) = field_map.get_mut(previous_value) {
+                    offsets.retain(|offset| *offset != previous_offset);
+                    if offsets.is_empty() {
+                        field_map.remove(previous_value);
+                    }
+                }
+                keys_to_write.push(previous_value.to_string());
+            }
+
+            if let Some(field_value) = new_field_value.as_deref() {
+                let offsets = field_map.entry(field_value.to_string()).or_default();
+                if !offsets.contains(&new_data_offset) {
+                    offsets.push(new_data_offset);
+                }
+                keys_to_write.push(field_value.to_string());
+            }
+        }
+
+        keys_to_write.sort();
+        keys_to_write.dedup();
+
+        for field_value in keys_to_write {
+            let offsets = self
+                .secondary_memory_index
+                .get(indexed_field)
+                .and_then(|field_map| field_map.get(&field_value))
+                .cloned()
+                .unwrap_or_default();
+            self.write_index_log(
+                indexed_field,
+                &field_value,
+                Self::offsets_index_value(&offsets),
+                None,
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn validate_bulk_upsert_records(
@@ -206,16 +238,19 @@ impl Drawer {
 
             let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
             for unique_field in &self.unique_constraints {
-                let Some(field_value) = record.get(unique_field).and_then(Value::as_str) else {
+                let Some(field_value) =
+                    record.get(unique_field).and_then(Self::secondary_index_key)
+                else {
                     continue;
                 };
 
                 if let Some(field_map) = self.secondary_memory_index.get(unique_field) {
-                    if let Some(offsets) = field_map.get(field_value) {
+                    if let Some(offsets) = field_map.get(&field_value) {
                         if offsets.iter().any(|&o| Some(o) != old_data_offset) {
                             return Ok(Err(format!(
                                 "Unique constraint violation: Field '{}' with value '{}' already exists",
-                                unique_field, field_value
+                                unique_field,
+                                record.get(unique_field).unwrap_or(&Value::Null)
                             )));
                         }
                     }
