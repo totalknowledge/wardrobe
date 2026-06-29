@@ -1822,7 +1822,11 @@ impl WardrobeCommandRunner for TcpWardrobeRunner {
                 format!("Failed to serialize Wardrobe benchmark command: {error}"),
             )
         })?;
-        ProtocolFrame::new(ProtocolOpcode::Command, payload).write_to_stream(&mut self.stream)?;
+        ProtocolFrame::write_payload_to_stream_unflushed(
+            ProtocolOpcode::Command,
+            &payload,
+            &mut self.stream,
+        )?;
         let response = ProtocolFrame::read_from_stream(&mut self.stream)?;
         match response.opcode {
             ProtocolOpcode::Result => serde_json::from_slice(&response.payload).map_err(|error| {

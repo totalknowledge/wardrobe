@@ -1,4 +1,4 @@
-use super::execute_on_stream;
+use super::execute_on_socket_stream;
 use crate::wrdb_lib::command::{Command, CommandResult};
 use std::io::Result;
 use std::net::TcpStream;
@@ -22,7 +22,7 @@ impl NetworkTransport {
     }
 
     pub(crate) fn execute(&self, command: Command) -> Result<CommandResult> {
-        execute_on_stream(
+        execute_on_socket_stream(
             &self.stream,
             command,
             format!("{}:{}", self.host, self.port),

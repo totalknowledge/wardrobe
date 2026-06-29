@@ -36,6 +36,12 @@ pub struct ServerRuntimeConfig {
     pub profile_commands: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProtocolWritePolicy {
+    Flush,
+    Unflushed,
+}
+
 impl ServerConfig {
     pub fn from_args<I>(args: I) -> io::Result<Self>
     where
@@ -528,7 +534,13 @@ pub fn serve_tcp_listener_with_config(
                         ("peer_addr", peer_addr.to_string()),
                     ],
                 );
-                spawn_connection_handler(Arc::clone(&engine), stream, permit, runtime);
+                spawn_connection_handler(
+                    Arc::clone(&engine),
+                    stream,
+                    permit,
+                    runtime,
+                    ProtocolWritePolicy::Unflushed,
+                );
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 drop(permit);
@@ -591,7 +603,13 @@ pub fn serve_unix_listener_with_config(
                         ("listener", "unix".to_string()),
                     ],
                 );
-                spawn_connection_handler(Arc::clone(&engine), stream, permit, runtime);
+                spawn_connection_handler(
+                    Arc::clone(&engine),
+                    stream,
+                    permit,
+                    runtime,
+                    ProtocolWritePolicy::Unflushed,
+                );
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 drop(permit);
@@ -615,13 +633,30 @@ pub fn handle_protocol_stream<S>(engine: Arc<WardrobeEngine>, mut stream: S) -> 
 where
     S: Read + Write,
 {
-    handle_protocol_stream_with_config(engine, &mut stream, ServerRuntimeConfig::default())
+    handle_protocol_stream_with_policy(
+        engine,
+        &mut stream,
+        ServerRuntimeConfig::default(),
+        ProtocolWritePolicy::Flush,
+    )
 }
 
 pub fn handle_protocol_stream_with_config<S>(
     engine: Arc<WardrobeEngine>,
     stream: &mut S,
     runtime: ServerRuntimeConfig,
+) -> io::Result<()>
+where
+    S: Read + Write,
+{
+    handle_protocol_stream_with_policy(engine, stream, runtime, ProtocolWritePolicy::Flush)
+}
+
+fn handle_protocol_stream_with_policy<S>(
+    engine: Arc<WardrobeEngine>,
+    stream: &mut S,
+    runtime: ServerRuntimeConfig,
+    write_policy: ProtocolWritePolicy,
 ) -> io::Result<()>
 where
     S: Read + Write,
@@ -663,6 +698,7 @@ where
             write_error_frame(
                 &mut *stream,
                 "Wardrobe server expected a command frame from the client",
+                write_policy,
             )?;
             continue;
         }
@@ -685,6 +721,7 @@ where
                 write_error_frame(
                     &mut *stream,
                     &format!("Failed to deserialize Wardrobe command: {error}"),
+                    write_policy,
                 )?;
                 continue;
             }
@@ -716,8 +753,12 @@ where
                 let response_serialization = serialization_started.elapsed();
                 let response_bytes = payload.len();
                 let transmission_started = Instant::now();
-                ProtocolFrame::new(ProtocolOpcode::Result, payload)
-                    .write_to_stream(&mut *stream)?;
+                write_protocol_payload(
+                    &mut *stream,
+                    ProtocolOpcode::Result,
+                    &payload,
+                    write_policy,
+                )?;
                 let protocol_transmission = transmission_started.elapsed();
                 server_log(
                     ApplicationLogLevel::Info,
@@ -751,7 +792,7 @@ where
                 let response_bytes = response.len();
                 let response_serialization = serialization_started.elapsed();
                 let transmission_started = Instant::now();
-                write_error_frame(&mut *stream, &response)?;
+                write_error_frame(&mut *stream, &response, write_policy)?;
                 let protocol_transmission = transmission_started.elapsed();
                 let mut fields = vec![
                     ("operation", "command_execute".to_string()),
@@ -830,11 +871,39 @@ fn command_label(command: &Command) -> &'static str {
     }
 }
 
-fn write_error_frame<S>(stream: &mut S, message: &str) -> io::Result<()>
+fn write_error_frame<S>(
+    stream: &mut S,
+    message: &str,
+    write_policy: ProtocolWritePolicy,
+) -> io::Result<()>
 where
     S: Write,
 {
-    ProtocolFrame::new(ProtocolOpcode::Error, message.as_bytes().to_vec()).write_to_stream(stream)
+    write_protocol_payload(
+        stream,
+        ProtocolOpcode::Error,
+        message.as_bytes(),
+        write_policy,
+    )
+}
+
+fn write_protocol_payload<S>(
+    stream: &mut S,
+    opcode: ProtocolOpcode,
+    payload: &[u8],
+    write_policy: ProtocolWritePolicy,
+) -> io::Result<()>
+where
+    S: Write,
+{
+    match write_policy {
+        ProtocolWritePolicy::Flush => {
+            ProtocolFrame::write_payload_to_stream(opcode, payload, stream)
+        }
+        ProtocolWritePolicy::Unflushed => {
+            ProtocolFrame::write_payload_to_stream_unflushed(opcode, payload, stream)
+        }
+    }
 }
 
 fn join_listener(handle: JoinHandle<io::Result<()>>) -> io::Result<()> {
@@ -957,13 +1026,16 @@ fn spawn_connection_handler<S>(
     stream: S,
     permit: Option<ConnectionPoolPermit>,
     runtime: ServerRuntimeConfig,
+    write_policy: ProtocolWritePolicy,
 ) where
     S: Read + Write + Send + 'static,
 {
     thread::spawn(move || {
         let _permit = permit;
         let mut stream = stream;
-        if let Err(error) = handle_protocol_stream_with_config(engine, &mut stream, runtime) {
+        if let Err(error) =
+            handle_protocol_stream_with_policy(engine, &mut stream, runtime, write_policy)
+        {
             eprintln!("Wardrobe connection handler failed: {error}");
         }
     });
@@ -1188,7 +1260,8 @@ mod tests {
     #[test]
     fn write_error_frame_writes_error_opcode_and_message() {
         let mut buf: Vec<u8> = Vec::new();
-        write_error_frame(&mut buf, "boom").expect("write should succeed");
+        write_error_frame(&mut buf, "boom", ProtocolWritePolicy::Flush)
+            .expect("write should succeed");
         let mut cursor = Cursor::new(buf);
         let frame = ProtocolFrame::read_from_stream(&mut cursor).expect("frame should parse");
         assert_eq!(frame.opcode, ProtocolOpcode::Error);

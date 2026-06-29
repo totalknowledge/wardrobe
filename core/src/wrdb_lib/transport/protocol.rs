@@ -47,7 +47,28 @@ impl ProtocolFrame {
     }
 
     pub fn write_to_stream<W: Write>(&self, stream: &mut W) -> Result<()> {
-        let payload_len = u32::try_from(self.payload.len()).map_err(|_| {
+        Self::write_payload_to_stream(self.opcode, &self.payload, stream)
+    }
+
+    pub fn write_to_stream_unflushed<W: Write>(&self, stream: &mut W) -> Result<()> {
+        Self::write_payload_to_stream_unflushed(self.opcode, &self.payload, stream)
+    }
+
+    pub fn write_payload_to_stream<W: Write>(
+        opcode: ProtocolOpcode,
+        payload: &[u8],
+        stream: &mut W,
+    ) -> Result<()> {
+        Self::write_payload_to_stream_unflushed(opcode, payload, stream)?;
+        stream.flush()
+    }
+
+    pub fn write_payload_to_stream_unflushed<W: Write>(
+        opcode: ProtocolOpcode,
+        payload: &[u8],
+        stream: &mut W,
+    ) -> Result<()> {
+        let payload_len = u32::try_from(payload.len()).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidInput,
                 "Wardrobe protocol payload exceeds u32 length limit",
@@ -56,14 +77,11 @@ impl ProtocolFrame {
 
         let mut header = [0u8; HEADER_LENGTH];
         header[0..2].copy_from_slice(&PROTOCOL_MAGIC);
-        header[2] = self.opcode.as_u8();
+        header[2] = opcode.as_u8();
         header[3..7].copy_from_slice(&payload_len.to_be_bytes());
 
-        let mut frame = Vec::with_capacity(HEADER_LENGTH + self.payload.len());
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(&self.payload);
-        stream.write_all(&frame)?;
-        stream.flush()
+        stream.write_all(&header)?;
+        stream.write_all(payload)
     }
 
     pub fn read_from_stream<R: Read>(stream: &mut R) -> Result<Self> {

@@ -1,5 +1,23 @@
-use std::io::{Cursor, ErrorKind};
+use std::io::{Cursor, ErrorKind, Write};
 use wardrobe_core::{PROTOCOL_MAGIC, ProtocolFrame, ProtocolOpcode};
+
+#[derive(Default)]
+struct RecordingWriter {
+    writes: Vec<Vec<u8>>,
+    flushes: usize,
+}
+
+impl Write for RecordingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes.push(buf.to_vec());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flushes += 1;
+        Ok(())
+    }
+}
 
 #[test]
 fn protocol_frame_writes_stable_binary_header_and_payload() {
@@ -14,6 +32,37 @@ fn protocol_frame_writes_stable_binary_header_and_payload() {
     assert_eq!(buffer[2], 0x01);
     assert_eq!(&buffer[3..7], &(12u32).to_be_bytes());
     assert_eq!(&buffer[7..], b"find-all:gem");
+}
+
+#[test]
+fn protocol_frame_unflushed_writer_splits_header_and_payload_without_flush() {
+    let frame = ProtocolFrame::new(ProtocolOpcode::Command, b"read:gem".to_vec());
+    let mut writer = RecordingWriter::default();
+
+    frame
+        .write_to_stream_unflushed(&mut writer)
+        .expect("frame should encode");
+
+    assert_eq!(writer.flushes, 0);
+    assert_eq!(writer.writes.len(), 2);
+    assert_eq!(&writer.writes[0][0..2], &PROTOCOL_MAGIC);
+    assert_eq!(writer.writes[0][2], 0x01);
+    assert_eq!(&writer.writes[0][3..7], &(8u32).to_be_bytes());
+    assert_eq!(writer.writes[1], b"read:gem");
+}
+
+#[test]
+fn protocol_frame_generic_writer_still_flushes_after_payload() {
+    let frame = ProtocolFrame::new(ProtocolOpcode::Result, b"ok".to_vec());
+    let mut writer = RecordingWriter::default();
+
+    frame
+        .write_to_stream(&mut writer)
+        .expect("frame should encode");
+
+    assert_eq!(writer.flushes, 1);
+    assert_eq!(writer.writes.len(), 2);
+    assert_eq!(writer.writes[1], b"ok");
 }
 
 #[test]

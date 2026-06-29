@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use super::execute_on_stream;
+use super::execute_on_socket_stream;
 use crate::wrdb_lib::command::{Command, CommandResult};
 use std::io::Result;
 #[cfg(not(unix))]
@@ -43,7 +43,7 @@ impl UnixSocketTransport {
     pub(crate) fn execute(&self, command: Command) -> Result<CommandResult> {
         #[cfg(unix)]
         {
-            execute_on_stream(&self.stream, command, self.path.display().to_string())
+            execute_on_socket_stream(&self.stream, command, self.path.display().to_string())
         }
 
         #[cfg(not(unix))]

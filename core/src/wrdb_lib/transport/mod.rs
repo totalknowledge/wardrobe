@@ -12,10 +12,34 @@ use protocol::{ProtocolFrame, ProtocolOpcode};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::sync::Mutex;
 
-pub(crate) fn execute_on_stream<S>(
+#[cfg(test)]
+fn execute_on_stream<S>(
     stream: &Mutex<S>,
     command: Command,
     target_description: String,
+) -> Result<CommandResult>
+where
+    S: Read + Write,
+{
+    execute_on_stream_with_flush_policy(stream, command, target_description, true)
+}
+
+pub(crate) fn execute_on_socket_stream<S>(
+    stream: &Mutex<S>,
+    command: Command,
+    target_description: String,
+) -> Result<CommandResult>
+where
+    S: Read + Write,
+{
+    execute_on_stream_with_flush_policy(stream, command, target_description, false)
+}
+
+fn execute_on_stream_with_flush_policy<S>(
+    stream: &Mutex<S>,
+    command: Command,
+    target_description: String,
+    flush_after_write: bool,
 ) -> Result<CommandResult>
 where
     S: Read + Write,
@@ -33,7 +57,15 @@ where
         ))
     })?;
 
-    ProtocolFrame::new(ProtocolOpcode::Command, payload).write_to_stream(&mut *stream)?;
+    if flush_after_write {
+        ProtocolFrame::write_payload_to_stream(ProtocolOpcode::Command, &payload, &mut *stream)?;
+    } else {
+        ProtocolFrame::write_payload_to_stream_unflushed(
+            ProtocolOpcode::Command,
+            &payload,
+            &mut *stream,
+        )?;
+    }
     let response = ProtocolFrame::read_from_stream(&mut *stream)?;
 
     match response.opcode {
@@ -63,6 +95,7 @@ mod tests {
     struct FakeStream {
         read: Cursor<Vec<u8>>,
         write: Vec<u8>,
+        flush_count: usize,
     }
 
     impl Read for FakeStream {
@@ -78,6 +111,7 @@ mod tests {
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
+            self.flush_count += 1;
             Ok(())
         }
     }
@@ -93,6 +127,7 @@ mod tests {
         let stream = FakeStream {
             read: Cursor::new(response_bytes),
             write: Vec::new(),
+            flush_count: 0,
         };
         let mutex = Mutex::new(stream);
 
@@ -103,5 +138,43 @@ mod tests {
         let result = execute_on_stream(&mutex, command, "test-target".to_string())
             .expect("execute should succeed");
         assert_eq!(result, CommandResult::Count(3));
+        assert_eq!(
+            mutex
+                .into_inner()
+                .expect("stream mutex should unwrap")
+                .flush_count,
+            1
+        );
+    }
+
+    #[test]
+    fn execute_on_socket_stream_roundtrips_without_flushing_request() {
+        let payload = serde_json::to_vec(&CommandResult::Count(3)).expect("serialize");
+        let mut response_bytes = Vec::new();
+        ProtocolFrame::new(ProtocolOpcode::Result, payload)
+            .write_to_stream(&mut response_bytes)
+            .expect("frame write");
+
+        let stream = FakeStream {
+            read: Cursor::new(response_bytes),
+            write: Vec::new(),
+            flush_count: 0,
+        };
+        let mutex = Mutex::new(stream);
+
+        let command = Command::Count {
+            filter: OperationFilter::drawer("gem"),
+            options: OperationOptions::default(),
+        };
+        let result = execute_on_socket_stream(&mutex, command, "test-target".to_string())
+            .expect("execute should succeed");
+        assert_eq!(result, CommandResult::Count(3));
+        assert_eq!(
+            mutex
+                .into_inner()
+                .expect("stream mutex should unwrap")
+                .flush_count,
+            0
+        );
     }
 }
