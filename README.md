@@ -1,5 +1,7 @@
 # Wardrobe
 
+[![Coverage](https://github.com/wardrobe/wardrobe/actions/workflows/coverage.yml/badge.svg)](https://github.com/wardrobe/wardrobe/actions/workflows/coverage.yml)
+
 Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
 
 It combines the flexibility of JSON documents with built-in referential integrity, relationship traversal, automatic hydration, cascading operations, and schema validation without requiring separate graph storage or complex object-relational mapping.
