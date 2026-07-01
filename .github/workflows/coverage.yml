@@ -25,6 +25,15 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Armoire frontend deps
+        working-directory: samples/armoire
+        run: npm ci
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
