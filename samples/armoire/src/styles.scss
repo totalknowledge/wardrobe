@@ -27,3 +27,8 @@ summary {
 summary::after {
     display: none;
 }
+html.app-busy,
+body.app-busy,
+body.app-busy * {
+  cursor: wait !important;
+}

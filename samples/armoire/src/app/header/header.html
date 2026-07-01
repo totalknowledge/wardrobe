@@ -1,0 +1,77 @@
+<header class="menubar navbar bg-base-200 h-4 border-b px-2 shrink-0 text-sm">
+  <div class="navbar-center flex-1 justify-start">
+    <ul class="menu menu-horizontal menu-sm p-0">
+      <li>
+        <details class="dropdown" #connectionMenu>
+          <summary role="button" class="rounded-sm cursor-pointer select-none">
+            Connection
+          </summary>
+        
+          <ul class="dropdown-content menu bg-base-200 rounded-box z-[1] w-48 p-2 shadow-lg">
+            <li>
+              <a (click)="openConnectionModal('connection'); closeMenus(connectionMenu)">
+                New&nbsp;Connection
+              </a>
+            </li>
+        
+            <li>
+              <a (click)="openConnectionModal('location'); closeMenus(connectionMenu)">
+                New&nbsp;File&nbsp;Location
+              </a>
+            </li>
+        
+            <li class="my-1 h-px bg-base-content/10"></li>
+        
+            <li>
+              <a [class.menu-disabled]="!canDisconnect()" [attr.aria-disabled]="!canDisconnect()"
+                (click)="canDisconnect() && (disconnect(); closeMenus(connectionMenu))">
+                Disconnect
+              </a>
+            </li>
+          </ul>
+        </details>
+      </li>
+      <li>
+        <details class="dropdown" #wardrobeMenu>
+          <summary role="button" class="rounded-sm cursor-pointer select-none">
+            Wardrobe
+          </summary>
+        
+          <ul class="dropdown-content menu bg-base-200 rounded-box z-[1] w-48 p-2 shadow-lg">
+            <li>
+              <a (click)="openCreateBayDialog(); closeMenus(wardrobeMenu)">
+                New&nbsp;Bay
+              </a>
+            </li>
+          </ul>
+        </details>
+      </li>
+      <li>
+        <details class="dropdown" #settingsMenu>
+          <summary role="button" class="rounded-sm cursor-pointer select-none">
+            Settings
+          </summary>
+        
+          <ul class="dropdown-content menu bg-base-200 rounded-box z-[1] w-48 p-2 shadow-lg">
+            <li>
+              <a routerLink="/settings" (click)="closeMenus(settingsMenu)">Preferences</a>
+            </li>
+          </ul>
+        </details>
+      </li>
+      <li>
+        <details class="dropdown" #helpMenu>
+          <summary role="button" class="rounded-sm cursor-pointer select-none">
+            Help
+          </summary>
+        
+          <ul class="dropdown-content menu bg-base-200 rounded-box z-[1] w-48 p-2 shadow-lg">
+            <li>
+              <a (click)="about(); closeMenus(helpMenu)">About</a>
+            </li>
+          </ul>
+        </details>
+      </li>
+    </ul>
+  </div>
+</header>

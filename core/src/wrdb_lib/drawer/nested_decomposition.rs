@@ -41,11 +41,17 @@ where
             current_drawer_name,
             relationship_constraints,
         );
-        let drawer_name = relationship::drawer_name_for_relation_target(
+        let mut drawer_name = relationship::drawer_name_for_relation_target(
             &relation_target,
             &key,
             current_drawer_name,
         );
+        if let Some(idx) = current_drawer_name.rfind('/') {
+            let namespace = &current_drawer_name[..idx];
+            if !drawer_name.starts_with(namespace) {
+                drawer_name = format!("{namespace}/{drawer_name}");
+            }
+        }
         let processed_value = decompose_relationship_value(
             &drawer_name,
             value,
@@ -242,5 +248,27 @@ mod tests {
         .expect("decomposition should succeed");
 
         assert_eq!(decomposed["owner"], "@tenant_character:alice");
+    }
+
+    #[test]
+    fn decompose_nested_object_propagates_slash_namespace() {
+        let map = Map::from_iter([("gem".to_string(), json!({"name": "Ruby"}))]);
+        let mut upserted_drawers = Vec::new();
+
+        let decomposed = decompose_nested_objects(
+            map,
+            "db/schema/weapon",
+            &BTreeMap::new(),
+            ExecutionContext::root(),
+            |drawer_name, value, _| {
+                upserted_drawers.push((drawer_name.to_string(), value));
+                Ok(format!("@{drawer_name}:generated"))
+            },
+        )
+        .expect("decomposition should succeed");
+
+        assert_eq!(decomposed["gem"], "@db/schema/gem:generated");
+        assert_eq!(upserted_drawers.len(), 1);
+        assert_eq!(upserted_drawers[0].0, "db/schema/gem");
     }
 }

@@ -83,16 +83,20 @@ pub(crate) fn show_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> Result<Vec<StorageInventory>> {
+    let database_path = catalog_validation::database_path_from_name(root_directory, database_name)?;
+    let mut discovered = discover_drawers(&database_path, schema_name)?;
+
     if !registry.is_empty() {
-        return registry
-            .drawer_entries(database_name, schema_name)
-            .iter()
-            .map(catalog_drawer_inventory)
-            .collect();
+        for entry in registry.drawer_entries(database_name, schema_name) {
+            if !discovered.iter().any(|d| d.name == entry.drawer) {
+                if let Ok(inv) = catalog_drawer_inventory(&entry) {
+                    discovered.push(inv);
+                }
+            }
+        }
     }
 
-    let database_path = catalog_validation::database_path_from_name(root_directory, database_name)?;
-    discover_drawers(&database_path, schema_name)
+    Ok(discovered)
 }
 
 pub(crate) fn storage_inventory(name: String, path: &Path) -> Result<StorageInventory> {

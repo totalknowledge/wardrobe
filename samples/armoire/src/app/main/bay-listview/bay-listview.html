@@ -1,0 +1,42 @@
+<div class="card bg-base-200 border border-base-content/10 shadow-sm flex flex-col overflow-hidden h-full">
+  <div class="card-body p-4 flex flex-col h-full overflow-y-auto">
+    <h2 class="card-title text-base font-bold mb-2 flex items-center justify-between">
+      <span>Bays</span>
+      @if (selectedDatabase) {
+        <button (click)="createBay()" class="btn btn-xs btn-flat gap-1">
+          +Bay
+        </button>
+      }
+    </h2>
+    @if (selectedDatabase) {
+      @if (databaseService.isLoadingBays()) {
+        <div class="flex items-center justify-center flex-1">
+          <span class="loading loading-spinner loading-md text-primary"></span>
+        </div>
+      } @else {
+        <ul class="menu bg-base-100 rounded-box p-2 w-full flex-1 shadow-inner border border-base-content/5 overflow-y-auto">
+          @for (bay of databaseService.bays(); track bay) {
+            <li>
+              <a
+                (click)="selectBay(bay)"
+                [class.bg-base-200]="selectedBay === bay"
+                class="flex items-center gap-2 py-2.5 px-3 rounded-md hover:bg-base-200"
+              >
+                <span class="font-semibold text-xs text-base-content">{{ bay }}</span>
+              </a>
+            </li>
+          } @empty {
+            <div class="flex flex-col items-center justify-center flex-1 text-base-content/40 p-4">
+              <span class="text-xs italic">No bays found</span>
+            </div>
+          }
+        </ul>
+      }
+    } @else {
+      <div class="flex flex-col items-center justify-center flex-1 text-base-content/40 border-2 border-dashed border-base-content/10 rounded-box p-4 bg-base-100 shadow-inner">
+        <span class="font-semibold text-xs">No Wardrobe Selected</span>
+        <span class="text-[10px] opacity-75 mt-0.5 text-center">Select a wardrobe (database) from the tree to view its schemas.</span>
+      </div>
+    }
+  </div>
+</div>

@@ -5,3 +5,5 @@
 /core/wardrobe
 /user_stories
 /project-export
+.agent/
+.github/copilot-instructions.md

@@ -1,0 +1,44 @@
+<div class="card bg-base-200 border border-base-content/10 shadow-sm flex flex-col overflow-hidden h-full">
+  <div class="card-body p-4 flex flex-col h-full overflow-y-auto">
+    <h2 class="card-title text-base font-bold mb-2 flex items-center justify-between">
+      <span>Drawers</span>
+      @if (selectedDatabase) {
+        <button (click)="createDrawer()" class="btn btn-xs btn-warning gap-1">
+          + Drawer
+        </button>
+      }
+    </h2>
+    @if (selectedDatabase) {
+      @if (databaseService.isLoadingDrawers()) {
+        <div class="flex items-center justify-center flex-1">
+          <span class="loading loading-spinner loading-md text-primary"></span>
+        </div>
+      } @else {
+        <ul class="menu bg-base-100 rounded-box p-2 w-full flex-1 shadow-inner border border-base-content/5 overflow-y-auto">
+          @for (drawer of databaseService.drawers(); track drawer.name) {
+            <li>
+              <a
+                (click)="viewDrawer(drawer.name); $event.stopPropagation()"
+                class="flex items-center justify-between py-2.5 px-3 rounded-md hover:bg-base-200 cursor-pointer"
+              >
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold text-xs text-base-content">{{ drawer.name }}</span>
+                </div>
+                <span class="badge badge-xs badge-ghost">{{ drawer.record_count }} records</span>
+              </a>
+            </li>
+          } @empty {
+            <div class="flex flex-col items-center justify-center flex-1 text-base-content/40 p-4">
+              <span class="text-xs italic">No drawers found</span>
+            </div>
+          }
+        </ul>
+      }
+    } @else {
+      <div class="flex flex-col items-center justify-center flex-1 text-base-content/40 border-2 border-dashed border-base-content/10 rounded-box p-4 bg-base-100 shadow-inner">
+        <span class="font-semibold text-xs">No Wardrobe Selected</span>
+        <span class="text-[10px] opacity-75 mt-0.5 text-center">Select a wardrobe (database) or bay to view its drawers.</span>
+      </div>
+    }
+  </div>
+</div>

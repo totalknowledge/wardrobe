@@ -748,7 +748,10 @@ fn run_read_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
     } else {
         operation_filter(&parts[1], None)
     };
-    let options = operation_options(parts, 3, "read options")?;
+    let mut options = operation_options(parts, 3, "read options")?;
+    if options.hydrate.is_none() {
+        options.hydrate = Some(true);
+    }
 
     match client.read(filter, options).map_err(client_error)? {
         ReadResult::Records(mut records) => {

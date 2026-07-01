@@ -1,0 +1,71 @@
+<div class="card bg-base-200 border border-base-content/10 shadow-sm flex flex-col overflow-hidden h-full">
+  <div class="card-body p-4 flex flex-col h-full overflow-y-auto">
+    <h2 class="card-title text-base font-bold mb-2 flex items-center justify-between">
+      <span>Source Locations</span>
+      <button
+        (click)="createWardrobe()"
+        [disabled]="databaseService.databaseStatus() !== 'connected'"
+        class="btn btn-xs btn-flat gap-1"
+      >
+        + Wardrobe
+      </button>
+    </h2>
+    <div class="flex flex-col gap-2 bg-base-100 rounded-box p-2 w-full flex-1 shadow-inner border border-base-content/5 overflow-y-auto">
+      @for (conn of databaseService.savedConnections(); track conn._id) {
+        <div class="border border-base-content/10 rounded-lg overflow-hidden bg-base-200/50">
+          <div
+            (click)="selectSavedConnection(conn.target || conn._id)"
+            [class.bg-primary/10]="databaseService.activeConnectionPath() === (conn.target || conn._id)"
+            [class.border-primary/20]="databaseService.activeConnectionPath() === (conn.target || conn._id)"
+            onmouseenter="this.querySelector('.row-actions').style.opacity = '1'"
+            onmouseleave="this.querySelector('.row-actions').style.opacity = '0'"
+            class="group flex items-center justify-between py-2.5 px-3 cursor-pointer hover:bg-base-300 transition-colors"
+          >
+            <div class="flex items-center gap-2 truncate flex-1 min-w-0">
+              <span class="font-bold text-xs text-base-content truncate" [title]="conn.target || conn._id">
+                {{ databaseService.activeConnectionPath() === (conn.target || conn._id) ? '−' : '+' }} &nbsp;
+                {{ conn.name || conn.alias || conn.target || conn._id }}
+              </span>
+            </div>
+            <div
+              style="opacity: 0; transition: opacity 0.15s;"
+              class="row-actions flex items-center gap-1.5 shrink-0"
+            >
+              @if (databaseService.activeConnectionPath() === (conn.target || conn._id) && databaseService.databaseStatus() === 'connecting') {
+                <span class="loading loading-spinner loading-xs text-primary"></span>
+              }
+
+              <button
+                (click)="openConnectionMenu($event, conn)"
+                class="btn btn-ghost btn-xs text-base-content hover:bg-base-content/10 p-0 min-h-0 h-6 w-6 flex items-center justify-center rounded-full text-base font-bold"
+              >
+                &#8942;
+              </button>
+            </div>
+          </div>
+
+          @if (databaseService.activeConnectionPath() === (conn.target || conn._id)) {
+            <div class="bg-base-100 p-2 border-t border-base-content/5 flex flex-col gap-1">
+              @for (db of databaseService.databases(); track db.name) {
+                <a
+                  (click)="selectDatabase(db.name)"
+                  [class.bg-base-200]="selectedDatabase === db.name"
+                  class="flex items-center justify-between py-1 px-2 rounded-md hover:bg-base-200 cursor-pointer"
+                >
+                  <span class="font-medium text-xs text-base-content truncate">{{ db.name }}</span>
+                  <span class="badge badge-xs badge-neutral shrink-0">{{ db.record_count }} records</span>
+                </a>
+              } @empty {
+                @if (databaseService.databaseStatus() === 'connected') {
+                  <div class="text-[11px] opacity-60 italic py-1 px-2 text-left">No wardrobes found</div>
+                }
+              }
+            </div>
+          }
+        </div>
+      } @empty {
+        <div class="text-xs opacity-60 italic py-4 text-center">No connections saved</div>
+      }
+    </div>
+  </div>
+</div>

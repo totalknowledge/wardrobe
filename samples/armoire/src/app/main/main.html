@@ -1,0 +1,30 @@
+<div
+  class="grid gap-6 h-full p-2"
+  [style.gridTemplateColumns]="hasBays
+    ? 'minmax(320px, 1fr) minmax(320px, 1fr) minmax(0, 1.4fr)'
+    : 'minmax(320px, 1fr) minmax(0, 2fr)'"
+>
+  <app-connection-tree
+    class="min-w-0"
+    [class.col-start-1]="true"
+    [selectedDatabase]="selectedDatabase"
+    (databaseSelected)="selectDatabase($event)"
+    (connectionCleared)="clearSelection()"
+  ></app-connection-tree>
+  @if (hasBays) {
+    <app-bay-listview
+      class="min-w-0 col-start-2"
+      [selectedDatabase]="selectedDatabase"
+      [selectedBay]="selectedBay"
+      (baySelected)="selectBay($event)"
+    ></app-bay-listview>
+  }
+  <app-drawer-listview
+    class="min-w-0"
+    [class.col-start-2]="!hasBays"
+    [class.col-start-3]="hasBays"
+    [selectedDatabase]="selectedDatabase"
+    [selectedBay]="selectedBay"
+    (drawerSelected)="viewDrawer($event)"
+  ></app-drawer-listview>
+</div>
