@@ -511,6 +511,9 @@ impl WardrobeDatabaseService {
     }
 
     fn get_armoire_metadata_path() -> PathBuf {
+        if let Ok(override_path) = std::env::var("ARMOIRE_METADATA_DIR") {
+            return PathBuf::from(override_path);
+        }
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
@@ -763,6 +766,9 @@ mod tests {
     #[test]
     fn metadata_persistence_connection_lifecycle_works() {
         let target = "test_connection_path";
+        let metadata_dir = temp_path("metadata_persistence_store");
+        std::fs::create_dir_all(&metadata_dir).expect("metadata directory should create");
+        std::env::set_var("ARMOIRE_METADATA_DIR", &metadata_dir);
         let _ = WardrobeDatabaseService::remove_connection(target);
 
         let saved = WardrobeDatabaseService::get_saved_connections().unwrap();
@@ -791,5 +797,8 @@ mod tests {
         WardrobeDatabaseService::remove_connection(target).unwrap();
         let saved = WardrobeDatabaseService::get_saved_connections().unwrap();
         assert_eq!(saved.len(), initial_count);
+
+        std::env::remove_var("ARMOIRE_METADATA_DIR");
+        let _ = fs::remove_dir_all(metadata_dir);
     }
 }
