@@ -1,0 +1,11 @@
+[package]
+name = "wardrobe-c"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "wardrobe_c"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+wardrobe-core = { path = "../../core" }

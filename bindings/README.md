@@ -67,3 +67,14 @@ Embedded mode is a good fit for:
 
 Do not create separate public packages for network-only and embedded-only usage unless there is a hard ecosystem constraint.
 If an ecosystem needs separate internal artifacts for bundling, keep those artifacts behind one public package and one public API.
+
+## C ABI Binding
+
+The C ABI binding lives under `bindings/c` and exposes a narrow native surface for C and C-compatible consumers.
+
+The binding should keep the same high-level deployment split as the rest of the binding strategy:
+
+- embedded/local targets through direct filesystem paths
+- network targets through Wardrobe URI connection strings
+
+The C ABI is intended to remain a single public package, with any platform-specific loading or packaging details kept internal to the binding crate.

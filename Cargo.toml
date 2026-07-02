@@ -1,8 +1,10 @@
 [workspace]
 members = [
+    "bindings/c",
     "cli",
     "core",
     "samples/armoire/src-tauri",
+    "samples/c-abi",
     "samples/basic-usage",
     "server",
     "utilities/benchmark",
