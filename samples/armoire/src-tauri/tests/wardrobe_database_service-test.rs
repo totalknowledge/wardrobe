@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use app_lib::services::wardrobe_database_service::WardrobeDatabaseService;
+use armoire_lib::services::wardrobe_database_service::WardrobeDatabaseService;
 
 fn temp_database_path(test_name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()

@@ -48,7 +48,7 @@ fn missing_relative_database_name(test_name: &str) -> String {
 fn wardrobe_create_source_location_command_initializes_database_directory() {
     let path = temp_database_path("create_source_location_command");
     let result = block_on(
-        app_lib::commands::wardrobe::wardrobe_create_source_location(
+        armoire_lib::commands::wardrobe::wardrobe_create_source_location(
             path.to_string_lossy().into_owned(),
         ),
     )
@@ -65,13 +65,13 @@ fn wardrobe_create_source_location_command_initializes_database_directory() {
 fn wardrobe_test_database_access_command_accepts_initialized_directory() {
     let path = temp_database_path("test_database_access_command");
     let source_location = block_on(
-        app_lib::commands::wardrobe::wardrobe_create_source_location(
+        armoire_lib::commands::wardrobe::wardrobe_create_source_location(
             path.to_string_lossy().into_owned(),
         ),
     )
     .expect("source location should initialize");
 
-    block_on(app_lib::commands::wardrobe::wardrobe_test_database_access(
+    block_on(armoire_lib::commands::wardrobe::wardrobe_test_database_access(
         source_location.clone(),
     ))
     .expect("test connection command should succeed");
@@ -83,7 +83,7 @@ fn wardrobe_test_database_access_command_accepts_initialized_directory() {
 fn wardrobe_test_database_access_command_reports_missing_directory() {
     let path = missing_relative_database_name("database_access_command");
 
-    let error = block_on(app_lib::commands::wardrobe::wardrobe_test_database_access(
+    let error = block_on(armoire_lib::commands::wardrobe::wardrobe_test_database_access(
         path,
     ))
     .expect_err("missing directory should fail");
