@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "description": "Pure JavaScript/TypeScript network client for Wardrobe database.",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "keywords": [
+    "wardrobe",
+    "database",
+    "client",
+    "network"
+  ],
+  "author": "Wardrobe Maintainers"
+}

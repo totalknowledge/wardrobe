@@ -1,0 +1,31 @@
+[package]
+name = "wardrobe-js-ts"
+version = "0.1.0"
+edition = "2024"
+authors = ["Wardrobe Maintainers"]
+description = "JavaScript and TypeScript package validation crate for Wardrobe database bindings."
+repository = "https://github.com/totalknowledge/wardrobe"
+readme = "README.md"
+license-file = "LICENSE"
+keywords = ["database", "bindings", "typescript", "javascript", "wardrobe"]
+categories = ["api-bindings", "database-implementations"]
+include = [
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    "index.d.ts",
+    "index.js",
+    "package.json",
+    "src/**/*.rs",
+]
+
+[lib]
+name = "wardrobe_js_ts"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2.16", default-features = false, features = ["napi4", "compat-mode"] }
+napi-derive = "2.16"
+wardrobe-core = { path = "../../core" }
+serde_json = "1.0"

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "bindings/c",
+    "bindings/js-ts",
     "cli",
     "core",
     "samples/armoire/src-tauri",

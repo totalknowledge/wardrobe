@@ -5,6 +5,7 @@
 /core/wardrobe
 /user_stories
 /project-export
+node_modules/
 AGENTS.md
 .agent/
 .github/copilot-instructions.md

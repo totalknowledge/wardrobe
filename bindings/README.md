@@ -78,3 +78,19 @@ The binding should keep the same high-level deployment split as the rest of the 
 - network targets through Wardrobe URI connection strings
 
 The C ABI is intended to remain a single public package, with any platform-specific loading or packaging details kept internal to the binding crate.
+
+## JavaScript/TypeScript Binding
+
+The JavaScript/TypeScript publish-readiness package lives under `bindings/js-ts`.
+
+This package is prepared for validation, not publication. Use `npm publish --dry-run` from that directory to inspect the package contents without uploading to npm.
+
+The package keeps the same single public npm package strategy:
+
+- package name: `@wardrobe/database`
+- Rust validation crate: `wardrobe-js-ts`
+- TypeScript declarations: `index.d.ts`
+- runtime entry point: `index.js`
+- internal driver modules: `bindings/js-ts/client` and `bindings/js-ts/embedded`
+
+Do not run `npm publish`, add npm credentials, or add registry tokens unless a release story explicitly approves publication.

@@ -13,7 +13,9 @@ fn commands_module_exposes_wardrobe_command_futures() {
             "target/armoire-command-module-test",
         )),
     );
-    assert_future(armoire_lib::commands::wardrobe::wardrobe_test_database_access(
-        String::from("target/armoire-command-module-test"),
-    ));
+    assert_future(
+        armoire_lib::commands::wardrobe::wardrobe_test_database_access(String::from(
+            "target/armoire-command-module-test",
+        )),
+    );
 }

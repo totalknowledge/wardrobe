@@ -3,7 +3,7 @@ use std::process::Command;
 
 fn main() {
     let index_html = Path::new("../dist/armoire/browser/index.html");
-    
+
     if !index_html.exists() {
         let npm_command = if cfg!(windows) { "npm.cmd" } else { "npm" };
 

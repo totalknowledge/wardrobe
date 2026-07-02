@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "description": "Native embedded database engine bindings for Wardrobe.",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "keywords": [
+    "wardrobe",
+    "database",
+    "embedded",
+    "native"
+  ],
+  "author": "Wardrobe Maintainers"
+}

@@ -71,9 +71,9 @@ fn wardrobe_test_database_access_command_accepts_initialized_directory() {
     )
     .expect("source location should initialize");
 
-    block_on(armoire_lib::commands::wardrobe::wardrobe_test_database_access(
-        source_location.clone(),
-    ))
+    block_on(
+        armoire_lib::commands::wardrobe::wardrobe_test_database_access(source_location.clone()),
+    )
     .expect("test connection command should succeed");
 
     let _ = std::fs::remove_dir_all(source_location);
@@ -83,10 +83,8 @@ fn wardrobe_test_database_access_command_accepts_initialized_directory() {
 fn wardrobe_test_database_access_command_reports_missing_directory() {
     let path = missing_relative_database_name("database_access_command");
 
-    let error = block_on(armoire_lib::commands::wardrobe::wardrobe_test_database_access(
-        path,
-    ))
-    .expect_err("missing directory should fail");
+    let error = block_on(armoire_lib::commands::wardrobe::wardrobe_test_database_access(path))
+        .expect_err("missing directory should fail");
 
     assert!(error.contains("was not found"));
 }
