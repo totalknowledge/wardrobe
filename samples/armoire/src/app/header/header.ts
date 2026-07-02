@@ -23,6 +23,29 @@ export class HeaderComponent implements AfterViewInit {
     menu.removeAttribute('open');
   }
 
+  public openConnectionModalAndClose(menu: HTMLDetailsElement, type: 'location' | 'connection'): void {
+    this.openConnectionModal(type);
+    this.closeMenus(menu);
+  }
+
+  public openCreateBayDialogAndClose(menu: HTMLDetailsElement): void {
+    this.openCreateBayDialog();
+    this.closeMenus(menu);
+  }
+
+  public disconnectAndClose(menu: HTMLDetailsElement): void {
+    if (!this.canDisconnect()) {
+      return;
+    }
+    this.disconnect();
+    this.closeMenus(menu);
+  }
+
+  public aboutAndClose(menu: HTMLDetailsElement): void {
+    this.about();
+    this.closeMenus(menu);
+  }
+
   public openConnectionModal(type: 'location' | 'connection'): void {
     this.dialogService.openConnectionModal(type);
   }
