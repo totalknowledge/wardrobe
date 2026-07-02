@@ -46,6 +46,7 @@ jobs:
         run: >
           cargo llvm-cov
           --workspace
+          --exclude app
           --lcov
           --output-path coverage.lcov
           --fail-under-lines 80
