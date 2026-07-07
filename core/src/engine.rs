@@ -123,9 +123,6 @@ impl OperationSelection {
         if query == Value::Null {
             return Ok(());
         }
-        if matches!(&query, Value::Object(fields) if fields.is_empty()) {
-            return Ok(());
-        }
         if self.query.is_some() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -1386,6 +1383,9 @@ mod tests {
             vec!["@tool:hammer".to_string()]
         );
 
+        let empty_query =
+            OperationSelection::from_filter(OperationFilter::Query(json!({}))).unwrap();
+        assert_eq!(empty_query.query, Some(json!({})));
         let empty_query =
             OperationSelection::from_filter(OperationFilter::query(json!({}))).unwrap();
         assert!(empty_query.query.is_none());

@@ -477,6 +477,22 @@ fn test_embedded_write_commands_execution_paths() {
     let delete_args = vec!["delete".to_string(), "@gem:lnk_topaz".to_string()];
     assert!(run_command(&client, &delete_args, false).is_ok());
 
+    for payload in [
+        "{\"_id\":\"@gem:lnk_delete_all_one\",\"power\":1}",
+        "{\"_id\":\"@gem:lnk_delete_all_two\",\"power\":2}",
+    ] {
+        let upsert_args = vec!["upsert".to_string(), "gem".to_string(), payload.to_string()];
+        assert!(run_command(&client, &upsert_args, false).is_ok());
+    }
+    let delete_all_args = vec!["delete".to_string(), "gem".to_string(), "{}".to_string()];
+    assert!(run_command(&client, &delete_all_args, false).is_ok());
+    assert_eq!(
+        client
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+            .unwrap(),
+        0
+    );
+
     let _ = fs::remove_dir_all(storage_directory);
 }
 

@@ -4106,6 +4106,41 @@ fn us_112_delete_by_filter_runs_as_single_transaction_and_updates_metadata() {
 }
 
 #[test]
+fn us_112_delete_by_empty_filter_deletes_all_records_in_drawer() {
+    let database = TempDatabase::new("us_112_delete_empty_filter");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    upsert_batch(
+        &engine,
+        "gem",
+        vec![
+            json!({"_id": "ruby", "element": "Fire"}),
+            json!({"_id": "sapphire", "element": "Water"}),
+        ],
+    )
+    .expect("records should seed");
+
+    let deleted = engine
+        .delete(
+            OperationFilter::many(vec![
+                OperationFilter::drawer("gem"),
+                OperationFilter::Query(json!({})),
+            ]),
+            OperationOptions::new().multi(true),
+        )
+        .expect("delete by empty filter should succeed");
+
+    assert_eq!(deleted, 2);
+    assert_eq!(
+        engine
+            .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
+            .expect("remaining count should succeed"),
+        0
+    );
+}
+
+#[test]
 fn us_112_delete_by_filter_uses_materialized_index_and_keeps_it_current() {
     let database = TempDatabase::new("us_112_indexed_delete_by_filter");
     let database_directory = database.path.to_string_lossy().into_owned();

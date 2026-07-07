@@ -487,8 +487,11 @@ fn create_inventory(
     }
 }
 
-fn drawer_query_filter(drawer_name: impl Into<String>, query: Value) -> OperationFilter {
-    OperationFilter::query_in(drawer_name, query)
+fn drawer_delete_filter(drawer_name: impl Into<String>, query: Value) -> OperationFilter {
+    OperationFilter::many(vec![
+        OperationFilter::drawer(drawer_name.into()),
+        OperationFilter::Query(query),
+    ])
 }
 
 fn operation_filter(path: &str, filter: Option<Value>) -> OperationFilter {
@@ -918,7 +921,7 @@ fn delete_by_filter(
     filter: Value,
     options: OperationOptions,
 ) -> io::Result<(usize, usize)> {
-    let operation_filter = drawer_query_filter(drawer_name, filter);
+    let operation_filter = drawer_delete_filter(drawer_name, filter);
     let matched = client
         .count(operation_filter.clone(), None::<OperationOptions>)
         .map_err(client_error)?;
@@ -1895,6 +1898,13 @@ mod tests {
                 OperationFilter::Query(json!({"power": 42})),
             ])
         );
+        assert_eq!(
+            drawer_delete_filter("armory/public/gem", json!({})),
+            OperationFilter::Many(vec![
+                OperationFilter::Drawer("armory/public/gem".to_string()),
+                OperationFilter::Query(json!({})),
+            ])
+        );
 
         let parts = vec![
             "read".to_string(),
@@ -1926,6 +1936,10 @@ mod tests {
         }
         match parse_delete_target(r#"{"power":42}"#).expect("filter target") {
             DeleteTarget::Filter(filter) => assert_eq!(filter, json!({"power": 42})),
+            DeleteTarget::Id(_) => panic!("expected filter target"),
+        }
+        match parse_delete_target(r#"{}"#).expect("empty filter target") {
+            DeleteTarget::Filter(filter) => assert_eq!(filter, json!({})),
             DeleteTarget::Id(_) => panic!("expected filter target"),
         }
         assert!(parse_delete_target("[1,2]").is_err());
