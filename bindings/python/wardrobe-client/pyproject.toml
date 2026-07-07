@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wardrobe-client"
+version = "0.1.0"
+description = "Pure Python client bindings for server-backed Wardrobe connections."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "All rights reserved." }
+authors = [{ name = "Wardrobe Maintainers" }]
+keywords = ["wardrobe", "database", "client", "bindings"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wardrobe_client"]

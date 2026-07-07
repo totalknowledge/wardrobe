@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "wardrobe-embedded"
+version = "0.1.0"
+description = "Native embedded Python bindings for Wardrobe."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "All rights reserved." }
+authors = [{ name = "Wardrobe Maintainers" }]
+keywords = ["wardrobe", "database", "embedded", "bindings"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+]
+
+[tool.maturin]
+module-name = "wardrobe_embedded._native"
+python-source = "src"
+features = ["pyo3/extension-module"]

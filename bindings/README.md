@@ -94,3 +94,14 @@ The package keeps the same single public npm package strategy:
 - internal driver modules: `bindings/js-ts/client` and `bindings/js-ts/embedded`
 
 Do not run `npm publish`, add npm credentials, or add registry tokens unless a release story explicitly approves publication.
+
+## Python Bindings
+
+The Python binding packages live under `bindings/python`.
+
+The current Python direction intentionally uses two package names:
+
+- `wardrobe-client` for pure Python TCP and Unix socket client access
+- `wardrobe-embedded` for native embedded local storage access through a dedicated PyO3 extension
+
+These packages are bindings only. Do not publish to PyPI, add credentials, or create release automation until a release story explicitly approves publication.
