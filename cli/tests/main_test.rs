@@ -77,8 +77,14 @@ fn binary_missing_connection_string_returns_invalid_input_error() {
 
 #[test]
 fn binary_unknown_command_returns_error_status() {
-    let output = run_cli(&["non-existent-command-target"]);
+    let tmp = temp_storage_directory("binary_unknown_command");
+    let _ = fs::create_dir_all(&tmp);
+    let target = tmp.to_string_lossy().to_string();
+
+    let output = run_cli(&[&target, "non-existent-command"]);
     assert!(!output.status.success());
+
+    let _ = fs::remove_dir_all(tmp);
 }
 
 #[test]

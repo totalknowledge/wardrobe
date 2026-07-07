@@ -607,6 +607,14 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static SERVICE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn service_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        SERVICE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     struct FakeStatusSource {
         databases: StatusResult,
         schemas: StatusResult,
@@ -641,6 +649,7 @@ mod tests {
 
     #[test]
     fn path_resolution_and_storage_detection_cover_edge_cases() {
+        let _guard = service_test_lock();
         let root = temp_path("storage_detection");
         let nested = root.join("a").join("b").join("c").join("d");
         fs::create_dir_all(&nested).expect("nested directory should create");
@@ -679,6 +688,7 @@ mod tests {
 
     #[test]
     fn status_helpers_accept_expected_shapes_and_reject_mismatches() {
+        let _guard = service_test_lock();
         let inventory = StorageInventory {
             name: "wardrobe".to_string(),
             record_count: 1,
@@ -726,6 +736,7 @@ mod tests {
 
     #[test]
     fn wardrobe_database_service_lifecycle_works() {
+        let _guard = service_test_lock();
         let root = temp_path("service_lifecycle");
 
         assert!(WardrobeDatabaseService::show_wardrobes().is_err());
@@ -765,6 +776,7 @@ mod tests {
 
     #[test]
     fn metadata_persistence_connection_lifecycle_works() {
+        let _guard = service_test_lock();
         let target = "test_connection_path";
         let metadata_dir = temp_path("metadata_persistence_store");
         std::fs::create_dir_all(&metadata_dir).expect("metadata directory should create");

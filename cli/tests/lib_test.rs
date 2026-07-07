@@ -161,6 +161,26 @@ fn test_cli_config_clean_parsing() {
 }
 
 #[test]
+fn test_cli_config_accepts_positional_connection_target() {
+    let args = vec![
+        "./my_data".to_string(),
+        "read".to_string(),
+        "database/drawer".to_string(),
+    ];
+    let config = CliConfig::from_args(args).unwrap();
+    assert_eq!(config.connection, "./my_data");
+    assert_eq!(config.command_parts, vec!["read", "database/drawer"]);
+}
+
+#[test]
+fn test_cli_config_preserves_legacy_default_connection_commands() {
+    let args = vec!["read".to_string(), "database/drawer".to_string()];
+    let config = CliConfig::from_args(args).unwrap();
+    assert_eq!(config.connection, "./wardrobe");
+    assert_eq!(config.command_parts, vec!["read", "database/drawer"]);
+}
+
+#[test]
 fn test_cli_config_alternate_flags() {
     let args = vec![
         "--data-dir".to_string(),

@@ -27,6 +27,8 @@ impl CliConfig {
         I: IntoIterator<Item = String>,
     {
         let mut connection = "./wardrobe".to_string();
+        let mut explicit_connection = false;
+        let mut positional_connection = false;
         let mut pretty = false;
         let mut command_parts = Vec::new();
         let mut logging_level = None;
@@ -45,6 +47,7 @@ impl CliConfig {
                         )
                     })?;
                     connection = val;
+                    explicit_connection = true;
                 }
                 "--pretty" => {
                     pretty = true;
@@ -86,7 +89,18 @@ impl CliConfig {
                     print_version();
                     std::process::exit(0);
                 }
-                _ => command_parts.push(arg),
+                _ => {
+                    if !explicit_connection
+                        && !positional_connection
+                        && command_parts.is_empty()
+                        && !is_cli_command(&arg)
+                    {
+                        connection = arg;
+                        positional_connection = true;
+                    } else {
+                        command_parts.push(arg);
+                    }
+                }
             }
         }
 
@@ -102,6 +116,26 @@ impl CliConfig {
             )?,
         })
     }
+}
+
+fn is_cli_command(value: &str) -> bool {
+    matches!(
+        value,
+        "status"
+            | "inspect"
+            | "read"
+            | "count"
+            | "upsert"
+            | "create"
+            | "alter"
+            | "drop"
+            | "delete"
+            | "grant"
+            | "revoke"
+            | "compact"
+            | "backup"
+            | "restore"
+    )
 }
 
 const HELP_TEXT: &str = r#"wardrobe:
