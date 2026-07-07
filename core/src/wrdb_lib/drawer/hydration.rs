@@ -95,6 +95,10 @@ where
                         .map(|pointer| (field_name.clone(), pointer.to_string()))
                 })
                 .collect::<Vec<_>>();
+            let pointer_update_fields = pointer_updates
+                .iter()
+                .map(|(field_name, _)| field_name.clone())
+                .collect::<HashSet<_>>();
 
             for (field_name, pointer) in pointer_updates {
                 if let Some(resolved_value) = resolve_pointer(
@@ -111,7 +115,7 @@ where
             }
 
             for (field_name, field_value) in map.iter_mut() {
-                if field_name != "_id" {
+                if field_name != "_id" && !pointer_update_fields.contains(field_name) {
                     hydrate_value_with_cache(
                         field_value,
                         include_ids,

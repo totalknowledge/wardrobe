@@ -165,8 +165,9 @@ impl WardrobeEngine {
                 }
                 None => Uuid::new_v4().simple().to_string(),
             };
-            pointers.push(pointer::format_pointer(&physical_drawer_name, &record_key));
-            prepared_records.push((record_key, map));
+            let record_pointer = pointer::format_pointer(&physical_drawer_name, &record_key);
+            pointers.push(record_pointer.clone());
+            prepared_records.push((record_key, map, record_pointer));
         }
 
         let drawer_handle = Self::load_drawer_handle(
@@ -178,7 +179,7 @@ impl WardrobeEngine {
         let mut full_records = Vec::with_capacity(prepared_records.len());
         let mut reverse_records = Vec::with_capacity(prepared_records.len());
 
-        for (record_key, map) in prepared_records {
+        for (record_key, map, record_pointer) in prepared_records {
             let mut relationship_constraints =
                 Self::read_lock(&drawer_handle)?.relationship_constraints();
             nested_decomposition::register_inline_relationship_aliases(
@@ -193,14 +194,16 @@ impl WardrobeEngine {
             let processed_map = nested_decomposition::decompose_nested_objects(
                 map,
                 &physical_drawer_name,
+                &record_pointer,
                 &relationship_constraints,
                 context,
-                |drawer_name, value, child_context| {
-                    Self::upsert_in_database_unlogged(
+                |drawer_name, value, child_context, hidden_field| {
+                    Self::upsert_child_in_database_unlogged(
                         database_core,
                         drawer_name,
                         value,
                         child_context,
+                        hidden_field,
                     )
                 },
             )?;
@@ -236,6 +239,48 @@ impl WardrobeEngine {
             }
             Err(validation_error) => Err(Error::new(ErrorKind::InvalidData, validation_error)),
         }
+    }
+
+    fn upsert_child_in_database_unlogged(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        payload: Value,
+        context: ExecutionContext<'_>,
+        hidden_field: Option<&str>,
+    ) -> Result<String> {
+        let Some(hidden_field) = hidden_field else {
+            return Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context);
+        };
+
+        let physical_drawer_name =
+            routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
+        let drawer_handle =
+            Self::load_drawer_handle(database_core, &physical_drawer_name, "_id", Vec::new())?;
+        Self::write_lock(&drawer_handle)?.mark_hidden_field(hidden_field)?;
+
+        let mut payload = payload;
+        if let Value::Object(map) = &payload {
+            if map.len() == 2 && map.contains_key(hidden_field) {
+                if let Some(record_id) = map.get("_id").and_then(Value::as_str) {
+                    let record_key = pointer::normalize_primary_key(
+                        &physical_drawer_name,
+                        drawer_name,
+                        record_id,
+                    );
+                    let existing_record = Self::write_lock(&drawer_handle)?
+                        .find_by_primary_key_with_migration(&record_key)?;
+
+                    if let Some(Value::Object(mut existing_map)) = existing_record {
+                        if let Some(parent_pointer) = map.get(hidden_field) {
+                            existing_map.insert(hidden_field.to_string(), parent_pointer.clone());
+                            payload = Value::Object(existing_map);
+                        }
+                    }
+                }
+            }
+        }
+
+        Self::upsert_in_database_unlogged(database_core, drawer_name, payload, context)
     }
 
     fn upsert_in_database_unlogged(
@@ -277,14 +322,16 @@ impl WardrobeEngine {
             let processed_map = nested_decomposition::decompose_nested_objects(
                 map,
                 &physical_drawer_name,
+                &record_pointer,
                 &relationship_constraints,
                 context,
-                |drawer_name, value, child_context| {
-                    Self::upsert_in_database_unlogged(
+                |drawer_name, value, child_context, hidden_field| {
+                    Self::upsert_child_in_database_unlogged(
                         database_core,
                         drawer_name,
                         value,
                         child_context,
+                        hidden_field,
                     )
                 },
             )?;
@@ -361,6 +408,7 @@ impl WardrobeEngine {
             context,
             &mut hydration_cache,
         )?;
+        Self::remove_hidden_fields_from_records(database_core, &physical_drawer_name, &mut records)?;
 
         Ok(records)
     }
@@ -413,6 +461,7 @@ impl WardrobeEngine {
             context,
             &mut hydration_cache,
         )?;
+        Self::remove_hidden_fields_from_records(database_core, &physical_drawer_name, &mut records)?;
 
         Ok(records)
     }
@@ -548,6 +597,7 @@ impl WardrobeEngine {
                     context,
                     &mut hydration_cache,
                 )?;
+                Self::remove_hidden_fields_from_value(database_core, &drawer_name, &mut record)?;
                 if let Value::Object(ref mut map) = record {
                     map.remove("_id");
                 }
@@ -1055,7 +1105,11 @@ impl WardrobeEngine {
             return Ok(None);
         };
 
-        Self::write_lock(&drawer)?.find_by_primary_key_with_migration(record_key)
+        let mut record = Self::write_lock(&drawer)?.find_by_primary_key_with_migration(record_key)?;
+        if let Some(record) = record.as_mut() {
+            Self::remove_hidden_fields_from_value(database_core, drawer_name, record)?;
+        }
+        Ok(record)
     }
 
     fn attach_virtual_relationships(
@@ -1155,12 +1209,61 @@ impl WardrobeEngine {
                 Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
             },
         )?;
+        Self::remove_hidden_fields_from_records(
+            database_core,
+            &physical_target_drawer,
+            &mut child_records,
+        )?;
 
         hydration_cache
             .virtual_children
             .insert(cache_key, child_records.clone());
 
         Ok(child_records)
+    }
+
+    fn remove_hidden_fields_from_records(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        records: &mut [Value],
+    ) -> Result<()> {
+        let hidden_fields = Self::hidden_output_fields_for_drawer(database_core, drawer_name)?;
+        if hidden_fields.is_empty() {
+            return Ok(());
+        }
+
+        for record in records {
+            Drawer::remove_hidden_fields_from_value(record, &hidden_fields);
+        }
+
+        Ok(())
+    }
+
+    fn remove_hidden_fields_from_value(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+        record: &mut Value,
+    ) -> Result<()> {
+        let hidden_fields = Self::hidden_output_fields_for_drawer(database_core, drawer_name)?;
+        Drawer::remove_hidden_fields_from_value(record, &hidden_fields);
+        Ok(())
+    }
+
+    fn hidden_output_fields_for_drawer(
+        database_core: &RwLock<Database>,
+        drawer_name: &str,
+    ) -> Result<Vec<String>> {
+        let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            database_core,
+            drawer_name,
+            "_id",
+            Vec::new(),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        Ok(Self::read_lock(&drawer)?.hidden_output_fields())
     }
 }
 

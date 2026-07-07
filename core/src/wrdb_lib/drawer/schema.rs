@@ -321,6 +321,53 @@ impl Drawer {
             .any(|field| field == field_name)
     }
 
+    pub(crate) fn mark_hidden_field(&mut self, field_name: &str) -> std::io::Result<()> {
+        if self.hidden_fields.insert(field_name.to_string()) {
+            self.persist_metadata()?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn hidden_output_fields(&self) -> Vec<String> {
+        let mut fields = self
+            .hidden_fields
+            .iter()
+            .filter(|field_name| !self.schema_declares_field(field_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        fields.sort();
+        fields
+    }
+
+    pub(crate) fn remove_hidden_fields_from_value(value: &mut Value, hidden_fields: &[String]) {
+        match value {
+            Value::Object(map) => {
+                for field_name in hidden_fields {
+                    map.remove(field_name);
+                }
+                for field_value in map.values_mut() {
+                    Self::remove_hidden_fields_from_value(field_value, hidden_fields);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    Self::remove_hidden_fields_from_value(value, hidden_fields);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn schema_declares_field(&self, field_name: &str) -> bool {
+        self.schema
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.contains_key(field_name))
+    }
+
     pub(super) fn schema_extension_fields(schema: Option<&Value>, bucket: &str) -> Vec<String> {
         schema
             .and_then(Value::as_object)

@@ -329,6 +329,10 @@ impl Drawer {
             .as_ref()
             .map(|metadata| metadata.field_name_map.clone())
             .unwrap_or_default();
+        let hidden_fields = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.hidden_fields.iter().cloned().collect())
+            .unwrap_or_default();
         let field_name_map_was_empty = field_name_map.is_empty();
         Self::ensure_reserved_id_field_mapping(&mut field_name_map);
         if field_name_map_was_empty {
@@ -522,6 +526,7 @@ impl Drawer {
             metadata_dirty: false,
             metadata_format_version,
             field_name_map,
+            hidden_fields,
             #[cfg(test)]
             data_file_path,
             index_file_path,
@@ -563,6 +568,9 @@ impl Drawer {
             self.test_metrics.persist_metadata_calls += 1;
         }
 
+        let mut hidden_fields = self.hidden_fields.iter().cloned().collect::<Vec<_>>();
+        hidden_fields.sort();
+
         let metadata = DrawerMetadata::from_configuration(
             &self.primary_key,
             self.record_count,
@@ -574,6 +582,7 @@ impl Drawer {
             self.secondary_index_generation,
             self.materialized_secondary_indexes.clone(),
             self.field_name_map.clone(),
+            hidden_fields,
         );
         let serialized = serde_json::to_vec_pretty(&metadata)?;
         self.metadata_writer.rewrite_all(&serialized)?;

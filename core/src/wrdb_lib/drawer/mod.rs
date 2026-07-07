@@ -66,6 +66,8 @@ pub(crate) struct DrawerMetadata {
     pub(crate) materialized_secondary_indexes: BTreeMap<String, u64>,
     #[serde(default)]
     pub(crate) field_name_map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) hidden_fields: Vec<String>,
 }
 
 impl DrawerMetadata {
@@ -96,6 +98,7 @@ impl DrawerMetadata {
         secondary_index_generation: u64,
         materialized_secondary_indexes: BTreeMap<String, u64>,
         field_name_map: BTreeMap<String, String>,
+        hidden_fields: Vec<String>,
     ) -> Self {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
@@ -109,6 +112,7 @@ impl DrawerMetadata {
             secondary_index_generation,
             materialized_secondary_indexes,
             field_name_map,
+            hidden_fields,
         }
     }
 
@@ -224,6 +228,7 @@ pub struct Drawer {
     metadata_dirty: bool,
     metadata_format_version: u8,
     field_name_map: BTreeMap<String, String>,
+    hidden_fields: HashSet<String>,
     #[cfg(test)]
     data_file_path: PathBuf,
     index_file_path: PathBuf,
@@ -434,6 +439,7 @@ mod tests {
                 ),
                 ("a".to_string(), "element".to_string()),
             ]),
+            vec!["owner".to_string()],
         );
         metadata.persist(&metadata_path).expect("metadata persists");
         let loaded = DrawerMetadata::load(&metadata_path)
@@ -443,6 +449,7 @@ mod tests {
         assert_eq!(loaded.record_count, 2);
         assert_eq!(loaded.materialized_secondary_indexes["element"], 3);
         assert_eq!(loaded.field_name_map["a"], "element");
+        assert_eq!(loaded.hidden_fields, vec!["owner"]);
 
         let block = DataBlockIndexEntry::live(b"payload", 16);
         let index_entry =

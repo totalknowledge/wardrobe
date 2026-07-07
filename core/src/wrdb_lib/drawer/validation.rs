@@ -229,7 +229,14 @@ impl Drawer {
             return Ok(());
         };
 
-        Self::validate_value_against_schema(record, schema, "$")
+        let hidden_fields = self.hidden_output_fields();
+        if hidden_fields.is_empty() {
+            return Self::validate_value_against_schema(record, schema, "$");
+        }
+
+        let mut client_record = record.clone();
+        Self::remove_hidden_fields_from_value(&mut client_record, &hidden_fields);
+        Self::validate_value_against_schema(&client_record, schema, "$")
     }
 
     pub(super) fn validate_value_against_schema(

@@ -26,12 +26,13 @@ where
 pub(crate) fn decompose_nested_objects<F>(
     map: Map<String, Value>,
     current_drawer_name: &str,
+    parent_pointer: &str,
     relationship_constraints: &BTreeMap<String, Value>,
     context: ExecutionContext<'_>,
     mut upsert_child: F,
 ) -> Result<Map<String, Value>>
 where
-    F: FnMut(&str, Value, ExecutionContext<'_>) -> Result<String>,
+    F: FnMut(&str, Value, ExecutionContext<'_>, Option<&str>) -> Result<String>,
 {
     let mut continuous_map = Map::new();
 
@@ -52,10 +53,15 @@ where
                 drawer_name = format!("{namespace}/{drawer_name}");
             }
         }
+        let implicit_parent_field = relationship_constraints
+            .get(&key)
+            .and_then(relationship::implicit_parent_field_for_rule);
         let processed_value = decompose_relationship_value(
             &drawer_name,
             value,
             relation_target,
+            parent_pointer,
+            implicit_parent_field,
             context,
             &mut upsert_child,
         )?;
@@ -69,23 +75,51 @@ fn decompose_relationship_value<F>(
     drawer_name: &str,
     value: Value,
     relation_target: RelationTarget,
+    parent_pointer: &str,
+    implicit_parent_field: Option<&str>,
     context: ExecutionContext<'_>,
     upsert_child: &mut F,
 ) -> Result<Value>
 where
-    F: FnMut(&str, Value, ExecutionContext<'_>) -> Result<String>,
+    F: FnMut(&str, Value, ExecutionContext<'_>, Option<&str>) -> Result<String>,
 {
     match value {
-        Value::Object(child_map) => {
+        Value::Object(mut child_map) => {
             if let Some(reference_id) = id_only_reference(&child_map) {
                 let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
                     drawer_name,
                     reference_id,
                     context.drawer_namespace,
                 );
+                if let Some(mapped_by) = implicit_parent_field {
+                    let mut child_link_map = Map::new();
+                    child_link_map.insert("_id".to_string(), Value::String(normalized_pointer));
+                    child_link_map.insert(
+                        mapped_by.to_string(),
+                        Value::String(parent_pointer.to_string()),
+                    );
+                    let child_pointer = upsert_child(
+                        drawer_name,
+                        Value::Object(child_link_map),
+                        context,
+                        implicit_parent_field,
+                    )?;
+                    return Ok(Value::String(child_pointer));
+                }
                 Ok(Value::String(normalized_pointer))
             } else {
-                let child_pointer = upsert_child(drawer_name, Value::Object(child_map), context)?;
+                if let Some(mapped_by) = implicit_parent_field {
+                    child_map.insert(
+                        mapped_by.to_string(),
+                        Value::String(parent_pointer.to_string()),
+                    );
+                }
+                let child_pointer = upsert_child(
+                    drawer_name,
+                    Value::Object(child_map),
+                    context,
+                    implicit_parent_field,
+                )?;
                 Ok(Value::String(child_pointer))
             }
         }
@@ -96,6 +130,8 @@ where
                     drawer_name,
                     item,
                     relation_target.clone(),
+                    parent_pointer,
+                    implicit_parent_field,
                     context,
                     upsert_child,
                 )
@@ -166,9 +202,10 @@ mod tests {
         let decomposed = decompose_nested_objects(
             map,
             "weapon",
+            "@weapon:blade",
             &BTreeMap::new(),
             ExecutionContext::root(),
-            |_, _, _| {
+            |_, _, _, _| {
                 upsert_count += 1;
                 Ok("@gem:new".to_string())
             },
@@ -187,9 +224,10 @@ mod tests {
         let decomposed = decompose_nested_objects(
             map,
             "weapon",
+            "@weapon:blade",
             &BTreeMap::new(),
             ExecutionContext::root(),
-            |drawer_name, value, _| {
+            |drawer_name, value, _, _| {
                 upserted_drawers.push((drawer_name.to_string(), value));
                 Ok(format!("@{drawer_name}:generated"))
             },
@@ -216,9 +254,10 @@ mod tests {
         let decomposed = decompose_nested_objects(
             map,
             "weapon",
+            "@weapon:blade",
             &BTreeMap::new(),
             ExecutionContext::root(),
-            |drawer_name, _, _| Ok(format!("@{drawer_name}:generated")),
+            |drawer_name, _, _, _| Ok(format!("@{drawer_name}:generated")),
         )
         .expect("decomposition should succeed");
 
@@ -239,11 +278,12 @@ mod tests {
         let decomposed = decompose_nested_objects(
             map,
             "tenant_weapon",
+            "@tenant_weapon:blade",
             &constraints,
             ExecutionContext {
                 drawer_namespace: Some("tenant"),
             },
-            |_, _, _| Err(io::Error::other("unexpected upsert")),
+            |_, _, _, _| Err(io::Error::other("unexpected upsert")),
         )
         .expect("decomposition should succeed");
 
@@ -258,9 +298,10 @@ mod tests {
         let decomposed = decompose_nested_objects(
             map,
             "db/schema/weapon",
+            "@db/schema/weapon:blade",
             &BTreeMap::new(),
             ExecutionContext::root(),
-            |drawer_name, value, _| {
+            |drawer_name, value, _, _| {
                 upserted_drawers.push((drawer_name.to_string(), value));
                 Ok(format!("@{drawer_name}:generated"))
             },

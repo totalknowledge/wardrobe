@@ -124,6 +124,14 @@ pub(crate) fn relationship_mapped_by(rule: &Value) -> Option<&str> {
     rule.get("mapped_by").and_then(|value| value.as_str())
 }
 
+pub(crate) fn implicit_parent_field_for_rule(rule: &Value) -> Option<&str> {
+    if relationship_constraint_type(rule) == Some("1:M") {
+        relationship_mapped_by(rule)
+    } else {
+        None
+    }
+}
+
 fn relationship_drawer_name(field_name: &str) -> String {
     if let Some(stem) = field_name.strip_suffix("ies") {
         return format!("{}y", stem);

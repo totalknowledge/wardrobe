@@ -3502,6 +3502,99 @@ fn us_038_one_to_many_virtual_relationships_populate_child_arrays_on_read() {
 }
 
 #[test]
+fn bug_021_implicit_reverse_fields_are_payload_stored_and_hidden_on_yield() {
+    let database = TempDatabase::new("bug_021_hidden_implicit_reverse_fields");
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "character",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "equipped_weapons": {
+                    "type": "1:M",
+                    "target_drawer": "weapon",
+                    "mapped_by": "character"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
+    let database_directory = database.path.to_string_lossy().into_owned();
+
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+        engine
+            .upsert(
+                json!({
+                    "_id": "@character:bug_021_parent",
+                    "name": "Hidden Parent",
+                    "equipped_weapons": [
+                        {
+                            "_id": "@weapon:bug_021_child",
+                            "name": "Hidden Child Blade"
+                        }
+                    ]
+                }),
+                OperationFilter::drawer("character"),
+                None::<OperationOptions>,
+            )
+            .expect("nested child should upsert with an implicit back-link");
+
+        let stored_weapons = drawer_records_from_disk(&database.path.join("weapon.drw"));
+        assert_eq!(stored_weapons.len(), 1);
+        assert_eq!(stored_weapons[0]["character"], "@character:bug_021_parent");
+
+        let weapons = read_records(&engine, OperationFilter::drawer("weapon"))
+            .expect("weapons should read without hidden internals");
+        assert_eq!(weapons.len(), 1);
+        assert!(weapons[0].get("character").is_none());
+
+        let characters = read_records(&engine, OperationFilter::drawer("character"))
+            .expect("characters should hydrate virtual children");
+        assert_eq!(
+            characters[0]["equipped_weapons"][0]["name"],
+            "Hidden Child Blade"
+        );
+        assert!(
+            characters[0]["equipped_weapons"][0]
+                .get("character")
+                .is_none()
+        );
+    }
+
+    write_drawer_metadata(
+        &database,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 1,
+            "unique_constraints": [],
+            "relationship_constraints": {},
+            "delete_rules": {},
+            "cascade_delete_rules": {},
+            "hidden_fields": ["character"],
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "character": { "type": "string" }
+                }
+            }
+        }),
+    );
+
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
+    let visible_weapons = read_records(&reopened, OperationFilter::drawer("weapon"))
+        .expect("schema-declared hidden fields should be visible");
+    assert_eq!(visible_weapons[0]["character"]["name"], "Hidden Parent");
+}
+
+#[test]
 fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
     let database = TempDatabase::new("us_038_many_to_many");
     fs::create_dir_all(&database.path).expect("temp dir should create");
