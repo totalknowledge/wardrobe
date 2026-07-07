@@ -69,10 +69,10 @@ fn binary_version_flags_exit_successfully() {
 
 #[test]
 fn binary_missing_connection_string_returns_invalid_input_error() {
-    let output = run_cli(&["--target"]);
+    let output = run_cli(&[]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--target/--data-dir requires"));
+    assert!(stderr.contains("requires a target connection context"));
 }
 
 #[test]
@@ -93,28 +93,28 @@ fn binary_missing_command_arguments_validation_guards() {
     let _ = fs::create_dir_all(&tmp);
     let target = tmp.to_string_lossy().to_string();
 
-    let inspect_out = run_cli(&["--target", &target, "inspect"]);
+    let inspect_out = run_cli(&[&target, "inspect"]);
     assert!(!inspect_out.status.success());
 
-    let read_out = run_cli(&["--target", &target, "read"]);
-    assert!(!read_out.status.success());
+    let read_out = run_cli(&[&target, "read"]);
+    assert!(read_out.status.success());
 
-    let upsert_out = run_cli(&["--target", &target, "upsert"]);
+    let upsert_out = run_cli(&[&target, "upsert"]);
     assert!(!upsert_out.status.success());
 
-    let status_bays_out = run_cli(&["--target", &target, "status", "bays"]);
+    let status_bays_out = run_cli(&[&target, "status", "bays"]);
     assert!(!status_bays_out.status.success());
 
-    let status_drawers_out = run_cli(&["--target", &target, "status", "drawers"]);
+    let status_drawers_out = run_cli(&[&target, "status", "drawers"]);
     assert!(!status_drawers_out.status.success());
 
-    let compact_out = run_cli(&["--target", &target, "compact"]);
+    let compact_out = run_cli(&[&target, "compact"]);
     assert!(!compact_out.status.success());
 
-    let create_bay_out = run_cli(&["--target", &target, "create", "bay"]);
+    let create_bay_out = run_cli(&[&target, "create", "bay"]);
     assert!(!create_bay_out.status.success());
 
-    let create_user_out = run_cli(&["--target", &target, "create", "user"]);
+    let create_user_out = run_cli(&[&target, "create", "user"]);
     assert!(!create_user_out.status.success());
 
     let _ = fs::remove_dir_all(tmp);
@@ -126,7 +126,7 @@ fn binary_piped_stdin_stream_execution() {
     let _ = fs::create_dir_all(&tmp);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_wardrobe"))
-        .args(&["--target", &tmp.to_string_lossy()])
+        .arg(&tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -228,6 +228,66 @@ pub(crate) fn record_pointer(record: &Value, fallback_drawer_name: Option<&str>)
         .map(|drawer_name| crate::wrdb_lib::pointer::format_pointer(drawer_name, record_id))
 }
 
+fn structural_inventory_records(inventories: Vec<StorageInventory>) -> Result<Vec<Value>> {
+    inventories
+        .into_iter()
+        .map(|inventory| {
+            serde_json::to_value(inventory).map_err(|error| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("failed to serialize storage inventory: {error}"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn structural_name_records(names: Vec<String>) -> Vec<Value> {
+    names
+        .into_iter()
+        .map(|name| serde_json::json!({ "name": name }))
+        .collect()
+}
+
+fn normalize_structural_read_path(path: &str) -> String {
+    structural_read_segments(path).join("/")
+}
+
+fn structural_read_segments(path: &str) -> Vec<&str> {
+    path.trim()
+        .split(|character| character == '/' || character == '\\')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn match_structural_database<'a, 'b>(
+    databases: &'a [StorageInventory],
+    path: &'b str,
+) -> Option<(&'a str, &'b str)> {
+    let mut matched_database = None;
+    let mut matched_remainder = "";
+    let mut matched_length = 0usize;
+
+    for database in databases {
+        let database_path = normalize_structural_read_path(&database.name);
+        let remainder = if path == database_path {
+            Some("")
+        } else {
+            path.strip_prefix(&format!("{database_path}/"))
+        };
+        let Some(remainder) = remainder else {
+            continue;
+        };
+        if database_path.len() > matched_length {
+            matched_database = Some(database.name.as_str());
+            matched_remainder = remainder;
+            matched_length = database_path.len();
+        }
+    }
+
+    matched_database.map(|database_name| (database_name, matched_remainder))
+}
+
 fn merge_drawer_name(target: &mut Option<String>, drawer_name: impl Into<String>) -> Result<()> {
     let drawer_name = drawer_name.into().trim_start_matches('@').to_string();
     match target {
@@ -823,6 +883,14 @@ impl WardrobeEngine {
         selection: &OperationSelection,
         options: &OperationOptions,
     ) -> Result<Vec<Value>> {
+        if let Some(mut records) = self.read_structural_records(selection)? {
+            crate::wrdb_lib::query::apply_query_modifiers(
+                &mut records,
+                options.query_modifiers().as_ref(),
+            );
+            return Ok(records);
+        }
+
         if !selection.pointers.is_empty() {
             let mut records = Vec::new();
             for pointer in selection.resolved_pointers()? {
@@ -862,6 +930,47 @@ impl WardrobeEngine {
             options.query_modifiers().as_ref(),
         );
         Ok(records)
+    }
+
+    pub(crate) fn read_structural_records(
+        &self,
+        selection: &OperationSelection,
+    ) -> Result<Option<Vec<Value>>> {
+        if !selection.pointers.is_empty() || selection.query.is_some() {
+            return Ok(None);
+        }
+
+        let Some(path) = selection.drawer_name.as_deref() else {
+            return structural_inventory_records(self.show_databases()?).map(Some);
+        };
+        let path = normalize_structural_read_path(path);
+        if path.is_empty() {
+            return structural_inventory_records(self.show_databases()?).map(Some);
+        }
+
+        let databases = self.show_databases()?;
+        let Some((database_name, remainder)) = match_structural_database(&databases, &path) else {
+            return Ok(None);
+        };
+
+        if remainder.is_empty() {
+            return Ok(Some(structural_name_records(
+                self.show_schemas(database_name)?,
+            )));
+        }
+
+        let remainder_segments = structural_read_segments(remainder);
+        if remainder_segments.len() != 1 {
+            return Ok(None);
+        }
+
+        let schema_name = remainder_segments[0];
+        let schemas = self.show_schemas(database_name)?;
+        if !schemas.iter().any(|schema| schema == schema_name) {
+            return Ok(None);
+        }
+
+        structural_inventory_records(self.show_drawers(database_name, schema_name)?).map(Some)
     }
 
     fn count_existing_pointers(&self, selection: &OperationSelection) -> Result<usize> {

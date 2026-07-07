@@ -2,7 +2,7 @@ wardrobe:
     -h, --help                  Show this message and exit
     -v, --version               Show the version and exit
 
-    Connection context is passed with --target, --connection, or --data-dir.
+    Connection context is the first positional argument after wardrobe.
     It can be a filesystem path for embedded mode or a Wardrobe URI for remote execution.
 
     Canonical data commands:
@@ -36,11 +36,11 @@ wardrobe:
       status <tenants|wardrobes|bays|drawers|wal|storage|path|drawer-names|cached-drawer-count|server|config> <?path>
 
     Examples:
-      wardrobe --target ./data create wardrobe inventory
-      wardrobe --target ./data create bay inventory/public
-      wardrobe --target ./data create drawer inventory/public/book
-      wardrobe --target ./data upsert inventory/public/book '{"_id":"book-01","title":"The Lantern Index"}'
-      wardrobe --target ./data read inventory/public/book '{"title":"The Lantern Index"}'
-      wardrobe --target ./data count inventory/public/book
-      wardrobe --target ./data compact inventory/public
-      wardrobe --target ./data status drawers inventory/public
+      wardrobe ./data create wardrobe inventory
+      wardrobe ./data create bay inventory/public
+      wardrobe ./data create drawer inventory/public/book
+      wardrobe ./data upsert inventory/public/book '{"_id":"book-01","title":"The Lantern Index"}'
+      wardrobe ./data read inventory/public/book '{"title":"The Lantern Index"}'
+      wardrobe ./data count inventory/public/book
+      wardrobe ./data compact inventory/public
+      wardrobe ./data status drawers inventory/public

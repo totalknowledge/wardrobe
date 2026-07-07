@@ -213,12 +213,12 @@ Application logs are operator-facing diagnostics only. They are separate from Wa
 
 ## CLI Usage
 
-`NOTES.txt` and `wardrobe --help` are the authority for the CLI capability set. The package crate remains `wardrobe-cli`, while the installed binary is `wardrobe`. The binary accepts the connection context through `--target`, `--connection`, or `--data-dir`, then runs the canonical command families from the help output.
+`NOTES.txt` and `wardrobe --help` are the authority for the CLI capability set. The package crate remains `wardrobe-cli`, while the installed binary is `wardrobe`. The binary accepts the connection context as the first positional argument, then runs the canonical command families from the help output.
 
 Run a single command:
 
 ```text
-cargo run -p wardrobe-cli -- --target <connection> [--pretty] <command> [args]
+cargo run -p wardrobe-cli -- <connection> [--pretty] <command> [args]
 ```
 
 If no command is supplied, the CLI enters an interactive REPL. If standard input is piped in, the CLI executes the piped command instead.
@@ -228,11 +228,11 @@ CLI application logging uses the same `--log-level`, `--log-format`, `--log-dest
 Examples:
 
 - Embedded structural discovery:
-  `cargo run -p wardrobe-cli -- --target ./data status wardrobes`
+  `cargo run -p wardrobe-cli -- ./data status wardrobes`
 - Remote drawer listing:
-  `cargo run -p wardrobe-cli -- --target "wardrobe://127.0.0.1:24842" status drawers inventory/public`
+  `cargo run -p wardrobe-cli -- "wardrobe://127.0.0.1:24842" status drawers inventory/public`
 - Backup a bay:
-  `cargo run -p wardrobe-cli -- --target ./data backup inventory/public ./backups/public.wrb`
+  `cargo run -p wardrobe-cli -- ./data backup inventory/public ./backups/public.wrb`
 
 Canonical command families:
 

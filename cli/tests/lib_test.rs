@@ -140,7 +140,6 @@ fn assert_manage_user_command(args: &[&str], action: &str, payload: serde_json::
 #[test]
 fn test_cli_config_clean_parsing() {
     let args = vec![
-        "--connection".to_string(),
         "custom_dir".to_string(),
         "--pretty".to_string(),
         "read".to_string(),
@@ -176,14 +175,13 @@ fn test_cli_config_accepts_positional_connection_target() {
 fn test_cli_config_preserves_legacy_default_connection_commands() {
     let args = vec!["read".to_string(), "database/drawer".to_string()];
     let config = CliConfig::from_args(args).unwrap();
-    assert_eq!(config.connection, "./wardrobe");
-    assert_eq!(config.command_parts, vec!["read", "database/drawer"]);
+    assert_eq!(config.connection, "read");
+    assert_eq!(config.command_parts, vec!["database/drawer"]);
 }
 
 #[test]
 fn test_cli_config_alternate_flags() {
     let args = vec![
-        "--data-dir".to_string(),
         "alt_dir".to_string(),
         "status".to_string(),
         "drawer-names".to_string(),
@@ -196,6 +194,7 @@ fn test_cli_config_alternate_flags() {
 #[test]
 fn test_cli_config_logging_flags_are_parsed_and_not_commands() {
     let args = vec![
+        "custom_dir".to_string(),
         "--log-level".to_string(),
         "debug".to_string(),
         "--log-format".to_string(),
@@ -208,6 +207,7 @@ fn test_cli_config_logging_flags_are_parsed_and_not_commands() {
         "gem".to_string(),
     ];
     let config = CliConfig::from_args(args).unwrap();
+    assert_eq!(config.connection, "custom_dir");
 
     assert_eq!(
         config.logging.level,
@@ -230,13 +230,33 @@ fn test_cli_config_logging_flags_are_parsed_and_not_commands() {
 
 #[test]
 fn test_cli_config_rejects_invalid_logging_flags() {
-    assert!(CliConfig::from_args(vec!["--log-level".to_string(), "verbose".to_string()]).is_err());
-    assert!(CliConfig::from_args(vec!["--log-format".to_string(), "xml".to_string()]).is_err());
     assert!(
-        CliConfig::from_args(vec!["--log-destination".to_string(), "syslog".to_string()]).is_err()
+        CliConfig::from_args(vec![
+            "target".to_string(),
+            "--log-level".to_string(),
+            "verbose".to_string()
+        ])
+        .is_err()
     );
     assert!(
         CliConfig::from_args(vec![
+            "target".to_string(),
+            "--log-format".to_string(),
+            "xml".to_string()
+        ])
+        .is_err()
+    );
+    assert!(
+        CliConfig::from_args(vec![
+            "target".to_string(),
+            "--log-destination".to_string(),
+            "syslog".to_string()
+        ])
+        .is_err()
+    );
+    assert!(
+        CliConfig::from_args(vec![
+            "target".to_string(),
             "--log-level".to_string(),
             "info".to_string(),
             "--log-destination".to_string(),
@@ -250,7 +270,6 @@ fn test_cli_config_rejects_invalid_logging_flags() {
 fn test_cli_logging_defaults_to_stderr_without_corrupting_stdout() {
     let storage_directory = temp_storage_directory("logging_stderr_stdout_clean");
     let output = ProcessCommand::new(env!("CARGO_BIN_EXE_wardrobe"))
-        .arg("--data-dir")
         .arg(&storage_directory)
         .arg("--log-level")
         .arg("info")
@@ -272,7 +291,7 @@ fn test_cli_logging_defaults_to_stderr_without_corrupting_stdout() {
 
 #[test]
 fn test_cli_config_missing_target_payload() {
-    let args = vec!["--target".to_string()];
+    let args = Vec::new();
     let result = CliConfig::from_args(args);
     assert!(result.is_err());
 }
@@ -405,7 +424,7 @@ fn test_command_routing_guards_and_failures() {
     assert!(res_inspect.is_err());
 
     let res_read = run_command(&client, &["read".to_string()], false);
-    assert!(res_read.is_err());
+    assert!(res_read.is_ok());
 
     let res_count = run_command(&client, &["count".to_string()], false);
     assert!(res_count.is_err());
@@ -593,6 +612,17 @@ fn test_structural_lifecycle_commands_execution_paths() {
         "armory/public".to_string(),
     ];
     assert!(run_command(&client, &show_drawers, false).is_ok());
+
+    assert!(run_command(&client, &["read".to_string()], false).is_ok());
+    assert!(run_command(&client, &["read".to_string(), "armory".to_string()], false).is_ok());
+    assert!(
+        run_command(
+            &client,
+            &["read".to_string(), "armory/public".to_string()],
+            false,
+        )
+        .is_ok()
+    );
 
     let check_wardrobe = vec![
         "status".to_string(),

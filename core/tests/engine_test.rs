@@ -5531,6 +5531,70 @@ fn bug_017_implicit_drawer_upsert_registers_catalog_entry() {
         vec!["flowers".to_string()]
     );
 }
+
+#[test]
+fn bug_020_drawerless_read_lists_structural_children() {
+    let database = TempDatabase::new("bug_020_drawerless_read");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
+
+    engine
+        .create(CreateRequest::database("nispuk"))
+        .expect("database should create");
+    engine
+        .create(CreateRequest::schema("nispuk", "default"))
+        .expect("schema should create");
+    engine
+        .create(CreateRequest::drawer("nispuk", "default", "plant_types"))
+        .expect("plant_types drawer should create");
+    engine
+        .create(CreateRequest::drawer("nispuk", "default", "plants"))
+        .expect("plants drawer should create");
+    engine
+        .upsert(
+            json!({
+                "_id": "basil",
+                "name": "Basil"
+            }),
+            OperationFilter::drawer("nispuk/default/plants"),
+            None::<OperationOptions>,
+        )
+        .expect("plant should upsert");
+
+    let wardrobes = read_records(&engine, OperationFilter::none()).expect("wardrobes should list");
+    assert!(
+        wardrobes
+            .iter()
+            .any(|wardrobe| wardrobe["name"] == "nispuk")
+    );
+
+    let bays = read_records(&engine, OperationFilter::drawer("nispuk")).expect("bays should list");
+    assert_eq!(bays, vec![json!({ "name": "default" })]);
+
+    let drawers =
+        read_records(&engine, OperationFilter::drawer("nispuk/default")).expect("drawers list");
+    let drawer_names = drawers
+        .iter()
+        .map(|drawer| drawer["name"].as_str().expect("drawer should have name"))
+        .collect::<Vec<_>>();
+    assert!(drawer_names.contains(&"plant_types"));
+    assert!(drawer_names.contains(&"plants"));
+
+    let plants = read_records(&engine, OperationFilter::drawer("nispuk/default/plants"))
+        .expect("drawer read should return records");
+    assert_eq!(plants.len(), 1);
+    assert_eq!(plants[0]["name"], "Basil");
+
+    let command_result = engine
+        .execute_command(read_command(OperationFilter::none()))
+        .expect("command read should list wardrobes");
+    assert!(matches!(
+        command_result,
+        CommandResult::Read(ReadResult::Records(records))
+            if records.iter().any(|wardrobe| wardrobe["name"] == "nispuk")
+    ));
+}
+
 #[test]
 fn us_065_logical_tenant_routes_to_catalog_defined_location() {
     let database = TempDatabase::new("us_065_logical_tenant_route");

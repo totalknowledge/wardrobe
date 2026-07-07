@@ -574,6 +574,15 @@ impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
     }
 
     fn execute_local(&self, command: Command) -> Result<CommandResult> {
-        command_dispatch::execute_in_database::<WardrobeEngine>(&self.database_core, command, None)
+        match command {
+            Command::Read { filter, options } => {
+                WardrobeEngine::read(self, filter, options).map(CommandResult::Read)
+            }
+            command => command_dispatch::execute_in_database::<WardrobeEngine>(
+                &self.database_core,
+                command,
+                None,
+            ),
+        }
     }
 }

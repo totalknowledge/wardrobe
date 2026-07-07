@@ -26,9 +26,7 @@ impl CliConfig {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut connection = "./wardrobe".to_string();
-        let mut explicit_connection = false;
-        let mut positional_connection = false;
+        let connection;
         let mut pretty = false;
         let mut command_parts = Vec::new();
         let mut logging_level = None;
@@ -37,18 +35,28 @@ impl CliConfig {
         let mut logging_file = None;
 
         let mut args = args.into_iter();
+        let Some(first_arg) = args.next() else {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "wardrobe requires a target connection context",
+            ));
+        };
+        match first_arg.as_str() {
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--version" | "-v" => {
+                print_version();
+                std::process::exit(0);
+            }
+            _ => {
+                connection = first_arg;
+            }
+        }
+
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--target" | "--connection" | "--data-dir" => {
-                    let val = args.next().ok_or_else(|| {
-                        Error::new(
-                            ErrorKind::InvalidInput,
-                            "--target/--data-dir requires a connection string or path",
-                        )
-                    })?;
-                    connection = val;
-                    explicit_connection = true;
-                }
                 "--pretty" => {
                     pretty = true;
                 }
@@ -81,25 +89,8 @@ impl CliConfig {
                         Error::new(ErrorKind::InvalidInput, "--log-file requires a file path")
                     })?));
                 }
-                "--help" | "-h" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                "--version" | "-v" => {
-                    print_version();
-                    std::process::exit(0);
-                }
                 _ => {
-                    if !explicit_connection
-                        && !positional_connection
-                        && command_parts.is_empty()
-                        && !is_cli_command(&arg)
-                    {
-                        connection = arg;
-                        positional_connection = true;
-                    } else {
-                        command_parts.push(arg);
-                    }
+                    command_parts.push(arg);
                 }
             }
         }
@@ -116,26 +107,6 @@ impl CliConfig {
             )?,
         })
     }
-}
-
-fn is_cli_command(value: &str) -> bool {
-    matches!(
-        value,
-        "status"
-            | "inspect"
-            | "read"
-            | "count"
-            | "upsert"
-            | "create"
-            | "alter"
-            | "drop"
-            | "delete"
-            | "grant"
-            | "revoke"
-            | "compact"
-            | "backup"
-            | "restore"
-    )
 }
 
 const HELP_TEXT: &str = r#"wardrobe:
@@ -767,12 +738,6 @@ fn run_count_command(client: &WardrobeClient, parts: &[String], pretty: bool) ->
 }
 
 fn run_read_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
-    if parts.len() < 2 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{} requires a drawer path", parts[0]),
-        ));
-    }
     if parts.len() > 4 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -780,10 +745,10 @@ fn run_read_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
         ));
     }
 
-    let filter = if parts.len() >= 3 {
-        operation_filter(&parts[1], Some(parse_json_arg(&parts[2], "query filter")?))
-    } else {
-        operation_filter(&parts[1], None)
+    let filter = match parts.len() {
+        1 => OperationFilter::none(),
+        2 => operation_filter(&parts[1], None),
+        _ => operation_filter(&parts[1], Some(parse_json_arg(&parts[2], "query filter")?)),
     };
     let mut options = operation_options(parts, 3, "read options")?;
     if options.hydrate.is_none() {
