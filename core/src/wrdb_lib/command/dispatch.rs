@@ -9,7 +9,7 @@ use crate::engine::{
     record_pointer, resolve_read_shape, upsert_record_target,
 };
 use crate::wrdb_lib::database::Database;
-use crate::wrdb_lib::drawer::VacuumReport;
+use crate::wrdb_lib::drawer::{VacuumReport, hydration};
 use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::query::QueryModifiers;
 use crate::wrdb_lib::registry::CatalogRegistry;
@@ -544,7 +544,7 @@ where
     E: DatabaseCommandExecutor,
 {
     let selection = OperationSelection::from_filter(filter)?;
-    let records = if !selection.pointers.is_empty() {
+    let mut records = if !selection.pointers.is_empty() {
         let mut records = Vec::new();
         for pointer in selection.resolved_pointers()? {
             if let Some(record) = E::find_by_id_in_database(database, &pointer, context)? {
@@ -576,7 +576,17 @@ where
         }
     };
 
-    let result = match resolve_read_shape(options.return_shape, &selection) {
+    let read_shape = resolve_read_shape(options.return_shape, &selection);
+    if options.hydrate.unwrap_or(true) && selection.pointers.is_empty() {
+        match read_shape {
+            ReturnShapeResolution::Record | ReturnShapeResolution::Records => {
+                hydrate_read_records_in_database::<E>(database, &mut records, context)?;
+            }
+            ReturnShapeResolution::Pointers | ReturnShapeResolution::Exists => {}
+        }
+    }
+
+    let result = match read_shape {
         ReturnShapeResolution::Record => ReadResult::Record(records.into_iter().next()),
         ReturnShapeResolution::Records => ReadResult::Records(records),
         ReturnShapeResolution::Pointers => ReadResult::Pointers(
@@ -588,6 +598,21 @@ where
         ReturnShapeResolution::Exists => ReadResult::Exists(!records.is_empty()),
     };
     Ok(CommandResult::Read(result))
+}
+
+fn hydrate_read_records_in_database<E>(
+    database: &RwLock<Database>,
+    records: &mut [Value],
+    context: ExecutionContext<'_>,
+) -> Result<()>
+where
+    E: DatabaseCommandExecutor,
+{
+    let mut cache = hydration::HydrationCache::default();
+    hydration::hydrate_records_with_cache(records, true, &mut cache, |drawer_name, record_key| {
+        let pointer = pointer::format_pointer(drawer_name, record_key);
+        E::find_by_id_in_database(database, &pointer, context)
+    })
 }
 
 fn execute_count_in_database<E>(
@@ -1099,6 +1124,14 @@ mod tests {
             drawer_name: &str,
             context: ExecutionContext<'_>,
         ) -> Result<Vec<Value>> {
+            if drawer_name == "nispuk/default/plants" {
+                return Ok(vec![json!({
+                    "_id": "c21b0f6f-b6cb-4a34-a72b-c39568a7e0c5",
+                    "plantType": "@nispuk/default/plant_types:fab3d886c9094b61bd6cbd1806daac0e",
+                    "bed": "1"
+                })]);
+            }
+
             Ok(vec![json!({
                 "drawer": drawer_name,
                 "scope": context.drawer_namespace.unwrap_or("root")
@@ -1110,6 +1143,14 @@ mod tests {
             pointer: &str,
             _context: ExecutionContext<'_>,
         ) -> Result<Option<Value>> {
+            if pointer == "@nispuk/default/plant_types:fab3d886c9094b61bd6cbd1806daac0e" {
+                return Ok(Some(json!({
+                    "_id": "fab3d886c9094b61bd6cbd1806daac0e",
+                    "name": "Aloha Mix",
+                    "category": "flower"
+                })));
+            }
+
             Ok(Some(json!({"pointer": pointer})))
         }
 
@@ -1534,6 +1575,30 @@ mod tests {
             )
             .unwrap(),
             CommandResult::Read(ReadResult::Records(records)) if records[0]["has_modifiers"] == true
+        ));
+        assert!(matches!(
+            execute_in_database::<FakeDatabaseExecutor>(
+                &database,
+                Command::Read {
+                    filter: OperationFilter::drawer("nispuk/default/plants"),
+                    options: OperationOptions::default(),
+                },
+                None,
+            )
+            .unwrap(),
+            CommandResult::Read(ReadResult::Records(records)) if records[0]["plantType"]["name"] == "Aloha Mix"
+        ));
+        assert!(matches!(
+            execute_in_database::<FakeDatabaseExecutor>(
+                &database,
+                Command::Read {
+                    filter: OperationFilter::drawer("nispuk/default/plants"),
+                    options: OperationOptions::new().hydrate(false),
+                },
+                None,
+            )
+            .unwrap(),
+            CommandResult::Read(ReadResult::Records(records)) if records[0]["plantType"] == "@nispuk/default/plant_types:fab3d886c9094b61bd6cbd1806daac0e"
         ));
         assert_eq!(
             execute_in_database::<FakeDatabaseExecutor>(

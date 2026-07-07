@@ -862,6 +862,78 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
 }
 
 #[test]
+fn bug_018_command_read_hydrates_fully_qualified_plant_type_pointer() {
+    let database = TempDatabase::new("bug_018_command_read_hydrates_plant_type");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+    let plant_type_id = "fab3d886c9094b61bd6cbd1806daac0e";
+
+    engine
+        .create(CreateRequest::database("nispuk"))
+        .expect("database should create");
+    engine
+        .create(CreateRequest::schema("nispuk", "default"))
+        .expect("schema should create");
+    engine
+        .create(CreateRequest::drawer("nispuk", "default", "plant_types"))
+        .expect("plant types drawer should create");
+    engine
+        .create(CreateRequest::drawer("nispuk", "default", "plants"))
+        .expect("plants drawer should create");
+    engine
+        .alter(AlterRequest::schema_rule(
+            "nispuk/default/plants",
+            "add",
+            "relationship",
+            "plantType",
+            json!({
+                "type": "M:1",
+                "target_drawer": "nispuk/default/plant_types"
+            }),
+        ))
+        .expect("plant type relationship should create");
+    engine
+        .upsert(
+            json!({
+                "_id": plant_type_id,
+                "name": "Aloha Mix",
+                "scientificName": "Tropacolum majus",
+                "category": "flower",
+                "variety": "Hummingbird Nasturtium"
+            }),
+            OperationFilter::drawer("nispuk/default/plant_types"),
+            None::<OperationOptions>,
+        )
+        .expect("plant type should upsert");
+    engine
+        .upsert(
+            json!({
+                "_id": "c21b0f6f-b6cb-4a34-a72b-c39568a7e0c5",
+                "plantType": {
+                    "_id": plant_type_id
+                },
+                "bed": "1",
+                "quantity": 1
+            }),
+            OperationFilter::drawer("nispuk/default/plants"),
+            None::<OperationOptions>,
+        )
+        .expect("plant should upsert");
+
+    let hydrated = engine
+        .execute_command(read_command(OperationFilter::drawer("nispuk/default/plants")))
+        .expect("command read should succeed");
+    let CommandResult::Read(ReadResult::Records(records)) = hydrated else {
+        panic!("expected hydrated records");
+    };
+    assert_eq!(records[0]["plantType"]["name"], "Aloha Mix");
+    assert_eq!(
+        records[0]["plantType"]["_id"],
+        "fab3d886c9094b61bd6cbd1806daac0e"
+    );
+}
+
+#[test]
 fn us_018_id_only_subobject_accepts_preformatted_pointers() {
     let database = TempDatabase::new("us_018_preformatted_reference");
     let database_directory = database.path.to_string_lossy().into_owned();

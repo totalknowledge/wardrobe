@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
-    Command, CommandResult, CompactRequest, CreateRequest, CreateResult, DurabilityPolicy,
-    InspectResult, OperationFilter, OperationOptions, PermissionRequest, ProtocolFrame,
-    ProtocolOpcode, ReadResult, StatusRequest, StatusResult, StorageCoordinate, WardrobeClient,
-    WardrobeEngine,
+    AlterRequest, Command, CommandResult, CompactRequest, CreateRequest, CreateResult,
+    DurabilityPolicy, InspectResult, OperationFilter, OperationOptions, PermissionRequest,
+    ProtocolFrame, ProtocolOpcode, ReadResult, StatusRequest, StatusResult, StorageCoordinate,
+    WardrobeClient, WardrobeEngine,
 };
 use wardrobe_server::{ServerConfig, serve_tcp_listener};
 
@@ -198,6 +198,66 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
             )
             .expect("count should route through server"),
         1
+    );
+    let plant_type_id = "fab3d886c9094b61bd6cbd1806daac0e";
+    client
+        .create(CreateRequest::database("nispuk"))
+        .expect("remote database should create");
+    client
+        .create(CreateRequest::schema("nispuk", "default"))
+        .expect("remote schema should create");
+    client
+        .create(CreateRequest::drawer("nispuk", "default", "plant_types"))
+        .expect("remote plant types drawer should create");
+    client
+        .create(CreateRequest::drawer("nispuk", "default", "plants"))
+        .expect("remote plants drawer should create");
+    client
+        .alter(AlterRequest::schema_rule(
+            "nispuk/default/plants",
+            "add",
+            "relationship",
+            "plantType",
+            json!({
+                "type": "M:1",
+                "target_drawer": "nispuk/default/plant_types"
+            }),
+        ))
+        .expect("remote plant type relationship should create");
+    client
+        .upsert(
+            json!({
+                "_id": plant_type_id,
+                "name": "Aloha Mix",
+                "scientificName": "Tropacolum majus",
+                "category": "flower",
+                "variety": "Hummingbird Nasturtium"
+            }),
+            OperationFilter::drawer("nispuk/default/plant_types"),
+            None::<OperationOptions>,
+        )
+        .expect("remote plant type should upsert");
+    client
+        .upsert(
+            json!({
+                "_id": "c21b0f6f-b6cb-4a34-a72b-c39568a7e0c5",
+                "plantType": {
+                    "_id": plant_type_id
+                },
+                "bed": "1",
+                "quantity": 1
+            }),
+            OperationFilter::drawer("nispuk/default/plants"),
+            None::<OperationOptions>,
+        )
+        .expect("remote plant should upsert");
+
+    let plants = read_records(&client, OperationFilter::drawer("nispuk/default/plants"));
+    assert_eq!(plants.len(), 1);
+    assert_eq!(plants[0]["plantType"]["name"], "Aloha Mix");
+    assert_eq!(
+        plants[0]["plantType"]["_id"],
+        "fab3d886c9094b61bd6cbd1806daac0e"
     );
 
     drop(client);
