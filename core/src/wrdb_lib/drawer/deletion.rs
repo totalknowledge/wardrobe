@@ -90,7 +90,9 @@ impl Drawer {
 
         let mut candidates = Vec::new();
         if !self.needs_format_migration() {
-            let raw_records = self.data_reader.read_records_at_offsets(offsets.clone(), Some(&self.field_name_map))?;
+            let raw_records = self
+                .data_reader
+                .read_records_at_offsets(offsets.clone(), Some(&self.field_name_map))?;
             if raw_records.len() == offsets.len() {
                 for (offset, raw_record) in offsets.into_iter().zip(raw_records) {
                     let record = self.decode_record_from_storage(raw_record);
@@ -200,7 +202,10 @@ impl Drawer {
                     .get(&indexed_field)
                     .and_then(Self::secondary_index_key)
                 {
-                    deletions_by_value.entry(field_value).or_default().push(*offset);
+                    deletions_by_value
+                        .entry(field_value)
+                        .or_default()
+                        .push(*offset);
                 }
             }
 

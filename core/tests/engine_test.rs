@@ -5432,6 +5432,70 @@ fn us_064_managed_database_schema_and_drawer_lifecycle_updates_catalog() {
         vec!["gem", "weapon"]
     );
 }
+
+#[test]
+fn bug_017_implicit_drawer_upsert_registers_catalog_entry() {
+    let database = TempDatabase::new("bug_017_implicit_drawer_catalog");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
+
+    engine
+        .create(CreateRequest::database("nispuk"))
+        .expect("database should be created");
+    engine
+        .create(CreateRequest::schema("nispuk", "default"))
+        .expect("schema should be created");
+    engine
+        .execute_command(upsert_command(
+            json!({
+                "_id": "basil",
+                "name": "Basil"
+            }),
+            OperationFilter::drawer("nispuk/default/plants"),
+        ))
+        .expect("qualified upsert should succeed");
+
+    engine
+        .create(CreateRequest::database("garden"))
+        .expect("database should be created");
+    engine
+        .create(CreateRequest::schema("garden", "default"))
+        .expect("schema should be created");
+    engine
+        .execute_in_scope(
+            StorageScope::schema("garden", "default"),
+            upsert_command(
+                json!({
+                    "_id": "cosmos",
+                    "name": "Cosmos"
+                }),
+                OperationFilter::drawer("flowers"),
+            ),
+        )
+        .expect("schema-scoped implicit drawer upsert should succeed");
+
+    let registry = CatalogRegistry::load_from_root(&database.path).expect("catalog should load");
+    assert!(registry.contains_drawer("nispuk", "default", "plants"));
+    assert!(registry.contains_drawer("garden", "default", "flowers"));
+
+    let reopened = WardrobeEngine::open(&storage_pool).expect("engine should reopen");
+    assert_eq!(
+        status_drawers(&reopened, "nispuk", "default")
+            .expect("nispuk drawers should load")
+            .into_iter()
+            .map(|inventory| inventory.name)
+            .collect::<Vec<_>>(),
+        vec!["plants".to_string()]
+    );
+    assert_eq!(
+        status_drawers(&reopened, "garden", "default")
+            .expect("garden drawers should load")
+            .into_iter()
+            .map(|inventory| inventory.name)
+            .collect::<Vec<_>>(),
+        vec!["flowers".to_string()]
+    );
+}
 #[test]
 fn us_065_logical_tenant_routes_to_catalog_defined_location() {
     let database = TempDatabase::new("us_065_logical_tenant_route");

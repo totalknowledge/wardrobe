@@ -94,7 +94,9 @@ impl Drawer {
         }
 
         if !self.needs_format_migration() {
-            let raw_records = self.data_reader.read_records_at_offsets(offset_vec, Some(&self.field_name_map))?;
+            let raw_records = self
+                .data_reader
+                .read_records_at_offsets(offset_vec, Some(&self.field_name_map))?;
             return Ok(raw_records
                 .into_iter()
                 .map(|record| self.decode_record_from_storage(record))

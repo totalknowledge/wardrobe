@@ -101,7 +101,10 @@ pub extern "C" fn wardrobe_cabi_execute_command(
     let command: Command = match serde_json::from_str(command_str) {
         Ok(cmd) => cmd,
         Err(e) => {
-            let err_msg = format!("{{\"error\":\"Failed to deserialize command JSON: {}\"}}", e);
+            let err_msg = format!(
+                "{{\"error\":\"Failed to deserialize command JSON: {}\"}}",
+                e
+            );
             return CString::new(err_msg).unwrap().into_raw();
         }
     };
@@ -125,7 +128,10 @@ pub extern "C" fn wardrobe_cabi_execute_command(
     let result_json = match serde_json::to_string(&result) {
         Ok(json) => json,
         Err(e) => {
-            let err_msg = format!("{{\"error\":\"Failed to serialize command result: {}\"}}", e);
+            let err_msg = format!(
+                "{{\"error\":\"Failed to serialize command result: {}\"}}",
+                e
+            );
             return CString::new(err_msg).unwrap().into_raw();
         }
     };

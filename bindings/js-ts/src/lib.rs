@@ -144,17 +144,20 @@ fn network_mode(authority: &str) -> Result<BindingDriverMode, String> {
 
 #[napi_derive::napi]
 pub fn execute_command(target: String, command_json: String) -> Result<String, napi::Error> {
-    let command: Command = serde_json::from_str(&command_json)
-        .map_err(|e| napi::Error::from_reason(format!("Failed to deserialize command JSON: {}", e)))?;
+    let command: Command = serde_json::from_str(&command_json).map_err(|e| {
+        napi::Error::from_reason(format!("Failed to deserialize command JSON: {}", e))
+    })?;
 
     let engine = WardrobeEngine::open(&target)
         .map_err(|e| napi::Error::from_reason(format!("Failed to open engine: {}", e)))?;
 
-    let result = engine.execute_command(command)
+    let result = engine
+        .execute_command(command)
         .map_err(|e| napi::Error::from_reason(format!("Execution failed: {}", e)))?;
 
-    let result_json = serde_json::to_string(&result)
-        .map_err(|e| napi::Error::from_reason(format!("Failed to serialize command result: {}", e)))?;
+    let result_json = serde_json::to_string(&result).map_err(|e| {
+        napi::Error::from_reason(format!("Failed to serialize command result: {}", e))
+    })?;
 
     Ok(result_json)
 }

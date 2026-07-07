@@ -6,10 +6,12 @@ use crate::wrdb_lib::catalog_lifecycle;
 use crate::wrdb_lib::catalog_validation;
 use crate::wrdb_lib::command::dispatch as command_dispatch;
 use crate::wrdb_lib::database::Database;
+use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::routing::{self, DatabaseRoute};
 use crate::wrdb_lib::wal::{self, WalVerification};
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 pub(super) fn show_tenants(engine: &WardrobeEngine) -> Result<Vec<String>> {
@@ -53,17 +55,25 @@ pub(super) fn execute(
     coordinate: StorageCoordinate,
     command: Command,
 ) -> Result<CommandResult> {
-    let registry = WardrobeEngine::read_lock(&engine.registry)?;
-    command_dispatch::validate_command_against_registry(
-        &registry,
-        &routing::coordinate_catalog_database(&coordinate),
-        coordinate.schema(),
-        &command,
-    )?;
+    let database_name = routing::coordinate_catalog_database(&coordinate);
+    let schema_name = coordinate.schema().to_string();
+    let implicit_drawer_name = {
+        let registry = WardrobeEngine::read_lock(&engine.registry)?;
+        validate_command_against_registry(&registry, &database_name, &schema_name, &command)?
+    };
     let database_path = routing::coordinate_database_path(&engine.root_directory, &coordinate)?;
-    wal::append_command(engine, &database_path, Some(coordinate.schema()), &command)?;
+    wal::append_command(engine, &database_path, Some(&schema_name), &command)?;
     let database = engine.database_for_route(DatabaseRoute::Coordinate(coordinate))?;
-    command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
+    let result = command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)?;
+    register_implicit_drawer_if_upsert(
+        engine,
+        &database_name,
+        &schema_name,
+        implicit_drawer_name,
+        database_path,
+        &result,
+    )?;
+    Ok(result)
 }
 
 pub(super) fn execute_in_scope(
@@ -72,10 +82,6 @@ pub(super) fn execute_in_scope(
     command: Command,
 ) -> Result<CommandResult> {
     routing::validate_scope(&scope)?;
-    if let StorageScope::Schema { database, schema } = &scope {
-        let registry = WardrobeEngine::read_lock(&engine.registry)?;
-        command_dispatch::validate_command_against_registry(&registry, database, schema, &command)?;
-    }
 
     match scope {
         StorageScope::Tenant {
@@ -90,11 +96,31 @@ pub(super) fn execute_in_scope(
             command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
         }
         StorageScope::Schema { database, schema } => {
+            let implicit_drawer_name = {
+                let registry = WardrobeEngine::read_lock(&engine.registry)?;
+                validate_command_against_registry(&registry, &database, &schema, &command)?
+            };
             let database_path =
                 routing::schema_scope_path(&engine.root_directory, &database, &schema)?;
             wal::append_command(engine, &database_path, Some(&schema), &command)?;
-            let database = engine.database_for_route(DatabaseRoute::Schema { database, schema })?;
-            command_dispatch::execute_in_database::<WardrobeEngine>(&database, command, None)
+            let routed_database = engine.database_for_route(DatabaseRoute::Schema {
+                database: database.clone(),
+                schema: schema.clone(),
+            })?;
+            let result = command_dispatch::execute_in_database::<WardrobeEngine>(
+                &routed_database,
+                command,
+                None,
+            )?;
+            register_implicit_drawer_if_upsert(
+                engine,
+                &database,
+                &schema,
+                implicit_drawer_name,
+                database_path,
+                &result,
+            )?;
+            Ok(result)
         }
         StorageScope::Drawer { namespace } => {
             wal::append_command(engine, &engine.root_directory, Some(&namespace), &command)?;
@@ -232,13 +258,10 @@ pub(super) fn execute_for_tenant(
         ));
     }
 
-    let registry = WardrobeEngine::read_lock(&engine.registry)?;
-    command_dispatch::validate_command_against_registry(
-        &registry,
-        database_name,
-        schema_name,
-        &command,
-    )?;
+    let implicit_drawer_name = {
+        let registry = WardrobeEngine::read_lock(&engine.registry)?;
+        validate_command_against_registry(&registry, database_name, schema_name, &command)?
+    };
 
     let route_path =
         catalog_validation::catalog_location_path(&engine.root_directory, &tenant_route.location);
@@ -254,11 +277,174 @@ pub(super) fn execute_for_tenant(
         )?,
     );
     wal::recover_database::<WardrobeEngine>(&routed_database)?;
-    command_dispatch::execute_in_database::<WardrobeEngine>(&routed_database, command, None)
+    let result =
+        command_dispatch::execute_in_database::<WardrobeEngine>(&routed_database, command, None)?;
+    register_implicit_drawer_if_upsert(
+        engine,
+        database_name,
+        schema_name,
+        implicit_drawer_name,
+        schema_path,
+        &result,
+    )?;
+    Ok(result)
 }
 
 pub(super) fn execute_command(engine: &WardrobeEngine, command: Command) -> Result<CommandResult> {
-    command_dispatch::execute_command(engine, command)
+    let implicit_drawer = {
+        let registry = WardrobeEngine::read_lock(&engine.registry)?;
+        implicit_qualified_drawer(&registry, &command)
+    };
+    let result = command_dispatch::execute_command(engine, command)?;
+    register_implicit_qualified_drawer_if_upsert(engine, implicit_drawer, &result)?;
+    Ok(result)
+}
+
+fn validate_command_against_registry(
+    registry: &CatalogRegistry,
+    database_name: &str,
+    schema_name: &str,
+    command: &Command,
+) -> Result<Option<String>> {
+    if let Some(drawer_name) =
+        implicit_drawer_for_schema(registry, database_name, schema_name, command)
+    {
+        return Ok(Some(drawer_name));
+    }
+
+    command_dispatch::validate_command_against_registry(
+        registry,
+        database_name,
+        schema_name,
+        command,
+    )?;
+    Ok(None)
+}
+
+fn implicit_drawer_for_schema(
+    registry: &CatalogRegistry,
+    database_name: &str,
+    schema_name: &str,
+    command: &Command,
+) -> Option<String> {
+    if !matches!(command, Command::Upsert { .. }) {
+        return None;
+    }
+
+    if !registry.contains_schema(database_name, schema_name) {
+        return None;
+    }
+
+    let drawer_name = command_dispatch::command_drawer_name(command)?;
+    if registry.contains_drawer(database_name, schema_name, &drawer_name) {
+        return None;
+    }
+
+    Some(drawer_name)
+}
+
+fn register_implicit_drawer_if_upsert(
+    engine: &WardrobeEngine,
+    database_name: &str,
+    schema_name: &str,
+    drawer_name: Option<String>,
+    schema_path: PathBuf,
+    result: &CommandResult,
+) -> Result<()> {
+    if !matches!(result, CommandResult::Upsert(_)) {
+        return Ok(());
+    }
+
+    let Some(drawer_name) = drawer_name else {
+        return Ok(());
+    };
+
+    register_implicit_drawer(
+        engine,
+        database_name,
+        schema_name,
+        &drawer_name,
+        schema_path.join(format!("{drawer_name}.drw")),
+    )
+}
+
+fn register_implicit_qualified_drawer_if_upsert(
+    engine: &WardrobeEngine,
+    drawer: Option<(String, String, String)>,
+    result: &CommandResult,
+) -> Result<()> {
+    if !matches!(result, CommandResult::Upsert(_)) {
+        return Ok(());
+    }
+
+    let Some((database_name, schema_name, drawer_name)) = drawer else {
+        return Ok(());
+    };
+
+    let schema_path =
+        catalog_validation::database_path_from_name(&engine.root_directory, &database_name)?
+            .join(&schema_name);
+    register_implicit_drawer(
+        engine,
+        &database_name,
+        &schema_name,
+        &drawer_name,
+        schema_path.join(format!("{drawer_name}.drw")),
+    )
+}
+
+fn register_implicit_drawer(
+    engine: &WardrobeEngine,
+    database_name: &str,
+    schema_name: &str,
+    drawer_name: &str,
+    drawer_path: PathBuf,
+) -> Result<()> {
+    catalog_validation::validate_database_name(database_name)?;
+    catalog_validation::validate_schema_name(schema_name)?;
+    catalog_validation::validate_drawer_name(drawer_name)?;
+
+    let mut registry = WardrobeEngine::write_lock(&engine.registry)?;
+    if registry.contains_drawer(database_name, schema_name, drawer_name) {
+        return Ok(());
+    }
+
+    registry.register_drawer(
+        database_name,
+        schema_name,
+        drawer_name,
+        drawer_path.to_string_lossy().into_owned(),
+    );
+    registry.persist_to_root(&engine.root_directory)
+}
+
+fn implicit_qualified_drawer(
+    registry: &CatalogRegistry,
+    command: &Command,
+) -> Option<(String, String, String)> {
+    if !matches!(command, Command::Upsert { .. }) {
+        return None;
+    }
+
+    let drawer_name = command_dispatch::command_drawer_name(command)?;
+    let parts: Vec<&str> = drawer_name
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let drawer = parts[parts.len() - 1].to_string();
+    let schema = parts[parts.len() - 2].to_string();
+    let database = parts[..parts.len() - 2].join("/");
+    if !registry.contains_schema(&database, &schema)
+        || registry.contains_drawer(&database, &schema, &drawer)
+    {
+        return None;
+    }
+
+    Some((database, schema, drawer))
 }
 
 impl command_dispatch::BoundaryCommandExecutor for WardrobeEngine {
