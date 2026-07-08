@@ -1,9 +1,6 @@
-use crate::wrdb_lib::core::writer::DatabaseWriter;
 use crate::wrdb_lib::drawer::Drawer;
 use crate::wrdb_lib::pointer;
-use crate::wrdb_lib::reverse_relationships::{
-    REVERSE_RELATIONSHIP_INDEX_FILE_NAME, ReverseRelationshipEntry, ReverseRelationshipIndex,
-};
+use crate::wrdb_lib::reverse_relationships::{ReverseRelationshipEntry, ReverseRelationshipIndex};
 use crate::wrdb_lib::wal::{DurabilityPolicy, WalJournal};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,9 +38,6 @@ pub struct Database {
     storage_directory: PathBuf,
     active_drawers: HashMap<String, CachedDrawer>,
     reverse_relationship_index: ReverseRelationshipIndex,
-    reverse_relationship_writer: DatabaseWriter,
-    reverse_relationship_index_available: bool,
-    reverse_relationship_index_dirty: bool,
     mutated_drawers: Mutex<HashSet<String>>,
     max_cached_drawers: Option<usize>,
     access_clock: AtomicU64,
@@ -162,24 +156,13 @@ impl Database {
             std::fs::create_dir_all(&storage_directory)?;
         }
 
-        let reverse_relationship_index_path =
-            storage_directory.join(REVERSE_RELATIONSHIP_INDEX_FILE_NAME);
-        let reverse_relationship_index_available = reverse_relationship_index_path.exists();
-        let reverse_relationship_index =
-            ReverseRelationshipIndex::load(&reverse_relationship_index_path)?;
-        let reverse_relationship_writer =
-            DatabaseWriter::open_drawer(&reverse_relationship_index_path)?;
-
         let wal_journal =
             WalJournal::at_database_path_with_policy(&storage_directory, durability_policy.clone());
 
         let mut database = Self {
             storage_directory,
             active_drawers: HashMap::new(),
-            reverse_relationship_index,
-            reverse_relationship_writer,
-            reverse_relationship_index_available,
-            reverse_relationship_index_dirty: false,
+            reverse_relationship_index: ReverseRelationshipIndex::default(),
             mutated_drawers: Mutex::new(HashSet::new()),
             max_cached_drawers,
             access_clock: AtomicU64::new(0),
@@ -191,9 +174,7 @@ impl Database {
             wal_journal,
         };
 
-        if !database.reverse_relationship_index_available {
-            database.rebuild_reverse_relationship_index_from_disk()?;
-        }
+        database.rebuild_reverse_relationship_index_from_disk()?;
 
         Ok(database)
     }
@@ -238,10 +219,6 @@ impl Database {
         self.storage_directory.clone()
     }
 
-    pub(crate) fn reverse_relationship_index_available(&self) -> bool {
-        self.reverse_relationship_index_available
-    }
-
     pub(crate) fn reverse_relationships_for_parent(
         &self,
         parent_pointer: &str,
@@ -265,7 +242,6 @@ impl Database {
             relationship_constraints,
             delete_rules,
         );
-        self.reverse_relationship_index_dirty = true;
         Ok(())
     }
 
@@ -285,7 +261,6 @@ impl Database {
                 delete_rules,
             );
         }
-        self.reverse_relationship_index_dirty = true;
         Ok(())
     }
 
@@ -294,27 +269,12 @@ impl Database {
         child_drawer: &str,
         child_ids: &[String],
     ) -> std::io::Result<()> {
-        let mut changed = false;
         for child_id in child_ids {
-            changed |= self
+            self
                 .reverse_relationship_index
                 .remove_child(child_drawer, child_id);
         }
 
-        if changed {
-            self.reverse_relationship_index_dirty = true;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn persist_reverse_relationship_index(&mut self) -> std::io::Result<()> {
-        if self.reverse_relationship_index_dirty {
-            let bytes = serde_json::to_vec_pretty(&self.reverse_relationship_index)?;
-            self.reverse_relationship_writer.rewrite_all(&bytes)?;
-            self.reverse_relationship_index_dirty = false;
-        }
-        self.reverse_relationship_index_available = true;
         Ok(())
     }
 
@@ -362,8 +322,7 @@ impl Database {
             }
         }
 
-        self.reverse_relationship_index_dirty = true;
-        self.persist_reverse_relationship_index()
+        Ok(())
     }
 
     pub(crate) fn mark_drawer_mutated(&self, name: &str) {
@@ -540,11 +499,5 @@ impl Database {
 
             self.active_drawers.remove(&candidate_name);
         }
-    }
-}
-
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = self.persist_reverse_relationship_index();
     }
 }

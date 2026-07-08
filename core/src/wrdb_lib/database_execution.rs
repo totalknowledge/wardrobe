@@ -1042,9 +1042,6 @@ impl WardrobeEngine {
             routing::scoped_drawer_name(target_drawer, context.drawer_namespace);
         let reverse_entries = {
             let database = Self::read_lock(database_core)?;
-            if !database.reverse_relationship_index_available() {
-                return Ok(None);
-            }
             database.reverse_relationships_for_parent(parent_pointer)
         };
 

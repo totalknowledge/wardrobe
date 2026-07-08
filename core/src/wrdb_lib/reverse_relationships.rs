@@ -2,11 +2,6 @@ use crate::wrdb_lib::pointer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::{Error, ErrorKind, Result};
-use std::path::Path;
-
-pub(crate) const REVERSE_RELATIONSHIP_INDEX_FILE_NAME: &str = ".reverse_relationships.json";
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) struct ReverseRelationshipEntry {
@@ -29,20 +24,6 @@ pub(crate) struct ReverseRelationshipIndex {
 }
 
 impl ReverseRelationshipIndex {
-    pub(crate) fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let bytes = fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(|error| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Reverse relationship index is invalid JSON: {error}"),
-            )
-        })
-    }
-
     pub(crate) fn clear(&mut self) {
         self.references.clear();
     }

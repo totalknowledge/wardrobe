@@ -232,12 +232,6 @@ fn harden_database(database_core: &RwLock<Database>) -> Result<()> {
         }
     }
 
-    // Persist reverse relationship index if dirty
-    {
-        let mut db = write_lock(database_core)?;
-        db.persist_reverse_relationship_index()?;
-    }
-
     Ok(())
 }
 
@@ -274,12 +268,6 @@ pub(super) fn flush_checkpoint(database_core: &RwLock<Database>) -> Result<()> {
 
     wal_handle.set_len(0)?;
     wal_handle.sync_all()?;
-
-    // Persist reverse relationship index
-    {
-        let mut db = write_lock(database_core)?;
-        db.persist_reverse_relationship_index()?;
-    }
 
     read_lock(database_core)?.reset_wal_counters();
 

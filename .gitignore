@@ -9,3 +9,6 @@ node_modules/
 AGENTS.md
 .agent/
 .github/copilot-instructions.md
+/bindings/python/*/target
+**/__pycache__
+**/*.py[cod]

@@ -334,21 +334,8 @@ fn drawer_tombstone_count(path: &Path) -> usize {
     count
 }
 
-fn reverse_relationship_index(database: &TempDatabase) -> serde_json::Value {
-    let index_path = database.path.join(".reverse_relationships.json");
-    let bytes = fs::read(index_path).expect("reverse relationship index should exist");
-    serde_json::from_slice(&bytes).expect("reverse relationship index should parse")
-}
-
-fn reverse_relationship_entries(
-    database: &TempDatabase,
-    parent_pointer: &str,
-) -> Vec<serde_json::Value> {
-    reverse_relationship_index(database)["references"]
-        .get(parent_pointer)
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default()
+fn reverse_relationship_sidecar_exists(database: &TempDatabase) -> bool {
+    database.path.join(".reverse_relationships.json").exists()
 }
 
 struct ReadTarget {
@@ -3971,13 +3958,11 @@ fn us_129_reverse_relationship_index_tracks_insert_update_delete_and_restart() {
         )
         .expect("book should upsert");
 
-        let first_author_refs = reverse_relationship_entries(&database, "@entity:entity_a");
-        assert_eq!(first_author_refs.len(), 1);
-        assert_eq!(first_author_refs[0]["child_drawer"], "book");
-        assert_eq!(first_author_refs[0]["child_id"], "book_001");
-        assert_eq!(first_author_refs[0]["child_pointer"], "@book:book_001");
-        assert_eq!(first_author_refs[0]["field_name"], "author_id");
-        assert_eq!(first_author_refs[0]["explicit"], true);
+        assert!(!reverse_relationship_sidecar_exists(&database));
+        let first_book = read_record(&engine, OperationFilter::pointer("@book:book_001"))
+            .expect("book should read")
+            .expect("book should exist");
+        assert_eq!(first_book["author_id"]["display_name"], "Author A");
 
         upsert_one(
             &engine,
@@ -3990,17 +3975,19 @@ fn us_129_reverse_relationship_index_tracks_insert_update_delete_and_restart() {
         )
         .expect("book update should upsert");
 
-        assert!(reverse_relationship_entries(&database, "@entity:entity_a").is_empty());
-        let second_author_refs = reverse_relationship_entries(&database, "@entity:entity_b");
-        assert_eq!(second_author_refs.len(), 1);
-        assert_eq!(second_author_refs[0]["child_pointer"], "@book:book_001");
+        assert!(!reverse_relationship_sidecar_exists(&database));
+        let updated_book = read_record(&engine, OperationFilter::pointer("@book:book_001"))
+            .expect("updated book should read")
+            .expect("updated book should exist");
+        assert_eq!(updated_book["author_id"]["display_name"], "Author B");
     }
 
     let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
-    assert_eq!(
-        reverse_relationship_entries(&database, "@entity:entity_b").len(),
-        1
-    );
+    assert!(!reverse_relationship_sidecar_exists(&database));
+    let reopened_book = read_record(&reopened, OperationFilter::pointer("@book:book_001"))
+        .expect("reopened book should read")
+        .expect("reopened book should exist");
+    assert_eq!(reopened_book["author_id"]["display_name"], "Author B");
     assert_eq!(
         reopened
             .delete(
@@ -4010,7 +3997,7 @@ fn us_129_reverse_relationship_index_tracks_insert_update_delete_and_restart() {
             .expect("book delete should succeed"),
         1
     );
-    assert!(reverse_relationship_entries(&database, "@entity:entity_b").is_empty());
+    assert!(!reverse_relationship_sidecar_exists(&database));
 }
 
 #[test]
@@ -4042,31 +4029,31 @@ fn us_129_set_null_delete_rule_updates_reverse_relationship_index() {
         }),
     );
     let database_directory = database.path.to_string_lossy().into_owned();
-    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+    {
+        let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+        upsert_one(
+            &engine,
+            "entity",
+            json!({"_id": "entity_parent", "display_name": "Parent"}),
+        )
+        .expect("entity should upsert");
+        upsert_one(
+            &engine,
+            "book",
+            json!({
+                "_id": "book_child",
+                "title": "SetNull Child",
+                "author_id": "@entity:entity_parent"
+            }),
+        )
+        .expect("book should upsert");
+        assert!(!reverse_relationship_sidecar_exists(&database));
+    }
 
-    upsert_one(
-        &engine,
-        "entity",
-        json!({"_id": "entity_parent", "display_name": "Parent"}),
-    )
-    .expect("entity should upsert");
-    upsert_one(
-        &engine,
-        "book",
-        json!({
-            "_id": "book_child",
-            "title": "SetNull Child",
-            "author_id": "@entity:entity_parent"
-        }),
-    )
-    .expect("book should upsert");
-    assert_eq!(
-        reverse_relationship_entries(&database, "@entity:entity_parent").len(),
-        1
-    );
+    let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
 
     assert_eq!(
-        engine
+        reopened
             .delete(
                 OperationFilter::pointer("@entity:entity_parent"),
                 None::<OperationOptions>
@@ -4075,8 +4062,8 @@ fn us_129_set_null_delete_rule_updates_reverse_relationship_index() {
         1
     );
 
-    assert!(reverse_relationship_entries(&database, "@entity:entity_parent").is_empty());
-    let book = read_record(&engine, OperationFilter::pointer("@book:book_child"))
+    assert!(!reverse_relationship_sidecar_exists(&database));
+    let book = read_record(&reopened, OperationFilter::pointer("@book:book_child"))
         .expect("book should read")
         .expect("book should remain");
     assert!(book.get("author_id").is_none());
@@ -4119,9 +4106,7 @@ fn us_129_reverse_relationship_index_survives_compaction() {
         .compact(CompactRequest::drawer("book"))
         .expect("book compaction should succeed");
 
-    let compact_refs = reverse_relationship_entries(&database, "@entity:entity_compact");
-    assert_eq!(compact_refs.len(), 1);
-    assert_eq!(compact_refs[0]["child_pointer"], "@book:book_compact");
+    assert!(!reverse_relationship_sidecar_exists(&database));
 
     let reopened = WardrobeEngine::open(&database_directory).expect("engine should reopen");
     let book = read_record(&reopened, OperationFilter::pointer("@book:book_compact"))
