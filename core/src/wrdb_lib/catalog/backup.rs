@@ -1,8 +1,10 @@
 use super::diagnostics::{is_drawer_data_file, relative_path_string, split_structural_path};
 use crate::engine::{BackupArchive, BackupArchiveFile, RestoreReport, WardrobeEngine};
+use crate::wrdb_lib::drawer::Drawer;
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BACKUP_ARCHIVE_FORMAT: &str = "wardrobe-cli-backup-v1";
 
@@ -89,6 +91,7 @@ pub(crate) fn restore_archive(
         }
         fs::write(destination, bytes)?;
     }
+    rebuild_restored_drawer_indexes(&target)?;
     register_restored_catalog(engine, &target)?;
 
     Ok(RestoreReport {
@@ -204,10 +207,13 @@ fn collect_backup_archive_files(target: &StructuralBackupTarget) -> Result<Vec<B
             ] {
                 let path = target.storage_path.join(&file_name);
                 if path.is_file() {
-                    files.push(BackupArchiveFile {
-                        path: file_name,
-                        bytes_hex: encode_hex(&fs::read(path)?),
-                    });
+                    archive_compacted_drawer_files(
+                        &target.storage_path,
+                        drawer,
+                        Path::new(""),
+                        &mut files,
+                    )?;
+                    break;
                 }
             }
             if files.is_empty() {
@@ -235,6 +241,23 @@ fn collect_directory_archive_files(
         if path.is_dir() {
             collect_directory_archive_files(base, &path, files)?;
         } else if path.is_file() {
+            if is_drawer_data_file(&path) {
+                let Some(drawer_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                let parent = path.parent().unwrap_or(current);
+                let relative_parent = parent.strip_prefix(base).map_err(|error| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Failed to compute backup relative path: {error}"),
+                    )
+                })?;
+                archive_compacted_drawer_files(parent, drawer_name, relative_parent, files)?;
+                continue;
+            }
+            if is_drawer_companion_file_with_data(&path) {
+                continue;
+            }
             let relative_path = path.strip_prefix(base).map_err(|error| {
                 Error::new(
                     ErrorKind::InvalidData,
@@ -248,6 +271,144 @@ fn collect_directory_archive_files(
         }
     }
     Ok(())
+}
+
+fn archive_compacted_drawer_files(
+    source_dir: &Path,
+    drawer_name: &str,
+    relative_dir: &Path,
+    files: &mut Vec<BackupArchiveFile>,
+) -> Result<()> {
+    let staging = BackupStagingDirectory::create()?;
+    for file_name in drawer_file_names(drawer_name) {
+        let source = source_dir.join(&file_name);
+        if source.is_file() {
+            fs::copy(source, staging.path.join(&file_name))?;
+        }
+    }
+
+    {
+        let mut drawer = Drawer::open(&staging.path, drawer_name, "_id", Vec::new())?;
+        drawer.vacuum()?;
+    }
+
+    for file_name in drawer_file_names(drawer_name) {
+        let path = staging.path.join(&file_name);
+        if path.is_file() {
+            files.push(BackupArchiveFile {
+                path: relative_path_string(&relative_dir.join(&file_name)),
+                bytes_hex: encode_hex(&fs::read(path)?),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn rebuild_restored_drawer_indexes(target: &StructuralBackupTarget) -> Result<()> {
+    match target.scope {
+        BackupScope::Wardrobe | BackupScope::Bay => {
+            rebuild_drawer_indexes_in_directory(&target.storage_path)
+        }
+        BackupScope::Drawer => {
+            let Some(drawer) = target.segments.get(2) else {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "drawer restore requires a drawer path",
+                ));
+            };
+            rebuild_drawer_index(&target.storage_path, drawer)
+        }
+    }
+}
+
+fn rebuild_drawer_indexes_in_directory(current: &Path) -> Result<()> {
+    if !current.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            rebuild_drawer_indexes_in_directory(&path)?;
+        } else if path.is_file() && is_drawer_data_file(&path) {
+            let Some(drawer_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let parent = path.parent().unwrap_or(current);
+            rebuild_drawer_index(parent, drawer_name)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rebuild_drawer_index(source_dir: &Path, drawer_name: &str) -> Result<()> {
+    let mut drawer = Drawer::open(source_dir, drawer_name, "_id", Vec::new())?;
+    drawer.vacuum()?;
+    Ok(())
+}
+
+fn drawer_file_names(drawer_name: &str) -> [String; 3] {
+    [
+        format!("{drawer_name}.drw"),
+        format!("{drawer_name}_index.drw"),
+        format!("{drawer_name}_meta.drw"),
+    ]
+}
+
+fn is_drawer_companion_file_with_data(path: &Path) -> bool {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("drw") {
+        return false;
+    }
+
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let Some(drawer_name) = stem
+        .strip_suffix("_index")
+        .or_else(|| stem.strip_suffix("_meta"))
+    else {
+        return false;
+    };
+
+    path.with_file_name(format!("{drawer_name}.drw")).is_file()
+}
+
+struct BackupStagingDirectory {
+    path: PathBuf,
+}
+
+impl BackupStagingDirectory {
+    fn create() -> Result<Self> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir();
+        for attempt in 0..100 {
+            let path = root.join(format!(
+                "wardrobe-backup-{}-{timestamp}-{attempt}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Error::new(
+            ErrorKind::AlreadyExists,
+            "Failed to allocate backup staging directory",
+        ))
+    }
+}
+
+impl Drop for BackupStagingDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 fn validate_backup_archive_format(archive: &BackupArchive) -> Result<()> {

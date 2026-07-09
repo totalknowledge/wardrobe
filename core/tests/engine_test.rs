@@ -8,12 +8,12 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use wardrobe_core::CatalogRegistry;
 use wardrobe_core::{
-    AlterRequest, BsonBinaryFormat, Command, CommandResult, CompactMode, CompactRequest,
-    CreateRequest, CreateResult, DatabaseReader, DeleteResult, NativeBinaryIndexFormat,
-    OperationFilter, OperationOptions, OrderDirection, QueryModifiers, ReadResult, ReturnShape,
-    StatusRequest, StatusResult, StorageCoordinate, StorageFormat, StorageInventory,
-    StorageLocator, StorageScope, UpsertResult, WAL_FILE_NAME, WalJournal, WalOperation,
-    WardrobeConfig, WardrobeEngine, application_logging_is_configured,
+    AlterRequest, BackupArchive, BackupArchiveFile, BsonBinaryFormat, Command, CommandResult,
+    CompactMode, CompactRequest, CreateRequest, CreateResult, DatabaseReader, DeleteResult,
+    NativeBinaryIndexFormat, OperationFilter, OperationOptions, OrderDirection, QueryModifiers,
+    ReadResult, ReturnShape, StatusRequest, StatusResult, StorageCoordinate, StorageFormat,
+    StorageInventory, StorageLocator, StorageScope, UpsertResult, WAL_FILE_NAME, WalJournal,
+    WalOperation, WardrobeConfig, WardrobeEngine, application_logging_is_configured,
     shutdown_application_logging,
 };
 
@@ -332,6 +332,16 @@ fn drawer_tombstone_count(path: &Path) -> usize {
         })
         .expect("drawer should stream");
     count
+}
+
+fn backup_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn reverse_relationship_sidecar_exists(database: &TempDatabase) -> bool {
@@ -5671,6 +5681,145 @@ fn bug_020_drawerless_read_lists_structural_children() {
         CommandResult::Read(ReadResult::Records(records))
             if records.iter().any(|wardrobe| wardrobe["name"] == "nispuk")
     ));
+}
+
+#[test]
+fn bug_023_backup_omits_tombstoned_records() {
+    let database = TempDatabase::new("bug_023_backup_omits_tombstones");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
+
+    engine
+        .create(CreateRequest::database("garden"))
+        .expect("database should create");
+    engine
+        .create(CreateRequest::schema("garden", "default"))
+        .expect("schema should create");
+    engine
+        .create(CreateRequest::drawer("garden", "default", "plants"))
+        .expect("drawer should create");
+    upsert_batch(
+        &engine,
+        "garden/default/plants",
+        vec![
+            json!({"_id": "basil", "name": "Basil"}),
+            json!({"_id": "mint", "name": "Mint"}),
+        ],
+    )
+    .expect("plants should upsert");
+
+    assert_eq!(
+        engine
+            .delete(
+                OperationFilter::query_in("garden/default/plants", json!({"_id": "mint"})),
+                None::<OperationOptions>,
+            )
+            .expect("delete should succeed"),
+        1
+    );
+    let source_data = database
+        .path
+        .join("garden")
+        .join("default")
+        .join("plants.drw");
+    assert!(drawer_tombstone_count(&source_data) >= 1);
+
+    let archive = engine
+        .backup("garden/default/plants")
+        .expect("backup should succeed");
+    engine
+        .restore("garden/default/plants_backup", archive)
+        .expect("restore should succeed");
+
+    let restored_data = database
+        .path
+        .join("garden")
+        .join("default")
+        .join("plants_backup.drw");
+    assert_eq!(drawer_tombstone_count(&restored_data), 0);
+    let restored = read_records(&engine, OperationFilter::drawer("garden/default/plants_backup"))
+        .expect("restored drawer should read");
+    assert_eq!(restored, vec![json!({"_id": "basil", "name": "Basil"})]);
+}
+
+#[test]
+fn bug_023_restore_rebuilds_indexes_from_raw_tombstoned_archive() {
+    let database = TempDatabase::new("bug_023_restore_rebuilds_indexes");
+    let storage_pool = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&storage_pool).expect("engine should open");
+
+    engine
+        .create(CreateRequest::database("garden"))
+        .expect("database should create");
+    engine
+        .create(CreateRequest::schema("garden", "default"))
+        .expect("schema should create");
+    engine
+        .create(CreateRequest::drawer("garden", "default", "plants"))
+        .expect("drawer should create");
+    upsert_batch(
+        &engine,
+        "garden/default/plants",
+        vec![
+            json!({"_id": "basil", "name": "Basil"}),
+            json!({"_id": "mint", "name": "Mint"}),
+        ],
+    )
+    .expect("plants should upsert");
+
+    assert_eq!(
+        engine
+            .delete(
+                OperationFilter::query_in("garden/default/plants", json!({"_id": "mint"})),
+                None::<OperationOptions>,
+            )
+            .expect("delete should succeed"),
+        1
+    );
+
+    let source_dir = database.path.join("garden").join("default");
+    let raw_archive = BackupArchive {
+        format: "wardrobe-cli-backup-v1".to_string(),
+        source_path: "garden/default/plants".to_string(),
+        scope: "drawer".to_string(),
+        files: ["plants.drw", "plants_index.drw", "plants_meta.drw"]
+            .into_iter()
+            .map(|path| BackupArchiveFile {
+                path: path.to_string(),
+                bytes_hex: backup_hex(
+                    &fs::read(source_dir.join(path)).expect("raw drawer file should read"),
+                ),
+            })
+            .collect(),
+    };
+
+    engine
+        .restore("garden/default/plants_restored", raw_archive)
+        .expect("raw restore should succeed");
+
+    let restored_data = database
+        .path
+        .join("garden")
+        .join("default")
+        .join("plants_restored.drw");
+    assert_eq!(drawer_tombstone_count(&restored_data), 0);
+    assert_eq!(
+        engine
+            .count(
+                OperationFilter::drawer("garden/default/plants_restored"),
+                None::<OperationOptions>,
+            )
+            .expect("restored count should succeed"),
+        1
+    );
+    assert!(
+        read_record(
+            &engine,
+            OperationFilter::pointer("@garden/default/plants_restored:mint")
+        )
+        .expect("deleted record lookup should succeed")
+        .is_none()
+    );
 }
 
 #[test]
