@@ -143,7 +143,7 @@ class WardrobeClient {
         options: normalizeOptions(options)
       }
     });
-    return res.read;
+    return unwrapReadResult(res.read);
   }
 
   async delete(filter, options) {
@@ -238,6 +238,37 @@ class WardrobeClient {
     });
     return res.status;
   }
+}
+
+function unwrapReadResult(readResult) {
+  if (!readResult || typeof readResult !== 'object' || Array.isArray(readResult)) {
+    return readResult;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'Records')) {
+    return readResult.Records;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'records')) {
+    return readResult.records;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'Record')) {
+    return readResult.Record;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'record')) {
+    return readResult.record;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'Pointers')) {
+    return readResult.Pointers;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'pointers')) {
+    return readResult.pointers;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'Exists')) {
+    return readResult.Exists;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'exists')) {
+    return readResult.exists;
+  }
+  return readResult;
 }
 
 function normalizeFilter(filter) {
