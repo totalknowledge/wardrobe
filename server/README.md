@@ -1,6 +1,8 @@
 # Wardrobe Server
 
-`wardrobe-server` is the standalone Wardrobe daemon. It hosts a shared `WardrobeEngine` behind a protocol boundary so multiple clients can connect to the same storage root over TCP.
+`wardrobe-server` is the standalone Wardrobe daemon at version `0.26.722`. It hosts a shared `WardrobeEngine` behind a protocol boundary so multiple clients can connect to the same storage root over TCP or Unix sockets.
+
+The server is licensed under Business Source License 1.1. Its change date is July 22, 2030, and its change license is GPL version 2 or later. See `server/LICENSE` for the authoritative terms.
 
 This README is focused on:
 
@@ -14,7 +16,7 @@ This README is focused on:
 The server owns:
 
 - process lifecycle
-- TCP listener setup
+- TCP and Unix-socket listener setup
 - command routing into the core engine
 - multi-tenant scoped execution
 - protocol frame handling for request and response messages
@@ -106,20 +108,24 @@ The simplest client entry point is `WardrobeClient`.
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{ReadRequest, ReadResult, WardrobeClient};
+use wardrobe_core::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
 
 fn main() -> std::io::Result<()> {
     let client = WardrobeClient::open("wardrobe://127.0.0.1:24842")?;
 
     let pointers = client.upsert(
-        "gem",
         json!({
             "_id": "server_fire",
             "element": "Fire"
         }),
+        OperationFilter::drawer("gem"),
+        OperationOptions::default(),
     )?;
 
-    let records = match client.read(ReadRequest::all("gem"))? {
+    let records = match client.read(
+        OperationFilter::drawer("gem"),
+        OperationOptions::default(),
+    )? {
         ReadResult::Records(records) => records,
         _ => Vec::new(),
     };
@@ -155,6 +161,8 @@ The daemon speaks Wardrobe's framed binary protocol. At a high level:
 - the server executes it against the engine
 - the server returns a framed `CommandResult`
 
+Status result payloads are flat. For example, a database inventory result serializes as `{"status":[...]}` rather than `{"status":{"Databases":[...]}}`.
+
 Most users should not work with raw frames directly unless they are writing a custom client or language binding. The recommended path is to use `WardrobeClient`.
 
 Wardrobe is still pre-stable, so the protocol intentionally has no compatibility aliases for removed command names. Remote clients should serialize only the canonical `Command` variants used by the embedded engine.
@@ -166,20 +174,22 @@ The CLI and the server share the same canonical command vocabulary.
 - `wardrobe-server` hosts the shared daemon
 - `wardrobe` can target embedded paths or remote `wardrobe://` connections
 
-For application code, the stable path remains `WardrobeClient` in `wardrobe-core`.
+For application code, the primary path is `WardrobeClient` in `wardrobe-core` or the server-only language package for the target ecosystem.
 
 ## Typical Workflow
 
 1. Start the server with a chosen storage root.
 2. Connect from your application using `WardrobeClient::open("wardrobe://host:24842")`.
 3. Issue CRUD or scoped commands through the client API.
-4. Use `wardrobe --target wardrobe://host:24842 ...` for operational CLI workflows when needed.
+4. Use `wardrobe wardrobe://host:24842 ...` for operational CLI workflows when needed.
 
 ## Related Crates
 
 - `wardrobe-core`: embedded engine, client API, command types, protocol types
 - `wardrobe-server`: standalone daemon
 - `wardrobe-cli`: package crate that installs the `wardrobe` operational CLI
+- `@wardrobe/client`: pure JavaScript/TypeScript TCP and Unix socket client
+- `wardrobe-client`: pure Python TCP and Unix socket client
 
 ## Current Direction
 

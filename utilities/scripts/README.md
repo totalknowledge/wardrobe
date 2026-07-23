@@ -1,6 +1,6 @@
 # CLI Script Sample
 
-This folder contains `wardrobe-cli-demo.sh`, a shell script that walks the Wardrobe CLI through a library-themed workflow.
+This folder contains the version `0.26.722` `wardrobe-cli-demo.sh` workflow, which walks the current positional-target Wardrobe CLI through a library-themed scenario.
 
 Run it from the repository root:
 

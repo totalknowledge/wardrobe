@@ -1,5 +1,7 @@
 # Wardrobe Design
 
+This document reflects workspace release `0.26.722`.
+
 ## Purpose
 
 Wardrobe is a document database platform designed to preserve one storage model and one client-facing programming model across multiple deployment shapes.
@@ -20,15 +22,20 @@ The architectural goal is still simple:
 
 ## Product Family
 
-The current workspace is organized around three primary deliverables.
+The current workspace is organized around the following deliverables and supporting tools.
 
 | Project | Purpose |
 |---|---|
 | `wardrobe-core` | Storage engine, command model, protocol types, and client facade |
 | `wardrobe-server` | Standalone daemon that executes the shared command surface remotely |
 | `wardrobe-cli` crate / `wardrobe` binary | Administrative and operational command-line tooling |
+| `@wardrobe/client` / `@wardrobe/embedded` | JavaScript and TypeScript server and embedded packages |
+| `wardrobe-client` / `wardrobe-embedded` | Python server and embedded packages |
+| `wardrobe-c` | C ABI bridge |
+| `armoire` | Angular and Tauri administration application under `utilities/armoire` |
+| `wardrobe-benchmark` | Cross-engine performance and storage comparison harness |
 
-Supporting projects such as GUI administration tools and language bindings should build on the same engine and command surface rather than inventing separate authorities.
+The GUI and language bindings build on the same engine and command surface rather than introducing separate storage authorities.
 
 ---
 
@@ -42,7 +49,7 @@ Wardrobe has four main structural layers plus an optional routing dimension:
 - `drawer`
 - `record`
 
-The user-facing CLI and `NOTES.txt` use `wardrobe` and `bay`. The Rust API uses the older engine terms `database` and `schema`.
+The user-facing CLI uses `wardrobe` and `bay`. The Rust API uses the engine terms `database` and `schema`.
 
 The mapping is direct:
 
@@ -76,7 +83,7 @@ A JSON-like document stored inside a drawer. Record identifiers may be addressed
 
 ## Capability Model
 
-`NOTES.txt` is the authority for the CLI capability set. The current command families are:
+The CLI help output and `NOTES.txt` describe the current command families:
 
 - Structural and lifecycle management: `create`, `alter`, `drop`
 - Document mutations and queries: `read`, `upsert`, `delete`, `inspect`, `count`
@@ -132,7 +139,7 @@ Important routing rules:
 
 ## Storage Architecture
 
-Current on-disk storage is flat-file based.
+Current on-disk storage uses versioned binary files owned by the embedded engine.
 
 Primary artifacts:
 
@@ -140,8 +147,12 @@ Primary artifacts:
 - Drawer index files: `*_index.drw`
 - Drawer metadata files: `*_meta.drw`
 - Catalog registry: `.catalog.drw`
-- Database WAL files: `.wal`
+- Logical and transaction WAL files
 - Server access-control registry: `_wardrobe_access_control.json`
+
+New data records use version-2 WRDB frames with a native positional value stream and presence bitmap keyed by the drawer field-name map. Version-1 BSON-backed WRDB records remain readable, and compaction rewrites live records using the native format.
+
+Indexes use compact WIDX native binary frames. Readers continue to accept older BSON-backed index entries, while compaction and current writes use the native representation. Materialized secondary indexes use ordered B+ tree-style structures for equality and numeric or string range candidate lookup. Reverse relationship mappings are maintained inside drawer index storage rather than in a separate sidecar file.
 
 The drawer remains the core persistence unit. Indexes, relationship metadata, delete rules, and schema metadata remain attached to that unit.
 
@@ -257,6 +268,8 @@ Discovery surfaces:
 - `status(StatusRequest::schemas(...))`
 - `status(StatusRequest::drawers(...))`
 
+These typed Rust requests return their concrete values directly. Database and drawer discovery return `Vec<StorageInventory>`, while schema discovery returns `Vec<String>`. The serialized result is `{"status":[...]}`; status payloads do not carry `Databases`, `Schemas`, or `Drawers` result tags.
+
 Lifecycle surfaces:
 
 - `create(CreateRequest::database(...))`
@@ -274,6 +287,8 @@ The CLI presents these as `status`, `create`, and `drop` across wardrobes, bays,
 ## Transport Layer
 
 The network protocol uses framed request and response messages carrying serialized `Command` and `CommandResult` payloads.
+
+Frame writers emit the fixed header and payload directly. Persistent TCP clients keep `TCP_NODELAY` enabled, and direct socket paths avoid forcing an extra buffered flush per command while retaining magic, opcode, and payload-length validation.
 
 Because Wardrobe is pre-stable, the protocol does not keep aliases for removed command names. Clients should send the canonical variants: `Read`, `Upsert`, `Delete`, `Inspect`, `Count`, `Compact`, `Create`, `Alter`, `Drop`, `Backup`, `Restore`, `Grant`, `Revoke`, and `Status`.
 
@@ -294,13 +309,29 @@ The client surface should remain stable even when the deployment target changes.
 
 ## Language Bindings and Tooling
 
-Future bindings and administration tools should follow the same rules:
+The delivered bindings intentionally separate server-only packages from embedded native packages so network consumers do not have to load a native storage artifact:
 
-- one public client-facing package per ecosystem where possible
-- driver selection based on connection target
-- reuse of the shared command model instead of custom ad hoc admin APIs
+- JavaScript/TypeScript: `@wardrobe/client` and `@wardrobe/embedded`
+- Python: `wardrobe-client` and `wardrobe-embedded`
+- C ABI: `wardrobe-c`
 
-That applies equally to CLI tooling, GUI tooling, and language bindings.
+Both JavaScript/TypeScript packages expose `WardrobeClient`. Python exposes `WardrobeClient` for server connections and `WardrobeEmbedded` for in-process storage. All bindings serialize the shared command model and return flat status arrays for database, schema, and drawer discovery.
+
+The embedded JavaScript, TypeScript, and Python samples run the same publishing-house workflow against repository-root `./wardrobe` storage, using separate `public_js`, `public_ts`, and `public_py` bays.
+
+Armoire is a utility rather than a sample. It lives under `utilities/armoire`, uses the Rust client/engine through Tauri commands, and supports source-location lifecycle, connection persistence, structural discovery, drawer creation, record reads, and record creation.
+
+---
+
+## Licensing Boundaries
+
+The workspace does not use one repository-wide license:
+
+- `wardrobe-core`, `wardrobe-cli`, language bindings, and samples use MIT.
+- `wardrobe-server` uses Business Source License 1.1 with a July 22, 2030 change date to GPL version 2 or later.
+- Armoire uses the Armoire Source-Available Evaluation License and requires a paid commercial license for production or non-evaluation commercial use.
+
+Each component's license file is authoritative.
 
 ---
 
@@ -311,7 +342,8 @@ Current design priorities are:
 - keep the command surface aligned across engine, client, CLI, and server
 - continue shifting structural discovery and routing toward catalog-backed behavior
 - preserve remote parity for inspection, recovery, schema management, and access control
-- expand bindings and tools on top of the same core execution model
+- preserve binding parity as the package surfaces mature toward publication
+- continue measuring equality, range, traversal, mutation, purge, compaction, and storage behavior across the benchmark matrix
 
 The north star has not changed:
 

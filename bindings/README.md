@@ -1,17 +1,16 @@
-# Wardrobe Language Binding Strategy
+# Wardrobe Language Bindings
 
-Wardrobe language bindings should ship as one public package per language ecosystem.
-The package should select embedded or network behavior internally from the connection string rather than splitting users across separate install names.
+Current binding version: `0.26.722`.
 
-## Package Rule
+Wardrobe provides separate network and embedded packages where the host ecosystem benefits from keeping native storage artifacts out of server-only applications.
 
-```text
-one npm package
-one pip package
-one Rust crate
-```
+| Ecosystem | Network/server package | Embedded package |
+|---|---|---|
+| JavaScript/TypeScript | `@wardrobe/client` | `@wardrobe/embedded` |
+| Python | `wardrobe-client` | `wardrobe-embedded` |
+| C ABI | `wardrobe-c` | `wardrobe-c` |
 
-The package may contain multiple internal driver implementations, but users should import one public API.
+Rust applications use `WardrobeClient` from `wardrobe-core`; the connection target selects embedded, TCP, or Unix socket execution.
 
 ## Network Driver Mode
 
@@ -23,11 +22,11 @@ wardrobe://localhost
 wardrobe+unix:///tmp/wardrobe.sock
 ```
 
-Network mode should:
+Network packages:
 
 - Use the host language's ordinary socket APIs.
 - Avoid loading embedded native storage artifacts.
-- Expose the same public client API as embedded mode where practical.
+- Expose the canonical command surface.
 - Serialize requests through Wardrobe `ProtocolFrame` envelopes carrying `Command` and `CommandResult` payloads.
 
 The Rust `ConnectionTarget` and `WardrobeClient` APIs expose `requires_embedded_engine()` and `uses_socket_transport()` so bindings can decide whether a native embedded artifact is needed before loading it.
@@ -43,17 +42,9 @@ wardrobe+file://path/to/data
 file://path/to/data
 ```
 
-Embedded mode should load the native storage engine artifact and execute directly in the caller's process.
+Embedded mode loads the native storage engine artifact and executes directly in the caller's process.
 
-Embedded packages may carry one or more native binaries built from the Rust core crate, such as platform-specific Node-API, Python extension, `.dll`, `.so`, or `.dylib` artifacts.
-Those artifacts are internal packaging details; the public package name and public client API should remain the same as network mode.
-
-Recommended first binding track:
-
-- Start with one language ecosystem after the Rust protocol and client API stabilize.
-- Prefer Node.js with `napi-rs` for desktop and application runtime coverage, or Python if local scripting becomes the first priority.
-- Document the build matrix before publishing binaries, including operating system, CPU architecture, and runtime ABI.
-- Keep network mode usable without loading the embedded artifact whenever the host package manager and runtime allow lazy loading.
+Embedded packages carry platform-specific native artifacts built from `wardrobe-core`, such as Node-API libraries and Python extensions. They execute commands in the caller's process and do not start or connect to a local Wardrobe server.
 
 Embedded mode is a good fit for:
 
@@ -63,37 +54,35 @@ Embedded mode is a good fit for:
 - Electron and Tauri applications.
 - Test suites that need disposable local storage.
 
-## Maintenance Guidance
+## Shared Contract
 
-Do not create separate public packages for network-only and embedded-only usage unless there is a hard ecosystem constraint.
-If an ecosystem needs separate internal artifacts for bundling, keep those artifacts behind one public package and one public API.
+All bindings use the shared serialized `Command` and `CommandResult` model. Database, schema, and drawer status requests return raw arrays directly; result payloads are not wrapped in `Databases`, `Schemas`, or `Drawers` objects.
 
 ## C ABI Binding
 
 The C ABI binding lives under `bindings/c` and exposes a narrow native surface for C and C-compatible consumers.
 
-The binding should keep the same high-level deployment split as the rest of the binding strategy:
+The binding keeps the same high-level deployment split as the rest of the binding strategy:
 
 - embedded/local targets through direct filesystem paths
 - network targets through Wardrobe URI connection strings
 
-The C ABI is intended to remain a single public package, with any platform-specific loading or packaging details kept internal to the binding crate.
+The C ABI remains a single native package. Its current exports cover version reporting, database status counts, serialized command execution, path duplication, and string release.
 
 ## JavaScript/TypeScript Binding
 
 The JavaScript/TypeScript publish-readiness package lives under `bindings/js-ts`.
 
-This package is prepared for validation, not publication. Use `npm publish --dry-run` from that directory to inspect the package contents without uploading to npm.
+These packages are prepared for validation, not publication. Use `npm publish --dry-run` from each package root to inspect package contents without uploading to npm.
 
-The package keeps the same single public npm package strategy:
+The binding exposes separate packages for server and embedded access:
 
-- package name: `@wardrobe/database`
+- server package: `@wardrobe/client`
+- embedded package: `@wardrobe/embedded`
 - Rust validation crate: `wardrobe-js-ts`
-- TypeScript declarations: `index.d.ts`
-- runtime entry point: `index.js`
-- internal driver modules: `bindings/js-ts/client` and `bindings/js-ts/embedded`
+- package roots: `bindings/js-ts/client` and `bindings/js-ts/embedded`
 
-Do not run `npm publish`, add npm credentials, or add registry tokens unless a release story explicitly approves publication.
+Both packages require Node.js 24 or newer. Do not run `npm publish`, add npm credentials, or add registry tokens unless a release story explicitly approves publication.
 
 ## Python Bindings
 
@@ -105,3 +94,13 @@ The current Python direction intentionally uses two package names:
 - `wardrobe-embedded` for native embedded local storage access through a dedicated PyO3 extension
 
 These packages are bindings only. Do not publish to PyPI, add credentials, or create release automation until a release story explicitly approves publication.
+
+Both packages require Python 3.10 or newer. `wardrobe-embedded` is built with PyO3 and maturin; it does not use the C ABI.
+
+## Samples
+
+The repository includes equivalent non-trivial embedded examples under `samples/javascript`, `samples/typescript`, and `samples/python`. Each creates publishing structures, stores related records, queries and verifies them, performs cleanup, and uses ignored repository-root `./wardrobe` storage.
+
+## Licensing
+
+The C, JavaScript/TypeScript, and Python bindings are MIT licensed. Each distributable package includes its own `LICENSE` file.

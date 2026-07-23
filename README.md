@@ -2,6 +2,8 @@
 
 [![coverage](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml/badge.svg)](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml)
 
+Current workspace release: `0.26.722`.
+
 Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
 
 It combines the flexibility of JSON documents with built-in referential integrity, relationship traversal, automatic hydration, cascading operations, and schema validation without requiring separate graph storage or complex object-relational mapping.
@@ -12,7 +14,7 @@ Unlike many document databases that treat references as ordinary strings, Wardro
 
 Documents are organized hierarchically into Wardrobes, Bays, Drawers, and Documents, providing an intuitive logical structure that maps directly onto the on-disk storage layout. This transparent organization makes applications easier to understand, navigate, back up, and administer than systems built around opaque storage engines.
 
-Under the hood, Wardrobe stores BSON-encoded documents in flat files backed by persistent indexes, write-ahead logging, crash recovery, archive-based backup and restore, online compaction, and bounded in-memory caching. The result is a lightweight storage engine that requires no external services while providing capabilities typically associated with much larger database systems.
+Under the hood, Wardrobe stores documents in versioned binary record files backed by native indexes, write-ahead logging, crash recovery, archive-based backup and restore, online compaction, and bounded in-memory caching. The result is a lightweight storage engine that requires no external services while providing capabilities typically associated with much larger database systems.
 
 Whether you're building desktop software, embedded systems, developer tools, games, SaaS platforms, or self-hosted services, Wardrobe provides a deployment-neutral database that scales from a single executable to a networked server without changing how your application interacts with its data.
 
@@ -20,16 +22,19 @@ Whether you're building desktop software, embedded systems, developer tools, gam
 
 ```text
 wardrobe/
-  core/                 Embedded engine library crate
-  cli/                  Command-line administration and operations
-  server/               Standalone network daemon
-  samples/cli-script/    Shell script CLI workflow sample
-  samples/basic-usage/  Sample application using embedded engine
+  core/                  Embedded engine, client facade, command model, and protocol
+  cli/                   Command-line administration and operations
+  server/                Standalone TCP and Unix-socket daemon
+  bindings/              C, JavaScript/TypeScript, and Python bindings
+  samples/               Rust, C ABI, JavaScript, TypeScript, and Python examples
+  utilities/armoire/     Angular and Tauri database administration application
+  utilities/benchmark/   Cross-engine performance benchmark
+  utilities/scripts/     Scripted CLI workflow
 ```
 
 ## Terminology
 
-The CLI help and `NOTES.txt` use user-facing structural names:
+The CLI and end-user examples use user-facing structural names:
 
 - `wardrobe`
 - `bay`
@@ -55,11 +60,12 @@ They map directly:
 
 - Core entry points: `WardrobeEngine`, `WardrobeClient`
 - Routing types: `StorageCoordinate`, `StorageScope`, `StorageLocator`, `StorageInventory`
-- Query and request types: `ReadRequest`, `ReadResult`, `DeleteRequest`, `QueryModifiers`, `OrderDirection`
-- Lifecycle request types: `CreateRequest`, `CreateResult`, `AlterRequest`, `DropRequest`, `CompactRequest`, `CompactMode`, `InspectRequest`, `StatusRequest`, `StatusResult`, `PermissionRequest`
+- Query and result types: `OperationFilter`, `OperationOptions`, `ReturnShape`, `ReadResult`, `UpsertResult`, `DeleteResult`, `InspectResult`, `QueryModifiers`, `OrderDirection`
+- Lifecycle request types: `CreateRequest`, `CreateResult`, `AlterRequest`, `DropRequest`, `CompactRequest`, `CompactMode`, `StatusRequest`, `TypedStatusRequest`, `StatusRequestOutput`, `PermissionRequest`
 - Connection and protocol types: `ConnectionTarget`, `DriverKind`, `DEFAULT_NETWORK_PORT`, `ProtocolFrame`, `ProtocolOpcode`, `PROTOCOL_MAGIC`
 - Inspection, verification, and recovery types: `DrawerInspectionMetrics`, `CheckReport`, `CheckEntry`, `StorageDiagnosis`, `VacuumReport`, `WalVerification`, `BackupArchive`, `BackupArchiveFile`, `RestoreReport`
-- Lower-level storage types: `Database`, `Drawer`, `DatabaseReader`, `DatabaseWriter`, `Recycler`, `StorageFormat`, `BsonBinaryFormat`
+- Configuration types: `WardrobeConfig`, `WardrobeEngineBuilder`, `DataConfig`, `NetworkConfig`, `CacheConfig`, `WalConfig`, `TransactionConfig`, `SecurityConfig`
+- Lower-level storage types: `Database`, `Drawer`, `DatabaseReader`, `DatabaseWriter`, `Recycler`, `StorageFormat`, `BsonBinaryFormat`, `NativeBinaryIndexFormat`
 - Catalog and WAL types: `CATALOG_FILE_NAME`, `CatalogEntry`, `CatalogRegistry`, `CatalogTenantRoute`, `WAL_FILE_NAME`, `WalEntry`, `WalJournal`, `WalOperation`
 - Application logging types: `ApplicationLoggingConfig`, `ApplicationLogLevel`, `ApplicationLogFormat`, `ApplicationLogDestination`, `ApplicationLogEvent`
 
@@ -83,22 +89,32 @@ The two main application entry points are:
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{ReadRequest, ReadResult, WardrobeEngine};
+use std::io::{Error, ErrorKind};
+use wardrobe_core::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
 
 fn main() -> std::io::Result<()> {
-    let engine = WardrobeEngine::open("./data")?;
+    let client = WardrobeClient::open("./wardrobe")?;
 
-    let pointers = engine.upsert(
-        "weapon",
-        json!({
-            "_id": "field-service-kit",
-            "name": "Field Service Toolkit",
-            "category": "maintenance",
-            "tags": ["portable", "repair"]
-        }),
-    )?;
+    let pointer = client
+        .upsert(
+            json!({
+                "_id": "field-service-kit",
+                "name": "Field Service Toolkit",
+                "category": "maintenance",
+                "tags": ["portable", "repair"]
+            }),
+            OperationFilter::drawer("tool"),
+            OperationOptions::default(),
+        )?
+        .into_pointers()
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "upsert returned no pointer"))?;
 
-    let record = match engine.read(ReadRequest::id(&pointers[0]))? {
+    let record = match client.read(
+        OperationFilter::pointer(pointer),
+        OperationOptions::default(),
+    )? {
         ReadResult::Record(record) => record,
         _ => None,
     };
@@ -140,31 +156,72 @@ Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{OrderDirection, QueryModifiers, ReadRequest, ReadResult, WardrobeEngine};
+use wardrobe_core::{
+    OperationFilter, OperationOptions, OrderDirection, ReadResult, WardrobeClient,
+};
 
-fn query(engine: &WardrobeEngine) -> std::io::Result<()> {
-    let records = match engine.read(ReadRequest::filter_with_modifiers(
-        "device",
-        json!({ "name": "sensor%" }),
-        Some(QueryModifiers {
-            order_by: Some("name".to_string()),
-            order_direction: Some(OrderDirection::Ascending),
-            offset: Some(0),
-            limit: Some(25),
-        }),
-    ))? {
+fn query(client: &WardrobeClient) -> std::io::Result<()> {
+    let filter = OperationFilter::query_in("device", json!({ "name": "sensor%" }));
+    let records = match client.read(
+        filter.clone(),
+        OperationOptions::new()
+            .order_by("name")
+            .order_direction(OrderDirection::Ascending)
+            .offset(0)
+            .limit(25),
+    )? {
         ReadResult::Records(records) => records,
         _ => Vec::new(),
     };
 
-    let total = engine.count("device", Some(json!({ "name": "sensor%" })), None)?;
+    let total = client.count(filter, OperationOptions::default())?;
 
     println!("matched {} records, returned {}", total, records.len());
     Ok(())
 }
 ```
 
-### Routed Multi-Tenant Execution
+### Typed Status Results
+
+Rust status constructors encode their output type, so inventory calls return direct values without a result enum or variant wrapper:
+
+```rust
+use wardrobe_core::{StatusRequest, WardrobeClient};
+
+fn inventory(client: &WardrobeClient) -> std::io::Result<()> {
+    let databases = client.status(StatusRequest::databases())?;
+    let schemas = client.status(StatusRequest::schemas("publishing-house"))?;
+    let drawers = client.status(StatusRequest::drawers("publishing-house", "public"))?;
+
+    println!("{} databases, {} schemas, {} drawers", databases.len(), schemas.len(), drawers.len());
+    Ok(())
+}
+```
+
+The command protocol keeps the operation envelope, for example `{"status":[...]}`, but the status payload itself is a raw array. JavaScript, TypeScript, and Python status methods return that array directly.
+
+## Language Bindings
+
+| Ecosystem | Server-backed | Embedded |
+|---|---|---|
+| Rust | `WardrobeClient` with a Wardrobe URI | `WardrobeClient` with a path, or `WardrobeEngine` |
+| JavaScript/TypeScript | `@wardrobe/client` | `@wardrobe/embedded` |
+| Python | `wardrobe-client` | `wardrobe-embedded` |
+| C ABI | `wardrobe-c` | `wardrobe-c` |
+
+The npm packages require Node.js 24 or newer. The Python packages require Python 3.10 or newer. Binding packages are currently prepared for local validation and dry runs; publishing is not part of this release.
+
+## Licensing
+
+Licensing is component-specific:
+
+- Core/client engine, CLI, language bindings, and samples: MIT
+- Wardrobe server: Business Source License 1.1, changing to GPL version 2 or later on July 22, 2030
+- Armoire: Armoire Source-Available Evaluation License (ASEL); production or non-evaluation commercial use requires a paid commercial license
+
+The license file within each component is authoritative.
+
+## Routed Multi-Tenant Execution
 
 ```rust
 use serde_json::json;
@@ -281,10 +338,11 @@ Logs include structured fields such as operation, command, drawer, duration, and
 
 ## Current Capabilities
 
-- Flat-file drawer storage with separate data, index, metadata, and WAL files
-- Big-endian BSON-framed binary serialization for drawer data and index payloads
+- File-backed drawer storage with separate data, index, metadata, and WAL artifacts
+- Versioned WRDB record frames with native positional record payloads, field-name maps, and presence bitmaps; version 1 BSON-backed records remain readable
+- Compact WIDX native binary index frames with transparent reading of older BSON-backed index entries
 - Record CRUD, JSON filtering, pointer lookup, and count operations
-- Primary-key indexing and secondary unique-field indexing
+- Primary-key indexing plus ordered B+ tree-style secondary indexes for equality and numeric/string range queries
 - Nested document graph hydration and relationship-aware record storage
 - Relationship constraints, delete rules, cascade-delete rules, and drawer schema metadata
 - Scoped routing across tenant, database, schema, and drawer boundaries
@@ -297,18 +355,19 @@ Logs include structured fields such as operation, command, drawer, duration, and
 
 ## Sample Application
 
-Run the basic sample crate to execute an end-to-end integration flow that:
+Run the basic Rust sample crate to execute an end-to-end publishing-house flow that:
 
 - Opens a local embedded engine against `./wardrobe`
-- Uses `status(StatusRequest::drawers("main", "public"))` for drawer metadata enumeration
-- Upserts a `public.user` parent with multiple `public.gem` children and a `public.weapon` child
-- Exercises relation links across drawers
-- Filters by array tags and owner via `read(ReadRequest::filter(...))`
-- Cleans up by querying related gems and deleting each via `delete`
+- Creates the `publishing-house/public` hierarchy and its publisher, person, and book drawers
+- Uses direct typed database, schema, and drawer status arrays
+- Stores related publisher, author, editor, and book records
+- Exercises filtered reads, pointer reads, counts, temporary record cleanup, and final integrity checks
 
 ```text
 cargo run -p basic-usage
 ```
+
+Equivalent embedded examples are available in JavaScript, TypeScript, and Python. They use the repository-root ignored `./wardrobe` storage directory and separate bays named `public_js`, `public_ts`, and `public_py`.
 
 ## CLI Sample
 

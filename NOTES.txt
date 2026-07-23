@@ -1,9 +1,27 @@
+Wardrobe 0.26.722
+
+Current release highlights:
+  - Rust, JavaScript/TypeScript, Python, C ABI, CLI, server, samples, benchmark, and Armoire versions are aligned at 0.26.722.
+  - Database, schema, and drawer status payloads return raw arrays without result-side variant wrappers.
+  - JavaScript/TypeScript packages are @wardrobe/client and @wardrobe/embedded.
+  - Python packages are wardrobe-client and wardrobe-embedded.
+  - Embedded JavaScript, TypeScript, and Python samples use ./wardrobe with public_js, public_ts, and public_py bays.
+  - Armoire is located under utilities/armoire and uses its source-available evaluation license.
+  - The server uses Business Source License 1.1; core, CLI, bindings, and samples use MIT.
+  - Current record writes use native WRDB version-2 payloads, indexes use WIDX frames, and ordered secondary indexes support equality and range candidates.
+
 wardrobe:
     -h, --help                  Show this message and exit
     -v, --version               Show the version and exit
+    --pretty                    Pretty-print JSON command output
+    --log-level <level>         Application log level: trace, debug, info, warn, error, off
+    --log-format <format>       Application log format: pretty or json
+    --log-destination <dest>    Application log destination: stderr, stdout, or file
+    --log-file <path>           File path when --log-destination file is used
 
     Connection context is the first positional argument after wardrobe.
     It can be a filesystem path for embedded mode or a Wardrobe URI for remote execution.
+    If no command follows, Wardrobe starts the interactive shell; piped standard input executes one command.
 
     Canonical data commands:
       read <path> <?json_filter> <?json_options>
@@ -44,3 +62,9 @@ wardrobe:
       wardrobe ./data count inventory/public/book
       wardrobe ./data compact inventory/public
       wardrobe ./data status drawers inventory/public
+
+    Status output:
+      status wardrobes returns a raw JSON array of storage inventories.
+      status bays returns a raw JSON array of names.
+      status drawers returns a raw JSON array of storage inventories.
+      The arrays are not wrapped in Databases, Schemas, or Drawers result objects.

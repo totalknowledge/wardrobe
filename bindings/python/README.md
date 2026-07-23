@@ -2,6 +2,8 @@
 
 This directory contains the Python binding packages for Wardrobe.
 
+Both packages are at version `0.26.722`, require Python 3.10 or newer, and use the MIT license.
+
 These packages are binding scaffolds only. Do not publish them until a release story explicitly approves PyPI publication.
 
 ## Packages
@@ -14,6 +16,8 @@ The package split is intentional for Python:
 - Use `wardrobe-client` when connecting to a running Wardrobe server.
 - Use `wardrobe-embedded` when local embedded storage is required.
 
+Both expose the same serialized command operations. Database, schema, and drawer status calls return Python lists directly without result-side variant wrappers.
+
 ## Local Validation
 
 ```powershell
@@ -22,3 +26,5 @@ python -m py_compile bindings/python/wardrobe-embedded/src/wardrobe_embedded/*.p
 ```
 
 The embedded package is configured for `maturin`, but this story does not publish wheels or upload artifacts.
+
+The non-trivial sample under `samples/python` builds or loads the local embedded extension, stores related publishing data under repository-root `./wardrobe`, queries it, verifies pointers, and performs cleanup in the `public_py` bay.

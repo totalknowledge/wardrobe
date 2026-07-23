@@ -1,6 +1,6 @@
 # Wardrobe Benchmark
 
-`wardrobe-benchmark` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
+`wardrobe-benchmark` version `0.26.722` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
 
 The default run uses only embedded Wardrobe so it works without external database services:
 
@@ -61,7 +61,7 @@ cargo run -p wardrobe-benchmark -- --targets wardrobe-remote --wardrobe-remote-u
 
 Targets:
 
-- `wardrobe-embedded` uses Wardrobe flat-file mode directly.
+- `wardrobe-embedded` uses the in-process Wardrobe engine directly.
 - `wardrobe-remote` uses a TCP Wardrobe server. If `--wardrobe-remote-uri` is omitted, the harness starts an in-process server on a loopback port for the run.
 - `sqlite` uses an in-process persistent `rusqlite` connection backed by a WAL file under the run directory by default.
 - `mongodb` uses a persistent native MongoDB Rust client against `--mongo-uri` and `--mongo-database`.
@@ -69,6 +69,8 @@ Targets:
 - `neo4j` uses a persistent native Neo4j Rust driver against `--neo4j-uri`, `--neo4j-database`, `--neo4j-user`, and `--neo4j-password-env`.
 
 The MySQL helper creates a dedicated `wardrobe_benchmark` user and writes `target/wardrobe-benchmark/mysql-credentials.env`, which the benchmark reads by default. If neither the env vars nor the credentials file exists, the benchmark still sends the standard helper password `wardrobe_benchmark`. For custom credentials, set `WARDROBE_BENCH_MYSQL_USER` and `WARDROBE_BENCH_MYSQL_PASSWORD`, or pass `--mysql-user` and `--mysql-password-env <VAR>`. Use `--mysql-no-password` only for intentionally unauthenticated MySQL targets.
+
+The Rust MySQL dependency is built with only its runtime compression, native TLS, and connection-pool features. Unused derive macros and their future-incompatible transitive dependency are intentionally disabled.
 
 The Neo4j helper writes `target/wardrobe-benchmark/neo4j-credentials.env`, which the benchmark reads by default. If neither the env vars nor the credentials file exists, the benchmark still sends the standard helper password `wardrobe_benchmark`. For custom credentials, set `WARDROBE_BENCH_NEO4J_USER` and `WARDROBE_BENCH_NEO4J_PASSWORD`, or pass `--neo4j-user` and `--neo4j-password-env <VAR>`.
 

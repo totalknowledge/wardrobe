@@ -1,8 +1,8 @@
 # Wardrobe API
 
-This document describes the canonical public Rust API exposed by wardrobe-core.
+This document describes the canonical public Rust API exposed by `wardrobe-core` in workspace release `0.26.722`.
 
-The stable operation vocabulary is:
+The current operation vocabulary is:
 
 - read
 - upsert
@@ -31,7 +31,9 @@ WardrobeClient selects embedded, TCP, or Unix socket transport from a connection
 
 ```rust
 impl WardrobeEngine {
-pub fn open(directory: impl AsRef<str>) -> Result<Self>
+pub fn open(directory: &str) -> Result<Self>
+pub fn open_with_config(config: WardrobeConfig) -> Result<Self>
+pub fn builder() -> WardrobeEngineBuilder
 }
 
 impl WardrobeClient {
@@ -102,7 +104,7 @@ F: Into<OperationFilter>,
 O: Into<OperationOptions>
 ```
 
-Convenience constructors may be provided, but the public model should remain payload, filter, and options.
+Convenience conversions are implemented, but the public model remains payload, filter, and options.
 
 ## Upsert
 
@@ -157,17 +159,7 @@ Wardrobe pointer parsing must distinguish:
 123 local record id
 ```
 
-Internal parsing should use a focused parser, not inline ad hoc string handling inside upsert.
-
-Suggested internal shape:
-
-```rust
-pub enum ParsedPointer {
-DrawerOnly { drawer: String },
-FullPointer { drawer: String, id: String },
-LocalId { id: String },
-}
-```
+Internal parsing is centralized so upsert, read, delete, routing, and hydration use the same pointer semantics.
 
 Resolution rules:
 
@@ -191,7 +183,7 @@ It may represent:
 - query filter
 - multiple filters
 
-Suggested public shape:
+Current public shape:
 
 ```rust
 pub enum OperationFilter {
@@ -273,7 +265,7 @@ Rules:
 
 OperationOptions modifies execution without changing the operation verb.
 
-Suggested initial shape:
+Current public shape:
 
 ```rust
 pub struct OperationOptions {
@@ -290,7 +282,7 @@ pub include_diagnostics: Option<bool>,
 }
 ```
 
-Suggested JSON equivalent:
+Serialized JSON equivalent:
 
 ```json
 {
@@ -320,8 +312,8 @@ read retrieves records, record pointers, or existence-style results depending on
 Examples:
 
 ```rust
-client.read(OperationFilter::drawer("book"), None)?;
-client.read(OperationFilter::pointer("@book:123"), None)?;
+client.read(OperationFilter::drawer("book"), None::<OperationOptions>)?;
+client.read(OperationFilter::pointer("@book:123"), None::<OperationOptions>)?;
 client.read(
 OperationFilter::query_in("book", json!({"author": "Tolkien"})),
 None::<OperationOptions>,
@@ -341,7 +333,7 @@ OperationOptions::new()
 )?;
 ```
 
-Suggested result shape:
+Current result shape:
 
 ```rust
 pub enum ReadResult {
@@ -390,14 +382,14 @@ delete removes records only. It does not remove wardrobes, bays, drawers, indexe
 Examples:
 
 ```rust
-client.delete(OperationFilter::pointer("@book:123"), None)?;
+client.delete(OperationFilter::pointer("@book:123"), None::<OperationOptions>)?;
 client.delete(
 OperationFilter::query_in("book", json!({"author": "Tolkien"})),
 OperationOptions::new().multi(true),
 )?;
 ```
 
-Suggested result shape:
+Current result shape:
 
 ```rust
 pub struct DeleteResult {
@@ -420,7 +412,7 @@ inspect returns diagnostic information about records, filters, drawers, storage,
 Examples:
 
 ```rust
-client.inspect(OperationFilter::drawer("book"), None)?;
+client.inspect(OperationFilter::drawer("book"), None::<OperationOptions>)?;
 client.inspect(OperationFilter::pointer("@book:123"), None::<OperationOptions>)?;
 client.inspect(
 OperationFilter::query_in("book", json!({"author": "Tolkien"})),
@@ -428,13 +420,13 @@ None::<OperationOptions>,
 )?;
 ```
 
-Suggested result shape:
+Current result shape:
 
 ```rust
 pub enum InspectResult {
 Drawer(DrawerInspectionMetrics),
-Record(Value),
-Query(QueryInspection),
+Record(Option<Value>),
+Query(Vec<Value>),
 Storage(StorageDiagnosis),
 Path(CheckReport),
 }
@@ -454,7 +446,7 @@ count returns the number of records matching a drawer, pointer, or query filter.
 Examples:
 
 ```rust
-client.count(OperationFilter::drawer("book"), None)?;
+client.count(OperationFilter::drawer("book"), None::<OperationOptions>)?;
 client.count(
 OperationFilter::query_in("book", json!({"author": "Tolkien"})),
 None::<OperationOptions>,
@@ -468,39 +460,9 @@ Rules:
 - Pointer target returns 1 if present and 0 if missing.
 - Count should use indexed candidate paths where possible.
 
-## Internal Normalization
+## Execution Normalization
 
-Before executing any RUDIC operation, Wardrobe should normalize payload, filter, and options into an explicit operation plan.
-
-Suggested internal shape:
-
-```rust
-pub struct NormalizedOperation {
-pub verb: OperationVerb,
-pub payload: Option<Value>,
-pub targets: Vec<ResolvedTarget>,
-pub filter: Option<Value>,
-pub options: OperationOptions,
-}
-```
-
-```rust
-pub enum OperationVerb {
-Read,
-Upsert,
-Delete,
-Inspect,
-Count,
-}
-```
-
-```rust
-pub enum ResolvedTarget {
-Drawer { drawer: String },
-Record { drawer: String, id: String },
-Query { drawer: Option<String>, filter: Value },
-}
-```
+Before executing a RUDIC operation, Wardrobe normalizes filters and options into an explicit internal selection.
 
 Rules:
 
@@ -515,8 +477,8 @@ Structural operations use CAD:
 
 ```rust
 pub fn create<C: Into<CreateRequest>>(&self, request: C) -> Result<CreateResult>
-pub fn alter<A: Into<AlterRequest>>(&self, request: A) -> Result<AlterResult>
-pub fn drop<D: Into<DropRequest>>(&self, request: D) -> Result<DropResult>
+pub fn alter<A: Into<AlterRequest>>(&self, request: A) -> Result<Value>
+pub fn drop<D: Into<DropRequest>>(&self, request: D) -> Result<Value>
 ```
 
 create creates structures and administrative resources.
@@ -532,28 +494,28 @@ delete is reserved for records.
 Common creation requests:
 
 ```rust
-CreateRequest::wardrobe("catalog")
-CreateRequest::bay("catalog", "public")
+CreateRequest::database("catalog")
+CreateRequest::schema("catalog", "public")
 CreateRequest::drawer("catalog", "public", "book")
 CreateRequest::tenant_route("tenant_a", "catalog", "tenant_a/catalog/public")
 CreateRequest::user(json!({"username": "admin"}))
 ```
 
-Compatibility note:
+Terminology note: Rust request types use database/schema/drawer. The CLI presents the same structure as wardrobe/bay/drawer.
 
-The Rust internals may still use database/schema terminology, but public user-facing API docs should prefer wardrobe/bay/drawer unless a lower-level internal type requires otherwise.
-
-Suggested shape:
+Current shape:
 
 ```rust
 pub enum CreateRequest {
-Wardrobe { name: String },
-Bay { wardrobe: String, bay: String },
-Drawer { wardrobe: String, bay: String, drawer: String },
-TenantRoute { tenant_id: String, wardrobe: String, location: String },
+Database { database_name: String },
+Schema { database_name: String, schema_name: String },
+Drawer { database_name: String, schema_name: String, drawer_name: String },
+TenantRoute { tenant_id: String, database_name: String, location: String },
 User { payload: Value },
 }
 ```
+
+Creation returns `CreateResult::StorageInventory` for structural resources and `CreateResult::Admin` for administrative resources.
 
 ## Alter Requests
 
@@ -564,6 +526,7 @@ Examples:
 ```rust
 AlterRequest::schema_rule(
 "book",
+"alter",
 "index",
 "author_id",
 json!({"kind": "index"})
@@ -573,24 +536,22 @@ json!({"kind": "index"})
 ```rust
 AlterRequest::schema_rule(
 "book",
+"alter",
 "constraint",
 "isbn",
 json!({"kind": "unique"})
 )
 ```
 
-Suggested shape:
+Current shape:
 
 ```rust
 pub enum AlterRequest {
 SchemaRule {
-drawer: String,
+drawer_name: String,
+action: String,
 kind: String,
-field: String,
-payload: Value,
-},
-User {
-username: String,
+field_name: String,
 payload: Value,
 },
 }
@@ -607,24 +568,24 @@ Rules:
 Examples:
 
 ```rust
-DropRequest::wardrobe("catalog")
-DropRequest::bay("catalog", "public")
+DropRequest::database("catalog")
+DropRequest::schema("catalog", "public")
 DropRequest::drawer("catalog", "public", "book")
 DropRequest::schema_rule("book", "index", "author_id", json!({}))
 DropRequest::user("admin")
 ```
 
-Suggested shape:
+Current shape:
 
 ```rust
 pub enum DropRequest {
-Wardrobe { name: String },
-Bay { wardrobe: String, bay: String },
-Drawer { wardrobe: String, bay: String, drawer: String },
+Database { database_name: String },
+Schema { database_name: String, schema_name: String },
+Drawer { database_name: String, schema_name: String, drawer_name: String },
 SchemaRule {
-drawer: String,
+drawer_name: String,
 kind: String,
-field: String,
+field_name: String,
 payload: Value,
 },
 User { username: String },
@@ -640,29 +601,25 @@ Rules:
 ## Maintenance And Recovery
 
 ```rust
-pub fn compact<C: Into<CompactRequest>>(&self, request: C) -> Result<CompactResult>
-pub fn backup<B: Into<BackupRequest>>(&self, request: B) -> Result<BackupArchive>
-pub fn restore<R: Into<RestoreRequest>>(&self, request: R) -> Result<RestoreReport>
+pub fn compact<C: Into<CompactRequest>>(&self, request: C) -> Result<VacuumReport>
+pub fn backup(&self, source_path: &str) -> Result<BackupArchive>
+pub fn restore(&self, destination_path: &str, archive: BackupArchive) -> Result<RestoreReport>
 ```
 
-compact replaces public vacuum_drawer, migrate_drawer, and CLI clean.
+`compact` is the Rust maintenance operation. The CLI accepts a wardrobe, bay, or drawer path and fans broader scopes out to drawer compaction calls.
 
 Compaction examples:
 
 ```rust
 CompactRequest::drawer("book")
 CompactRequest::drawer_with_mode("book", CompactMode::Migrate)
-CompactRequest::bay("catalog", "public")
-CompactRequest::wardrobe("catalog")
 ```
 
-Suggested shape:
+Current shape:
 
 ```rust
 pub enum CompactRequest {
-Drawer { drawer: String, mode: CompactMode },
-Bay { wardrobe: String, bay: String, mode: CompactMode },
-Wardrobe { wardrobe: String, mode: CompactMode },
+Drawer { drawer_name: String, mode: CompactMode },
 }
 ```
 
@@ -676,15 +633,15 @@ Migrate,
 Backup and restore examples:
 
 ```rust
-client.backup(BackupRequest::path("catalog/public"))?;
-client.restore(RestoreRequest::path("catalog/public", archive))?;
+let archive = client.backup("catalog/public")?;
+client.restore("catalog/public-copy", archive)?;
 ```
 
 ## Administration
 
 ```rust
-pub fn grant(&self, request: PermissionRequest) -> Result<PermissionResult>
-pub fn revoke(&self, request: PermissionRequest) -> Result<PermissionResult>
+pub fn grant(&self, request: PermissionRequest) -> Result<Value>
+pub fn revoke(&self, request: PermissionRequest) -> Result<Value>
 ```
 
 Example:
@@ -693,12 +650,18 @@ Example:
 PermissionRequest::new("admin", "catalog/public:rud")
 ```
 
-Suggested shape:
+Current shape:
 
 ```rust
 pub struct PermissionRequest {
 pub username: String,
-pub scope: String,
+pub permission_scope: String,
+pub scope: Option<PermissionScopeDescriptor>,
+}
+
+pub struct PermissionScopeDescriptor {
+pub path: String,
+pub rights: String,
 }
 ```
 
@@ -708,84 +671,114 @@ Rules:
 - User removal uses drop(DropRequest::user(...)).
 - Permission grant uses grant.
 - Permission revoke uses revoke.
-- Public manage_user should be removed or made internal.
+- Embedded `WardrobeClient` calls reject server access-control administration.
 
 ## Status
 
 ```rust
-pub fn status<S: Into<StatusRequest>>(&self, request: S) -> Result<StatusResult>
+pub fn status<S: StatusRequestOutput>(&self, request: S) -> Result<S::Output>
 ```
 
 Common status requests:
 
 ```rust
 StatusRequest::tenants()
-StatusRequest::wardrobes()
-StatusRequest::bays("catalog")
+StatusRequest::databases()
+StatusRequest::schemas("catalog")
 StatusRequest::drawers("catalog", "public")
 StatusRequest::wal(None::<String>)
 StatusRequest::storage()
 StatusRequest::path("catalog/public/book")
 StatusRequest::drawer_names()
 StatusRequest::cached_drawer_count()
-StatusRequest::server()
-StatusRequest::config()
 ```
 
-Suggested shape:
+Current request variants:
 
 ```rust
 pub enum StatusRequest {
 Tenants,
-Wardrobes,
-Bays { wardrobe: String },
-Drawers { wardrobe: String, bay: String },
-Wal { wardrobe: Option<String> },
+Databases,
+Schemas { database_name: String },
+Drawers { database_name: String, schema_name: String },
+Wal { database_name: Option<String> },
 Storage,
 Path { path: String },
 DrawerNames,
 CachedDrawerCount,
-Server,
-Config,
 }
 ```
 
-StatusResult variants include tenants, wardrobes, bays, drawers, WAL verification, storage diagnosis, path checks, drawer names, cached drawer count, server status, and resolved config.
+Typed status requests return their payloads directly:
 
-Suggested shape:
-
-```rust
-pub enum StatusResult {
-Tenants(Vec<String>),
-Wardrobes(Vec<StorageInventory>),
-Bays(Vec<String>),
-Drawers(Vec<StorageInventory>),
-Wal(WalVerification),
-Storage(StorageDiagnosis),
-Path(CheckReport),
-DrawerNames(Vec<String>),
-CachedDrawerCount(usize),
-Server(Value),
-Config(Value),
-}
+```text
+tenants             -> Vec<String>
+databases           -> Vec<StorageInventory>
+schemas             -> Vec<String>
+drawers             -> Vec<StorageInventory>
+wal                 -> WalVerification
+storage             -> StorageDiagnosis
+path                -> CheckReport
+drawer_names        -> Vec<String>
+cached_drawer_count -> usize
 ```
+
+The serialized command result uses a raw status payload, such as
+`{"status":[...]}`, without `Databases`, `Schemas`, or `Drawers` variant tags.
+Passing a raw `StatusRequest` rather than a typed constructor returns `serde_json::Value` for low-level protocol integration.
+
+## Language Binding Status Contract
+
+JavaScript and TypeScript use `@wardrobe/client` for server connections and `@wardrobe/embedded` for local storage. Both packages expose `WardrobeClient` and accept the same serialized status requests:
+
+```javascript
+const databases = await wardrobe.status('Databases');
+const schemas = await wardrobe.status({ Schemas: { database_name: 'catalog' } });
+const drawers = await wardrobe.status({
+  Drawers: { database_name: 'catalog', schema_name: 'public' }
+});
+```
+
+TypeScript declares these as `StorageInventory[]`, `string[]`, and `StorageInventory[]` respectively. No result-side `Databases`, `Schemas`, or `Drawers` property is present.
+
+Python uses `wardrobe-client` for server connections and `wardrobe-embedded` for local storage:
+
+```python
+databases = wardrobe.status("Databases")
+schemas = wardrobe.status({"Schemas": {"database_name": "catalog"}})
+drawers = wardrobe.status(
+    {"Drawers": {"database_name": "catalog", "schema_name": "public"}}
+)
+```
+
+Each value is returned as a Python list directly. The tagged objects above select the requested operation; they do not wrap the response payload.
+
+## Storage Format Compatibility
+
+`wardrobe-core` publicly exports `StorageFormat`, `BsonBinaryFormat`, and `NativeBinaryIndexFormat` for lower-level integrations and tests.
+
+- Current record writes use version-2 WRDB frames with a field-count header, presence bitmap, and typed positional values resolved through the drawer field-name map.
+- Version-1 BSON-backed WRDB records remain readable.
+- Current index writes use compact WIDX native binary frames; older BSON-backed index entries remain readable.
+- Compaction rewrites live records and index entries into the current formats.
+- Materialized secondary indexes provide ordered equality and numeric/string range candidates while preserving duplicate-key offsets.
 
 ## Configuration
 
-Wardrobe should expose a shared configuration model used by server, CLI, and embedded engine.
+Wardrobe exposes a shared configuration model used by server, CLI, and embedded engine.
 
-The server may load TOML configuration files.
+The server loads TOML configuration files through `WardrobeConfig::from_toml_file` or `WardrobeConfig::from_toml_str`.
 
-The embedded library should accept config structs/builders directly and should not automatically read global config files.
+The embedded library accepts config structs and builders directly and does not automatically read global config files.
 
-Suggested entry points:
+Current entry points:
 
 ```rust
 pub fn open_with_config(config: WardrobeConfig) -> Result<Self>
 pub fn builder() -> WardrobeEngineBuilder
 ```
 
-Suggested builder style:
+Builder example:
 
 ```rust
 WardrobeEngine::builder()
@@ -795,7 +788,7 @@ WardrobeEngine::builder()
 .open()?;
 ```
 
-Suggested config surface:
+Current config surface:
 
 ```rust
 pub struct WardrobeConfig {
@@ -805,7 +798,7 @@ pub cache: CacheConfig,
 pub wal: WalConfig,
 pub transactions: TransactionConfig,
 pub security: SecurityConfig,
-pub logging: LoggingConfig,
+pub logging: ApplicationLoggingConfig,
 }
 ```
 
@@ -873,13 +866,12 @@ format: pretty, json
 destination: stderr, stdout, file
 ```
 
-Logging configuration should control:
+Logging configuration controls:
 
 - level
 - format
 - destination
 - file path
-- module filters in a future subscriber-backed configuration layer
 
 Application logs must not be used for recovery.
 
