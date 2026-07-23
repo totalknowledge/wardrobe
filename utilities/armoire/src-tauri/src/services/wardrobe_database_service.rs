@@ -4,8 +4,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use wardrobe_core::{
-    CreateRequest, OperationFilter, OperationOptions, ReadResult, StatusRequest, StatusResult,
-    StorageInventory, WardrobeClient, WardrobeEngine,
+    CreateRequest, OperationFilter, OperationOptions, ReadResult, StatusRequest, StorageInventory,
+    WardrobeClient, WardrobeEngine,
 };
 
 struct ActiveConnection {
@@ -537,51 +537,57 @@ impl WardrobeDatabaseService {
 }
 
 trait StatusSource {
-    fn status_databases(&self) -> io::Result<StatusResult>;
-    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult>;
-    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult>;
+    fn status_databases(&self) -> io::Result<Vec<StorageInventory>>;
+    fn status_schemas(&self, database_name: &str) -> io::Result<Vec<String>>;
+    fn status_drawers(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> io::Result<Vec<StorageInventory>>;
 }
 
 impl StatusSource for WardrobeEngine {
-    fn status_databases(&self) -> io::Result<StatusResult> {
+    fn status_databases(&self) -> io::Result<Vec<StorageInventory>> {
         self.status(StatusRequest::databases())
     }
 
-    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
+    fn status_schemas(&self, database_name: &str) -> io::Result<Vec<String>> {
         self.status(StatusRequest::schemas(database_name))
     }
 
-    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
+    fn status_drawers(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> io::Result<Vec<StorageInventory>> {
         self.status(StatusRequest::drawers(database_name, schema_name))
     }
 }
 
 impl StatusSource for WardrobeClient {
-    fn status_databases(&self) -> io::Result<StatusResult> {
+    fn status_databases(&self) -> io::Result<Vec<StorageInventory>> {
         self.status(StatusRequest::databases())
     }
 
-    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
+    fn status_schemas(&self, database_name: &str) -> io::Result<Vec<String>> {
         self.status(StatusRequest::schemas(database_name))
     }
 
-    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
+    fn status_drawers(
+        &self,
+        database_name: &str,
+        schema_name: &str,
+    ) -> io::Result<Vec<StorageInventory>> {
         self.status(StatusRequest::drawers(database_name, schema_name))
     }
 }
 
 fn status_databases(source: &impl StatusSource) -> io::Result<Vec<StorageInventory>> {
-    match source.status_databases()? {
-        StatusResult::Databases(databases) => Ok(databases),
-        other => Err(unexpected_status_result("databases", other)),
-    }
+    source.status_databases()
 }
 
 fn status_schemas(source: &impl StatusSource, database_name: &str) -> io::Result<Vec<String>> {
-    match source.status_schemas(database_name)? {
-        StatusResult::Schemas(schemas) => Ok(schemas),
-        other => Err(unexpected_status_result("schemas", other)),
-    }
+    source.status_schemas(database_name)
 }
 
 fn status_drawers(
@@ -589,17 +595,7 @@ fn status_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> io::Result<Vec<StorageInventory>> {
-    match source.status_drawers(database_name, schema_name)? {
-        StatusResult::Drawers(drawers) => Ok(drawers),
-        other => Err(unexpected_status_result("drawers", other)),
-    }
-}
-
-fn unexpected_status_result(expected: &str, actual: StatusResult) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("expected {expected}, got {actual:?}"),
-    )
+    source.status_drawers(database_name, schema_name)
 }
 
 #[cfg(test)]
@@ -616,17 +612,17 @@ mod tests {
     }
 
     struct FakeStatusSource {
-        databases: StatusResult,
-        schemas: StatusResult,
-        drawers: StatusResult,
+        databases: Vec<StorageInventory>,
+        schemas: Vec<String>,
+        drawers: Vec<StorageInventory>,
     }
 
     impl StatusSource for FakeStatusSource {
-        fn status_databases(&self) -> io::Result<StatusResult> {
+        fn status_databases(&self) -> io::Result<Vec<StorageInventory>> {
             Ok(self.databases.clone())
         }
 
-        fn status_schemas(&self, _database_name: &str) -> io::Result<StatusResult> {
+        fn status_schemas(&self, _database_name: &str) -> io::Result<Vec<String>> {
             Ok(self.schemas.clone())
         }
 
@@ -634,7 +630,7 @@ mod tests {
             &self,
             _database_name: &str,
             _schema_name: &str,
-        ) -> io::Result<StatusResult> {
+        ) -> io::Result<Vec<StorageInventory>> {
             Ok(self.drawers.clone())
         }
     }
@@ -687,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn status_helpers_accept_expected_shapes_and_reject_mismatches() {
+    fn status_helpers_return_direct_arrays() {
         let _guard = service_test_lock();
         let inventory = StorageInventory {
             name: "wardrobe".to_string(),
@@ -696,9 +692,9 @@ mod tests {
             register_file_count: 1,
         };
         let source = FakeStatusSource {
-            databases: StatusResult::Databases(vec![inventory.clone()]),
-            schemas: StatusResult::Schemas(vec!["public".to_string()]),
-            drawers: StatusResult::Drawers(vec![inventory]),
+            databases: vec![inventory.clone()],
+            schemas: vec!["public".to_string()],
+            drawers: vec![inventory],
         };
 
         assert_eq!(status_databases(&source).unwrap()[0].name, "wardrobe");
@@ -706,31 +702,6 @@ mod tests {
         assert_eq!(
             status_drawers(&source, "wardrobe", "public").unwrap()[0].record_count,
             1
-        );
-
-        let mismatched = FakeStatusSource {
-            databases: StatusResult::Tenants(Vec::new()),
-            schemas: StatusResult::Tenants(Vec::new()),
-            drawers: StatusResult::Tenants(Vec::new()),
-        };
-        assert_eq!(
-            status_databases(&mismatched).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            status_schemas(&mismatched, "wardrobe").unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            status_drawers(&mismatched, "wardrobe", "public")
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert!(
-            unexpected_status_result("drawers", StatusResult::Tenants(Vec::new()))
-                .to_string()
-                .contains("expected drawers")
         );
     }
 

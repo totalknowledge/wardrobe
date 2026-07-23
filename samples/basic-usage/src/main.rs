@@ -1,549 +1,274 @@
-use serde_json::{Value, json};
-use std::io::{self, Error, ErrorKind};
+use serde_json::json;
+use std::io;
 use wardrobe_core::{
-    Command, CommandResult, OperationFilter, OperationOptions, OrderDirection, QueryModifiers,
-    ReadResult, StatusRequest, StatusResult, StorageScope, WardrobeClient, WardrobeEngine,
+    Command, CommandResult, CreateRequest, OperationFilter, OperationOptions, OrderDirection,
+    QueryModifiers, ReadResult, StatusRequest, StorageScope, WardrobeClient, WardrobeEngine,
 };
 
 const DATABASE_DIRECTORY: &str = "./wardrobe";
-const DATABASE_NAME: &str = "basic-usage";
+const DATABASE_NAME: &str = "publishing-house";
 const SCHEMA_NAME: &str = "public";
-const USER_DRAWER: &str = "user";
-const GEM_DRAWER: &str = "gem";
-const WEAPON_DRAWER: &str = "weapon";
+const PERSON_DRAWER: &str = "person";
+const PUBLISHER_DRAWER: &str = "publisher";
+const BOOK_DRAWER: &str = "book";
 
-fn initialize_engine_instance() -> io::Result<WardrobeEngine> {
-    WardrobeEngine::open(DATABASE_DIRECTORY)
-}
-
-fn initialize_metadata_client() -> io::Result<WardrobeClient> {
-    WardrobeClient::open(DATABASE_DIRECTORY)
-}
-
-fn initialize_public_client() -> io::Result<WardrobeClient> {
-    WardrobeClient::open("./wardrobe/basic-usage/public")
-}
-
-fn print_execution_separator(stage_title: &str) {
+fn print_separator(title: &str) {
     println!("\n==================================================");
-    println!(">>> {}", stage_title);
+    println!(">>> {}", title);
     println!("==================================================\n");
-}
-
-fn result_to_pointer(result: CommandResult) -> io::Result<String> {
-    match result {
-        CommandResult::Upsert(result) => result
-            .into_pointers()
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "upsert returned no pointer")),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("Expected pointer result, got {other:?}"),
-        )),
-    }
-}
-
-fn public_scope() -> StorageScope {
-    StorageScope::schema(DATABASE_NAME, SCHEMA_NAME)
-}
-
-fn pointer_from_record(record: &Value, drawer_name: &str) -> io::Result<String> {
-    let raw_id = record
-        .get("_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "record is missing _id"))?;
-
-    if raw_id.starts_with('@') {
-        return Ok(raw_id.to_string());
-    }
-
-    Ok(format!("@{drawer_name}:{raw_id}"))
-}
-
-fn drawer_query_filter(drawer_name: impl Into<String>, query: Value) -> OperationFilter {
-    OperationFilter::query_in(drawer_name, query)
 }
 
 fn read_records(
     client: &WardrobeClient,
     filter: OperationFilter,
     options: impl Into<OperationOptions>,
-) -> io::Result<Vec<Value>> {
+) -> io::Result<Vec<serde_json::Value>> {
     match client.read(filter, options.into())? {
         ReadResult::Records(records) => Ok(records),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             format!("Expected record list, got {other:?}"),
         )),
     }
 }
 
-fn read_record(
+fn read_single_record(
     client: &WardrobeClient,
     filter: OperationFilter,
-    options: impl Into<OperationOptions>,
-) -> io::Result<Option<Value>> {
-    match client.read(filter, options.into())? {
+) -> io::Result<Option<serde_json::Value>> {
+    match client.read(filter, OperationOptions::default())? {
         ReadResult::Record(record) => Ok(record),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             format!("Expected single record, got {other:?}"),
         )),
     }
 }
 
-fn status_databases<C>(client: &C) -> io::Result<Vec<wardrobe_core::StorageInventory>>
-where
-    C: StatusSource,
-{
-    match client.status_databases()? {
-        StatusResult::Databases(databases) => Ok(databases),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("Expected databases, got {other:?}"),
+fn extract_pointer(result: CommandResult) -> io::Result<String> {
+    match result {
+        CommandResult::Upsert(res) => res.into_pointers().into_iter().next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "upsert returned no pointer")
+        }),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Expected upsert result, got {other:?}"),
         )),
     }
 }
 
-fn status_schemas<C>(client: &C, database_name: &str) -> io::Result<Vec<String>>
-where
-    C: StatusSource,
-{
-    match client.status_schemas(database_name)? {
-        StatusResult::Schemas(schemas) => Ok(schemas),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("Expected schemas, got {other:?}"),
-        )),
-    }
-}
+fn main() -> io::Result<()> {
+    let engine = WardrobeEngine::open(DATABASE_DIRECTORY)?;
+    let metadata_client = WardrobeClient::open(DATABASE_DIRECTORY)?;
+    let scope = StorageScope::schema(DATABASE_NAME, SCHEMA_NAME);
 
-fn status_drawers<C>(
-    client: &C,
-    database_name: &str,
-    schema_name: &str,
-) -> io::Result<Vec<wardrobe_core::StorageInventory>>
-where
-    C: StatusSource,
-{
-    match client.status_drawers(database_name, schema_name)? {
-        StatusResult::Drawers(drawers) => Ok(drawers),
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("Expected drawers, got {other:?}"),
-        )),
-    }
-}
+    print_separator("Phase 1: Metadata & Inventory Discovery");
 
-trait StatusSource {
-    fn status_databases(&self) -> io::Result<StatusResult>;
-    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult>;
-    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult>;
-}
+    engine.create(CreateRequest::database(DATABASE_NAME))?;
+    engine.create(CreateRequest::schema(DATABASE_NAME, SCHEMA_NAME))?;
+    ensure_engine_drawer(&engine, PUBLISHER_DRAWER)?;
+    ensure_engine_drawer(&engine, PERSON_DRAWER)?;
+    ensure_engine_drawer(&engine, BOOK_DRAWER)?;
 
-impl StatusSource for WardrobeClient {
-    fn status_databases(&self) -> io::Result<StatusResult> {
-        self.status(StatusRequest::databases())
-    }
+    let client = WardrobeClient::open(format!(
+        "{DATABASE_DIRECTORY}/{DATABASE_NAME}/{SCHEMA_NAME}"
+    ))?;
 
-    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
-        self.status(StatusRequest::schemas(database_name))
-    }
+    let databases = metadata_client.status(StatusRequest::databases())?;
+    println!("System Databases: {:?}", databases);
 
-    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
-        self.status(StatusRequest::drawers(database_name, schema_name))
-    }
-}
+    let schemas = metadata_client.status(StatusRequest::schemas(DATABASE_NAME))?;
+    println!("Available Schemas in '{}': {:?}", DATABASE_NAME, schemas);
 
-impl StatusSource for WardrobeEngine {
-    fn status_databases(&self) -> io::Result<StatusResult> {
-        self.status(StatusRequest::databases())
-    }
-
-    fn status_schemas(&self, database_name: &str) -> io::Result<StatusResult> {
-        self.status(StatusRequest::schemas(database_name))
-    }
-
-    fn status_drawers(&self, database_name: &str, schema_name: &str) -> io::Result<StatusResult> {
-        self.status(StatusRequest::drawers(database_name, schema_name))
-    }
-}
-
-fn perform_full_diagnostic_suite(client: &WardrobeClient) -> io::Result<()> {
-    let available_databases = status_databases(client)?;
-    let database_names: Vec<String> = available_databases.iter().map(|d| d.name.clone()).collect();
-    println!("System Databases: {:?}", database_names);
-
-    let available_schemas = status_schemas(client, DATABASE_NAME)?;
-    println!(
-        "Available Schemas in '{}': {:?}",
-        DATABASE_NAME, available_schemas
-    );
-
-    let drawer_inventory = status_drawers(client, DATABASE_NAME, SCHEMA_NAME)?;
-    println!("Drawers in basic-usage/public:");
-    for drawer in drawer_inventory {
+    let drawers = metadata_client.status(StatusRequest::drawers(DATABASE_NAME, SCHEMA_NAME))?;
+    println!("Drawers in publishing-house/public:");
+    for drawer in drawers {
         println!(
             " - Drawer: {} ({} records)",
             drawer.name, drawer.record_count
         );
     }
 
-    Ok(())
-}
-
-fn upsert_in_public_scope(
-    engine: &WardrobeEngine,
-    drawer_name: &str,
-    payload: Value,
-) -> io::Result<String> {
-    result_to_pointer(engine.execute_in_scope(
-        public_scope(),
+    print_separator("Phase 2: Relational Data Population");
+    let publisher_res = engine.execute_in_scope(
+        scope.clone(),
         Command::Upsert {
-            payload,
-            filter: OperationFilter::drawer(drawer_name),
+            payload: json!({
+                "_id": "pub_001",
+                "name": "Apex Press",
+                "founded_year": 1994,
+                "active": true
+            }),
+            filter: OperationFilter::drawer(PUBLISHER_DRAWER),
             options: OperationOptions::default(),
         },
-    )?)
-}
-
-fn upsert_user_record(
-    engine: &WardrobeEngine,
-    user_id: &str,
-    username: &str,
-) -> io::Result<String> {
-    let pointer = upsert_in_public_scope(
-        engine,
-        USER_DRAWER,
-        json!({
-            "_id": user_id,
-            "username": username,
-            "account_level": "gold",
-            "active": true
-        }),
     )?;
-    println!(
-        "Successfully persisted user: {} (Pointer: {})",
-        user_id, pointer
-    );
-    Ok(pointer)
-}
+    let publisher_pointer = extract_pointer(publisher_res)?;
+    println!("Persisted publisher -> {}", publisher_pointer);
 
-fn upsert_gem_record(
-    engine: &WardrobeEngine,
-    gem_id: &str,
-    user_id: &str,
-    element: &str,
-    tags: Vec<&str>,
-) -> io::Result<String> {
-    let pointer = upsert_in_public_scope(
-        engine,
-        GEM_DRAWER,
-        json!({
-            "_id": gem_id,
-            "user_id": user_id,
-            "element": element,
-            "tags": tags
-        }),
+    let author_res = engine.execute_in_scope(
+        scope.clone(),
+        Command::Upsert {
+            payload: json!({
+                "_id": "author_001",
+                "name": "Elena Vance",
+                "role": "author",
+                "genres": ["sci-fi", "thriller"]
+            }),
+            filter: OperationFilter::drawer(PERSON_DRAWER),
+            options: OperationOptions::default(),
+        },
     )?;
-    println!(
-        "Successfully persisted gem: {} (Pointer: {})",
-        gem_id, pointer
-    );
-    Ok(pointer)
-}
+    let author_pointer = extract_pointer(author_res)?;
+    println!("Persisted author (in person drawer) -> {}", author_pointer);
 
-fn upsert_weapon_record(
-    engine: &WardrobeEngine,
-    weapon_id: &str,
-    user_id: &str,
-    primary_gem_id: &str,
-    name: &str,
-    damage: u32,
-) -> io::Result<String> {
-    let pointer = upsert_in_public_scope(
-        engine,
-        WEAPON_DRAWER,
-        json!({
-            "_id": weapon_id,
-            "user_id": user_id,
-            "primary_gem_id": primary_gem_id,
-            "name": name,
-            "damage": damage
-        }),
+    let editor_res = engine.execute_in_scope(
+        scope.clone(),
+        Command::Upsert {
+            payload: json!({
+                "_id": "editor_001",
+                "name": "Marcus Sterling",
+                "role": "editor",
+                "department": "fiction"
+            }),
+            filter: OperationFilter::drawer(PERSON_DRAWER),
+            options: OperationOptions::default(),
+        },
     )?;
-    println!(
-        "Successfully persisted weapon: {} (Pointer: {})",
-        weapon_id, pointer
-    );
-    Ok(pointer)
-}
+    let editor_pointer = extract_pointer(editor_res)?;
+    println!("Persisted editor (in person drawer) -> {}", editor_pointer);
 
-fn execute_and_print_tag_filter(client: &WardrobeClient, user_pointer: &str) -> io::Result<()> {
+    let book_res = engine.execute_in_scope(
+        scope,
+        Command::Upsert {
+            payload: json!({
+                "_id": "book_001",
+                "title": "The Quantum Horizon",
+                "publisher_id": publisher_pointer,
+                "author_id": author_pointer,
+                "editor_id": editor_pointer,
+                "page_count": 420
+            }),
+            filter: OperationFilter::drawer(BOOK_DRAWER),
+            options: OperationOptions::default(),
+        },
+    )?;
+    let book_pointer = extract_pointer(book_res)?;
+    println!("Persisted book -> {}", book_pointer);
+
+    print_separator("Phase 3: Filter Query Execution");
     let query_modifiers = QueryModifiers {
-        order_by: Some("element".to_string()),
+        order_by: Some("name".to_string()),
         order_direction: Some(OrderDirection::Ascending),
         offset: Some(0),
         limit: Some(10),
     };
 
-    let filter_payload = json!({
-        "user_id": user_pointer,
-        "tags": ["support", "magic"]
-    });
-    let matching_records = read_records(
-        client,
-        drawer_query_filter(GEM_DRAWER, filter_payload),
-        OperationOptions::from(query_modifiers),
+    let matching_personnel = read_records(
+        &client,
+        OperationFilter::query_in(
+            PERSON_DRAWER,
+            json!({
+                "role": "author"
+            }),
+        ),
+        query_modifiers,
     )?;
 
-    println!("Filtered gems for tag match: {}", matching_records.len());
     println!(
-        "Found {} records matching the user and tag filter",
-        matching_records.len()
+        "Found {} matching personnel records:",
+        matching_personnel.len()
     );
-    for record in matching_records {
-        println!("  Match Found: {}", record);
+    for person in matching_personnel {
+        println!("  - Match Found: {}", person);
     }
 
-    Ok(())
-}
+    print_separator("Phase 4: Relation Verification");
+    let verified_book = read_single_record(&client, OperationFilter::pointer(&book_pointer))?;
+    let verified_author = read_single_record(&client, OperationFilter::pointer(&author_pointer))?;
+    let verified_editor = read_single_record(&client, OperationFilter::pointer(&editor_pointer))?;
+    println!("Book lookup check: {:?}", verified_book.is_some());
+    println!("Author lookup check: {:?}", verified_author.is_some());
+    println!("Editor lookup check: {:?}", verified_editor.is_some());
 
-fn verify_three_relations(
-    client: &WardrobeClient,
-    user_pointer: &str,
-    gem_pointer: &str,
-    weapon_pointer: &str,
-) -> io::Result<()> {
-    let gem = read_records(
-        client,
-        drawer_query_filter(
-            GEM_DRAWER,
-            json!({
-                "_id": gem_pointer.trim_start_matches("@gem:")
-            }),
-        ),
-        None::<OperationOptions>,
-    )?
-    .into_iter()
-    .next()
-    .ok_or_else(|| {
-        Error::new(
-            ErrorKind::NotFound,
-            "gem record missing before verification",
-        )
-    })?;
-    let weapon = read_records(
-        client,
-        drawer_query_filter(
-            WEAPON_DRAWER,
-            json!({
-                "_id": weapon_pointer.trim_start_matches("@weapon:")
-            }),
-        ),
-        None::<OperationOptions>,
-    )?
-    .into_iter()
-    .next()
-    .ok_or_else(|| {
-        Error::new(
-            ErrorKind::NotFound,
-            "weapon record missing before verification",
-        )
-    })?;
-
+    print_separator("Phase 5: Maintenance & Stress Test Cycle");
+    let person_count = client.count(PERSON_DRAWER, None::<OperationOptions>)?;
+    let book_count = client.count(BOOK_DRAWER, None::<OperationOptions>)?;
     println!(
-        "Relation check: gem record {}, weapon record {}, user pointer {}",
-        gem, weapon, user_pointer
+        "Maintenance check: {} personnel, {} books active",
+        person_count, book_count
     );
 
-    Ok(())
-}
-
-fn perform_cascade_delete_sequence(
-    client: &WardrobeClient,
-    user_pointer: &str,
-    weapon_pointer: &str,
-) -> io::Result<()> {
-    let related_gems = read_records(
-        client,
-        drawer_query_filter(
-            GEM_DRAWER,
+    for i in 0..5 {
+        let temp_id = format!("temp_book_{i}");
+        let res = client.upsert(
             json!({
-                "user_id": user_pointer
+                "_id": temp_id,
+                "title": "Temporary Draft",
+                "page_count": 100
             }),
-        ),
-        None::<OperationOptions>,
-    )?;
-    let removed_gem_count = related_gems.len();
-    println!("Identifying {} gems to remove", removed_gem_count);
-
-    for gem in related_gems {
-        let gem_pointer = pointer_from_record(&gem, GEM_DRAWER)?;
-        client.delete(
-            OperationFilter::pointer(&gem_pointer),
+            OperationFilter::drawer(BOOK_DRAWER),
             None::<OperationOptions>,
         )?;
-        println!("  Deleted orphaned gem: {}", gem_pointer);
+        let ptr = res.into_pointers().into_iter().next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "upsert returned no pointer")
+        })?;
+        client.delete(OperationFilter::pointer(&ptr), None::<OperationOptions>)?;
     }
+    println!("Stress test cycle completed (5 temporary book upserts/deletes).");
 
-    client.delete(
-        OperationFilter::pointer(weapon_pointer),
-        None::<OperationOptions>,
-    )?;
-    println!("  Deleted orphaned weapon: {}", weapon_pointer);
-
-    client.delete(
-        OperationFilter::pointer(user_pointer),
-        None::<OperationOptions>,
-    )?;
-    println!("  Deleted primary user record: {}", user_pointer);
-    println!("Deleted {} gems linked to user", removed_gem_count);
-
-    Ok(())
-}
-
-fn perform_maintenance_check(client: &WardrobeClient) -> io::Result<()> {
-    let gem_count = client.count(GEM_DRAWER, None::<OperationOptions>)?;
-    let weapon_count = client.count(WEAPON_DRAWER, None::<OperationOptions>)?;
-    println!(
-        "Maintenance check: {} gems, {} weapons",
-        gem_count, weapon_count
-    );
-    Ok(())
-}
-
-fn run_stress_test_cycle(client: &WardrobeClient) -> io::Result<()> {
-    for i in 0..5 {
-        let temp_gem_id = format!("temp_gem_{}", i);
-        let pointers = client
-            .upsert(
-                json!({
-                    "_id": temp_gem_id,
-                    "element": "Temporary",
-                    "tags": ["test"]
-                }),
-                OperationFilter::drawer(GEM_DRAWER),
-                None::<OperationOptions>,
-            )?
-            .into_pointers();
-        let pointer = pointers
-            .first()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "upsert returned no pointer"))?;
-        client.delete(OperationFilter::pointer(pointer), None::<OperationOptions>)?;
-    }
-
-    println!("Stress test cycle completed (5 upserts/deletes).");
-    Ok(())
-}
-
-fn perform_detailed_inspection(engine: &WardrobeEngine) -> io::Result<()> {
-    let databases = status_databases(engine)?;
-    for db in databases {
+    print_separator("Phase 6: Detailed Engine Inspection");
+    let active_databases = metadata_client.status(StatusRequest::databases())?;
+    for db in active_databases {
         println!("Inspecting Database: {}", db.name);
-
-        let schemas = status_schemas(engine, &db.name)?;
-        for schema_name in schemas {
+        let active_schemas = metadata_client.status(StatusRequest::schemas(&db.name))?;
+        for schema_name in active_schemas {
             println!("  Schema: {}", schema_name);
-
-            let drawers = status_drawers(engine, &db.name, &schema_name)?;
-            for drawer in drawers {
-                let count = engine.count(drawer.name.as_str(), None::<OperationOptions>)?;
+            let active_drawers =
+                metadata_client.status(StatusRequest::drawers(&db.name, &schema_name))?;
+            for drawer in active_drawers {
+                let count = client.count(&drawer.name, None::<OperationOptions>)?;
                 println!("    Drawer: {} ({} records)", drawer.name, count);
             }
         }
     }
 
-    Ok(())
-}
-
-fn verify_final_database_integrity(client: &WardrobeClient, user_pointer: &str) -> io::Result<()> {
-    let remaining_gems = read_records(
-        client,
-        OperationFilter::drawer(GEM_DRAWER),
+    print_separator("Phase 7: Final State Reconciliation & Integrity");
+    let remaining_person = read_records(
+        &client,
+        OperationFilter::drawer(PERSON_DRAWER),
         None::<OperationOptions>,
     )?;
-    let remaining_weapons = read_records(
-        client,
-        OperationFilter::drawer(WEAPON_DRAWER),
+    let remaining_books = read_records(
+        &client,
+        OperationFilter::drawer(BOOK_DRAWER),
         None::<OperationOptions>,
     )?;
     println!(
-        "Total records remaining: {} gems, {} weapons",
-        remaining_gems.len(),
-        remaining_weapons.len()
+        "Total active records: {} personnel (authors/editors), {} books",
+        remaining_person.len(),
+        remaining_books.len()
     );
 
-    match read_record(
-        client,
-        OperationFilter::pointer(user_pointer),
-        None::<OperationOptions>,
-    )? {
-        Some(_) => println!("INTEGRITY ERROR: User record persists."),
-        None => println!("INTEGRITY SUCCESS: User record has been purged."),
+    match read_single_record(&client, OperationFilter::pointer(&publisher_pointer))? {
+        Some(pub_record) => println!(
+            "INTEGRITY SUCCESS: Publisher record persists intact: {}",
+            pub_record
+        ),
+        None => println!("INTEGRITY NOTE: Publisher record was not found."),
     }
 
+    println!(
+        "\nPublishing domain integration test suite executed successfully. All 7 phases completed."
+    );
     Ok(())
 }
 
-fn main() -> io::Result<()> {
-    let engine = initialize_engine_instance()?;
-    let metadata_client = initialize_metadata_client()?;
-    let public_client = initialize_public_client()?;
-
-    print_execution_separator("Phase 1: Metadata & Inventory Discovery");
-    perform_full_diagnostic_suite(&metadata_client)?;
-
-    print_execution_separator("Phase 2: Relational Data Population");
-    let user_pointer = upsert_user_record(&engine, "user_001", "Artemis_Prime")?;
-    let gem_one = upsert_gem_record(
-        &engine,
-        "gem_001",
-        &user_pointer,
-        "Plasma",
-        vec!["combat", "magic"],
-    )?;
-    let _gem_two = upsert_gem_record(
-        &engine,
-        "gem_002",
-        &user_pointer,
-        "Gravity",
-        vec!["support", "magic"],
-    )?;
-    let _gem_three = upsert_gem_record(
-        &engine,
-        "gem_003",
-        &user_pointer,
-        "Void",
-        vec!["utility", "raid"],
-    )?;
-    let weapon_pointer = upsert_weapon_record(
-        &engine,
-        "wpn_001",
-        &user_pointer,
-        &gem_one,
-        "Aether Blade",
-        50,
-    )?;
-
-    print_execution_separator("Phase 3: Filter Query Execution");
-    execute_and_print_tag_filter(&public_client, &user_pointer)?;
-
-    print_execution_separator("Phase 4: Relation Verification");
-    verify_three_relations(&public_client, &user_pointer, &gem_one, &weapon_pointer)?;
-
-    print_execution_separator("Phase 5: Targeted Lifecycle Cleanup");
-    perform_cascade_delete_sequence(&public_client, &user_pointer, &weapon_pointer)?;
-
-    print_execution_separator("Phase 6: Scoped Maintenance & Stress Test");
-    perform_maintenance_check(&public_client)?;
-    run_stress_test_cycle(&public_client)?;
-
-    print_execution_separator("Phase 7: State Reconciliation");
-    perform_detailed_inspection(&engine)?;
-    verify_final_database_integrity(&public_client, &user_pointer)?;
-
-    println!("\nIntegration test suite executed successfully.");
+fn ensure_engine_drawer(engine: &WardrobeEngine, drawer_name: &str) -> io::Result<()> {
+    engine.create(CreateRequest::drawer(
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        drawer_name,
+    ))?;
     Ok(())
 }

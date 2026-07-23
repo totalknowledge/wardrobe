@@ -1385,7 +1385,10 @@ mod tests {
                 Command::Revoke(PermissionRequest::new("alice", "db:rud")),
                 "revoke",
             ),
-            (Command::Status(StatusRequest::tenants()), "status"),
+            (
+                Command::Status(StatusRequest::tenants().into_request()),
+                "status",
+            ),
             (
                 Command::ExecuteForTenant {
                     tenant_id: "tenant".to_string(),

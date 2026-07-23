@@ -1,5 +1,3 @@
-import { WardrobeClient as ClientType } from './client';
-
 export type WardrobeConnectionTarget =
   | {
       readonly kind: 'embedded';
@@ -38,14 +36,10 @@ export type WardrobeOperation =
   | 'status';
 
 export declare const DEFAULT_NETWORK_PORT: 24842;
-export declare const PACKAGE_NAME: '@wardrobe/database';
-export declare const PACKAGE_VERSION: '0.1.0';
+export declare const PACKAGE_NAMES: readonly ['@wardrobe/client', '@wardrobe/embedded'];
+export declare const PACKAGE_VERSION: '0.26.722';
 export declare const SUPPORTED_OPERATIONS: readonly WardrobeOperation[];
 
 export declare function classifyConnectionTarget(
   connectionString: string
 ): WardrobeConnectionTarget;
-
-export class WardrobeClient {
-  static open(connectionString: string): Promise<ClientType>;
-}

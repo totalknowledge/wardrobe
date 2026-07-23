@@ -4,7 +4,7 @@ members = [
     "bindings/js-ts",
     "cli",
     "core",
-    "samples/armoire/src-tauri",
+    "utilities/armoire/src-tauri",
     "samples/c-abi",
     "samples/basic-usage",
     "server",

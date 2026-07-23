@@ -1,6 +1,6 @@
 use wardrobe_core::{Command, WardrobeEngine};
 
-pub const NPM_PACKAGE_NAME: &str = "@wardrobe/database";
+pub const NPM_PACKAGE_NAMES: &[&str] = &["@wardrobe/client", "@wardrobe/embedded"];
 pub const CRATE_NAME: &str = "wardrobe-js-ts";
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_NETWORK_PORT: u16 = 24842;
@@ -49,7 +49,7 @@ impl BindingTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BindingPackageMetadata {
     pub crate_name: &'static str,
-    pub npm_package_name: &'static str,
+    pub npm_package_names: &'static [&'static str],
     pub version: &'static str,
     pub default_network_port: u16,
     pub operations: &'static [&'static str],
@@ -58,7 +58,7 @@ pub struct BindingPackageMetadata {
 pub const fn package_metadata() -> BindingPackageMetadata {
     BindingPackageMetadata {
         crate_name: CRATE_NAME,
-        npm_package_name: NPM_PACKAGE_NAME,
+        npm_package_names: NPM_PACKAGE_NAMES,
         version: PACKAGE_VERSION,
         default_network_port: DEFAULT_NETWORK_PORT,
         operations: SUPPORTED_OPERATIONS,
@@ -171,8 +171,11 @@ mod tests {
         let metadata = package_metadata();
 
         assert_eq!(metadata.crate_name, "wardrobe-js-ts");
-        assert_eq!(metadata.npm_package_name, "@wardrobe/database");
-        assert_eq!(metadata.version, "0.1.0");
+        assert_eq!(
+            metadata.npm_package_names,
+            &["@wardrobe/client", "@wardrobe/embedded"]
+        );
+        assert_eq!(metadata.version, "0.26.722");
         assert_eq!(metadata.default_network_port, 24842);
         assert_eq!(
             metadata.operations,

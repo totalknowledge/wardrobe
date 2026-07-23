@@ -1,8 +1,27 @@
 {
-  "private": true,
+  "name": "@wardrobe/embedded",
+  "version": "0.26.722",
   "description": "Native embedded database engine bindings for Wardrobe.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/totalknowledge/wardrobe.git",
+    "directory": "bindings/js-ts/embedded"
+  },
   "main": "./index.js",
   "types": "./index.d.ts",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "index.d.ts",
+    "index.js",
+    "*.dll",
+    "*.dylib",
+    "*.so"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "keywords": [
     "wardrobe",
     "database",

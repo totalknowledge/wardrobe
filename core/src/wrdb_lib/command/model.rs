@@ -2,9 +2,11 @@ use crate::wrdb_lib::drawer::VacuumReport;
 use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 use crate::wrdb_lib::storage::{StorageCoordinate, StorageInventory, StorageLocator, StorageScope};
 use crate::wrdb_lib::wal::WalVerification;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
+use std::marker::PhantomData;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DrawerInspectionMetrics {
@@ -802,61 +804,127 @@ pub enum StatusRequest {
 }
 
 impl StatusRequest {
-    pub fn tenants() -> Self {
-        Self::Tenants
+    pub fn tenants() -> TypedStatusRequest<Vec<String>> {
+        TypedStatusRequest::new(Self::Tenants)
     }
 
-    pub fn databases() -> Self {
-        Self::Databases
+    pub fn databases() -> TypedStatusRequest<Vec<StorageInventory>> {
+        TypedStatusRequest::new(Self::Databases)
     }
 
-    pub fn schemas(database_name: impl Into<String>) -> Self {
-        Self::Schemas {
+    pub fn schemas(database_name: impl Into<String>) -> TypedStatusRequest<Vec<String>> {
+        TypedStatusRequest::new(Self::Schemas {
             database_name: database_name.into(),
-        }
+        })
     }
 
-    pub fn drawers(database_name: impl Into<String>, schema_name: impl Into<String>) -> Self {
-        Self::Drawers {
+    pub fn drawers(
+        database_name: impl Into<String>,
+        schema_name: impl Into<String>,
+    ) -> TypedStatusRequest<Vec<StorageInventory>> {
+        TypedStatusRequest::new(Self::Drawers {
             database_name: database_name.into(),
             schema_name: schema_name.into(),
-        }
+        })
     }
 
-    pub fn wal(database_name: Option<impl Into<String>>) -> Self {
-        Self::Wal {
+    pub fn wal(database_name: Option<impl Into<String>>) -> TypedStatusRequest<WalVerification> {
+        TypedStatusRequest::new(Self::Wal {
             database_name: database_name.map(Into::into),
-        }
+        })
     }
 
-    pub fn storage() -> Self {
-        Self::Storage
+    pub fn storage() -> TypedStatusRequest<StorageDiagnosis> {
+        TypedStatusRequest::new(Self::Storage)
     }
 
-    pub fn path(path: impl Into<String>) -> Self {
-        Self::Path { path: path.into() }
+    pub fn path(path: impl Into<String>) -> TypedStatusRequest<CheckReport> {
+        TypedStatusRequest::new(Self::Path { path: path.into() })
     }
 
-    pub fn drawer_names() -> Self {
-        Self::DrawerNames
+    pub fn drawer_names() -> TypedStatusRequest<Vec<String>> {
+        TypedStatusRequest::new(Self::DrawerNames)
     }
 
-    pub fn cached_drawer_count() -> Self {
-        Self::CachedDrawerCount
+    pub fn cached_drawer_count() -> TypedStatusRequest<usize> {
+        TypedStatusRequest::new(Self::CachedDrawerCount)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum StatusResult {
-    Tenants(Vec<String>),
-    Databases(Vec<StorageInventory>),
-    Schemas(Vec<String>),
-    Drawers(Vec<StorageInventory>),
-    Wal(WalVerification),
-    Storage(StorageDiagnosis),
-    Check(CheckReport),
-    DrawerNames(Vec<String>),
-    CachedDrawerCount(usize),
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedStatusRequest<T> {
+    request: StatusRequest,
+    output: PhantomData<fn() -> T>,
+}
+
+impl<T> TypedStatusRequest<T> {
+    fn new(request: StatusRequest) -> Self {
+        Self {
+            request,
+            output: PhantomData,
+        }
+    }
+
+    pub fn into_request(self) -> StatusRequest {
+        self.request
+    }
+}
+
+impl<T> From<TypedStatusRequest<T>> for StatusRequest {
+    fn from(request: TypedStatusRequest<T>) -> Self {
+        request.into_request()
+    }
+}
+
+pub trait StatusRequestOutput {
+    type Output;
+
+    fn into_status_request(self) -> StatusRequest;
+    fn decode_status_payload(payload: Value) -> Result<Self::Output>;
+}
+
+impl<T> StatusRequestOutput for TypedStatusRequest<T>
+where
+    T: DeserializeOwned,
+{
+    type Output = T;
+
+    fn into_status_request(self) -> StatusRequest {
+        self.into_request()
+    }
+
+    fn decode_status_payload(payload: Value) -> Result<Self::Output> {
+        serde_json::from_value(payload).map_err(|error| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Wardrobe status returned an invalid payload: {error}"),
+            )
+        })
+    }
+}
+
+impl StatusRequestOutput for StatusRequest {
+    type Output = Value;
+
+    fn into_status_request(self) -> StatusRequest {
+        self
+    }
+
+    fn decode_status_payload(payload: Value) -> Result<Self::Output> {
+        Ok(payload)
+    }
+}
+
+pub(crate) fn encode_status_payload<T>(payload: T) -> Result<Value>
+where
+    T: Serialize,
+{
+    serde_json::to_value(payload).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Failed to serialize Wardrobe status payload: {error}"),
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -929,7 +997,7 @@ pub enum CommandResult {
     Restore(RestoreReport),
     Grant(Value),
     Revoke(Value),
-    Status(StatusResult),
+    Status(Value),
 }
 
 #[cfg(test)]
@@ -1237,44 +1305,72 @@ mod tests {
             })
         );
 
-        assert_eq!(StatusRequest::tenants(), StatusRequest::Tenants);
-        assert_eq!(StatusRequest::databases(), StatusRequest::Databases);
         assert_eq!(
-            StatusRequest::schemas("wardrobe"),
+            StatusRequest::tenants().into_request(),
+            StatusRequest::Tenants
+        );
+        assert_eq!(
+            StatusRequest::databases().into_request(),
+            StatusRequest::Databases
+        );
+        assert_eq!(
+            StatusRequest::schemas("wardrobe").into_request(),
             StatusRequest::Schemas {
                 database_name: "wardrobe".to_string()
             }
         );
         assert_eq!(
-            StatusRequest::drawers("wardrobe", "bay"),
+            StatusRequest::drawers("wardrobe", "bay").into_request(),
             StatusRequest::Drawers {
                 database_name: "wardrobe".to_string(),
                 schema_name: "bay".to_string()
             }
         );
         assert_eq!(
-            StatusRequest::wal(Some("wardrobe")),
+            StatusRequest::wal(Some("wardrobe")).into_request(),
             StatusRequest::Wal {
                 database_name: Some("wardrobe".to_string())
             }
         );
         assert_eq!(
-            StatusRequest::wal(None::<String>),
+            StatusRequest::wal(None::<String>).into_request(),
             StatusRequest::Wal {
                 database_name: None
             }
         );
-        assert_eq!(StatusRequest::storage(), StatusRequest::Storage);
         assert_eq!(
-            StatusRequest::path("wardrobe/bay"),
+            StatusRequest::storage().into_request(),
+            StatusRequest::Storage
+        );
+        assert_eq!(
+            StatusRequest::path("wardrobe/bay").into_request(),
             StatusRequest::Path {
                 path: "wardrobe/bay".to_string()
             }
         );
-        assert_eq!(StatusRequest::drawer_names(), StatusRequest::DrawerNames);
         assert_eq!(
-            StatusRequest::cached_drawer_count(),
+            StatusRequest::drawer_names().into_request(),
+            StatusRequest::DrawerNames
+        );
+        assert_eq!(
+            StatusRequest::cached_drawer_count().into_request(),
             StatusRequest::CachedDrawerCount
+        );
+
+        let databases = json!([{
+            "name": "catalog",
+            "record_count": 1,
+            "disk_size_bytes": 512,
+            "register_file_count": 3
+        }]);
+        let status = CommandResult::Status(databases.clone());
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            json!({"status": databases})
+        );
+        assert_eq!(
+            serde_json::from_value::<CommandResult>(json!({"status": ["public"]})).unwrap(),
+            CommandResult::Status(json!(["public"]))
         );
     }
 }

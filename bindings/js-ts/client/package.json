@@ -1,8 +1,24 @@
 {
-  "private": true,
+  "name": "@wardrobe/client",
+  "version": "0.26.722",
   "description": "Pure JavaScript/TypeScript network client for Wardrobe database.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/totalknowledge/wardrobe.git",
+    "directory": "bindings/js-ts/client"
+  },
   "main": "./index.js",
   "types": "./index.d.ts",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "index.d.ts",
+    "index.js"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "keywords": [
     "wardrobe",
     "database",

@@ -408,7 +408,11 @@ impl WardrobeEngine {
             context,
             &mut hydration_cache,
         )?;
-        Self::remove_hidden_fields_from_records(database_core, &physical_drawer_name, &mut records)?;
+        Self::remove_hidden_fields_from_records(
+            database_core,
+            &physical_drawer_name,
+            &mut records,
+        )?;
 
         Ok(records)
     }
@@ -461,7 +465,11 @@ impl WardrobeEngine {
             context,
             &mut hydration_cache,
         )?;
-        Self::remove_hidden_fields_from_records(database_core, &physical_drawer_name, &mut records)?;
+        Self::remove_hidden_fields_from_records(
+            database_core,
+            &physical_drawer_name,
+            &mut records,
+        )?;
 
         Ok(records)
     }
@@ -1102,7 +1110,8 @@ impl WardrobeEngine {
             return Ok(None);
         };
 
-        let mut record = Self::write_lock(&drawer)?.find_by_primary_key_with_migration(record_key)?;
+        let mut record =
+            Self::write_lock(&drawer)?.find_by_primary_key_with_migration(record_key)?;
         if let Some(record) = record.as_mut() {
             Self::remove_hidden_fields_from_value(database_core, drawer_name, record)?;
         }

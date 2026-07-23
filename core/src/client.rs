@@ -3,7 +3,7 @@ use crate::wrdb_lib::driver::ClientDriver;
 use crate::{
     AlterRequest, BackupArchive, CompactRequest, CreateRequest, CreateResult, DeleteResult,
     DropRequest, InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult,
-    RestoreReport, StatusRequest, StatusResult, UpsertResult, VacuumReport,
+    RestoreReport, StatusRequestOutput, UpsertResult, VacuumReport,
 };
 use serde_json::Value;
 use std::io::Result;
@@ -122,18 +122,20 @@ impl WardrobeClient {
         self.driver.revoke(request)
     }
 
-    pub fn status<S>(&self, request: S) -> Result<StatusResult>
+    pub fn status<S>(&self, request: S) -> Result<S::Output>
     where
-        S: Into<StatusRequest>,
+        S: StatusRequestOutput,
     {
-        self.driver.status(request.into())
+        let request = request.into_status_request();
+        let payload = self.driver.status(request)?;
+        S::decode_status_payload(payload)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompactMode, OrderDirection, QueryModifiers, ReturnShape};
+    use crate::{CompactMode, OrderDirection, QueryModifiers, ReturnShape, StatusRequest};
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -242,7 +244,7 @@ mod tests {
             client
                 .status(StatusRequest::cached_drawer_count())
                 .expect("status should work")
-                .eq(&StatusResult::CachedDrawerCount(1))
+                == 1
         );
         assert_eq!(
             client

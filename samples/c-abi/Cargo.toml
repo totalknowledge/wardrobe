@@ -1,7 +1,8 @@
 [package]
 name = "c-abi-sample"
-version = "0.1.0"
+version = "0.26.722"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 libloading = "0.8"

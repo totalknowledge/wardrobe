@@ -1,20 +1,20 @@
 [package]
 name = "wardrobe-js-ts"
-version = "0.1.0"
+version = "0.26.722"
 edition = "2024"
 authors = ["Wardrobe Maintainers"]
-description = "JavaScript and TypeScript package validation crate for Wardrobe database bindings."
+description = "Native implementation and validation crate for Wardrobe JavaScript and TypeScript bindings."
 repository = "https://github.com/totalknowledge/wardrobe"
 readme = "README.md"
-license-file = "LICENSE"
+license = "MIT"
 keywords = ["database", "bindings", "typescript", "javascript", "wardrobe"]
 categories = ["api-bindings", "database-implementations"]
 include = [
     "Cargo.toml",
     "LICENSE",
     "README.md",
-    "index.d.ts",
-    "index.js",
+    "client/**/*",
+    "embedded/**/*",
     "package.json",
     "src/**/*.rs",
 ]

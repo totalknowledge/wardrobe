@@ -28,7 +28,7 @@ pub use crate::wrdb_lib::command::{
     CommandResult, CompactMode, CompactRequest, CreateRequest, CreateResult, DeleteResult,
     DrawerInspectionMetrics, DropRequest, InspectResult, OperationFilter, OperationOptions,
     PermissionRequest, PermissionScopeDescriptor, ReadResult, RestoreReport, ReturnShape,
-    StatusRequest, StatusResult, StorageDiagnosis, UpsertResult,
+    StatusRequest, StatusRequestOutput, StorageDiagnosis, TypedStatusRequest, UpsertResult,
 };
 pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 pub use crate::wrdb_lib::storage::{
@@ -1195,42 +1195,44 @@ impl WardrobeEngine {
         Ok(())
     }
 
-    pub fn status<S>(&self, request: S) -> Result<StatusResult>
+    pub fn status<S>(&self, request: S) -> Result<S::Output>
     where
-        S: Into<StatusRequest>,
+        S: StatusRequestOutput,
     {
+        let request = request.into_status_request();
+        let payload = self.status_payload(request)?;
+        S::decode_status_payload(payload)
+    }
+
+    fn status_payload(&self, request: StatusRequest) -> Result<Value> {
         let _ = self.flush_all_metadata();
-        match request.into() {
-            StatusRequest::Tenants => {
-                boundary_execution::show_tenants(self).map(StatusResult::Tenants)
-            }
-            StatusRequest::Databases => {
-                boundary_execution::show_databases(self).map(StatusResult::Databases)
-            }
+        match request {
+            StatusRequest::Tenants => boundary_execution::show_tenants(self)
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
+            StatusRequest::Databases => boundary_execution::show_databases(self)
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
             StatusRequest::Schemas { database_name } => {
-                boundary_execution::show_schemas(self, &database_name).map(StatusResult::Schemas)
+                boundary_execution::show_schemas(self, &database_name)
+                    .and_then(crate::wrdb_lib::command::encode_status_payload)
             }
             StatusRequest::Drawers {
                 database_name,
                 schema_name,
             } => boundary_execution::show_drawers(self, &database_name, &schema_name)
-                .map(StatusResult::Drawers),
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
             StatusRequest::Wal { database_name } => {
                 boundary_execution::verify_wal(self, database_name.as_deref())
-                    .map(StatusResult::Wal)
+                    .and_then(crate::wrdb_lib::command::encode_status_payload)
             }
-            StatusRequest::Storage => {
-                diagnostics::diagnose_storage(self).map(StatusResult::Storage)
-            }
-            StatusRequest::Path { path } => {
-                diagnostics::check_path(self, &path).map(StatusResult::Check)
-            }
-            StatusRequest::DrawerNames => {
-                diagnostics::list_drawer_names(self).map(StatusResult::DrawerNames)
-            }
+            StatusRequest::Storage => diagnostics::diagnose_storage(self)
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
+            StatusRequest::Path { path } => diagnostics::check_path(self, &path)
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
+            StatusRequest::DrawerNames => diagnostics::list_drawer_names(self)
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
             StatusRequest::CachedDrawerCount => self
                 .cached_drawer_count()
-                .map(StatusResult::CachedDrawerCount),
+                .and_then(crate::wrdb_lib::command::encode_status_payload),
         }
     }
 

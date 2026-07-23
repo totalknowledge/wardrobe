@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "outDir": "dist",
+    "paths": {
+      "@wardrobe/embedded": [
+        "../../bindings/js-ts/embedded/index.d.ts"
+      ]
+    },
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "index.ts"
+  ]
+}

@@ -21,8 +21,8 @@ use tokio::runtime::Runtime;
 use wardrobe_core::{
     AlterRequest, Command, CommandResult, CompactRequest, ConnectionTarget, CreateRequest,
     DurabilityPolicy, OperationFilter, OperationOptions, ProtocolFrame, ProtocolOpcode, ReadResult,
-    ReturnShape, StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageScope,
-    UpsertResult, WardrobeEngine,
+    ReturnShape, StatusRequest, StorageDiagnosis, StorageInventory, StorageScope, UpsertResult,
+    WardrobeEngine,
 };
 
 const DEFAULT_WARDROBE_DATABASE_PREFIX: &str = "wardrobe_benchmark";
@@ -1445,8 +1445,9 @@ impl WardrobeTarget {
 
     fn capture_storage_snapshot(&mut self) -> io::Result<WardrobeStorageSnapshot> {
         let drawers = self.show_benchmark_drawers()?;
-        let diagnosis = match self.execute(Command::Status(StatusRequest::storage())) {
-            Ok(CommandResult::Status(StatusResult::Storage(diagnosis))) => Some(diagnosis),
+        let diagnosis = match self.execute(Command::Status(StatusRequest::storage().into_request()))
+        {
+            Ok(CommandResult::Status(payload)) => serde_json::from_value(payload).ok(),
             Ok(_) | Err(_) => None,
         };
         let root_wal_entries = self.wal_entry_count(None).ok().flatten();
@@ -1467,11 +1468,19 @@ impl WardrobeTarget {
     }
 
     fn show_benchmark_drawers(&mut self) -> io::Result<Vec<StorageInventory>> {
-        match self.execute(Command::Status(StatusRequest::drawers(
-            self.namespace.database.clone(),
-            self.namespace.schema.clone(),
-        )))? {
-            CommandResult::Status(StatusResult::Drawers(drawers)) => Ok(drawers),
+        match self.execute(Command::Status(
+            StatusRequest::drawers(
+                self.namespace.database.clone(),
+                self.namespace.schema.clone(),
+            )
+            .into_request(),
+        ))? {
+            CommandResult::Status(payload) => serde_json::from_value(payload).map_err(|error| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid Wardrobe drawer inventory: {error}"),
+                )
+            }),
             other => Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("Expected Wardrobe drawer inventory, got {other:?}"),
@@ -1480,10 +1489,19 @@ impl WardrobeTarget {
     }
 
     fn wal_entry_count(&mut self, database_name: Option<&str>) -> io::Result<Option<usize>> {
-        match self.execute(Command::Status(StatusRequest::wal(
-            database_name.map(str::to_string),
-        )))? {
-            CommandResult::Status(StatusResult::Wal(report)) => Ok(Some(report.entry_count)),
+        match self.execute(Command::Status(
+            StatusRequest::wal(database_name.map(str::to_string)).into_request(),
+        ))? {
+            CommandResult::Status(payload) => {
+                let report: wardrobe_core::WalVerification = serde_json::from_value(payload)
+                    .map_err(|error| {
+                        Error::new(
+                            ErrorKind::InvalidData,
+                            format!("Invalid Wardrobe WAL status: {error}"),
+                        )
+                    })?;
+                Ok(Some(report.entry_count))
+            }
             _ => Ok(None),
         }
     }
@@ -1815,12 +1833,14 @@ impl BenchmarkTarget for WardrobeTarget {
     fn flush(&mut self) -> io::Result<()> {
         if let Some(root) = &self.storage_root {
             fsync_tree(root)?;
-        } else if let Ok(CommandResult::Status(StatusResult::Storage(diagnosis))) =
-            self.execute(Command::Status(StatusRequest::storage()))
+        } else if let Ok(CommandResult::Status(payload)) =
+            self.execute(Command::Status(StatusRequest::storage().into_request()))
         {
-            let path = PathBuf::from(diagnosis.storage_directory);
-            if path.exists() {
-                fsync_tree(&path)?;
+            if let Ok(diagnosis) = serde_json::from_value::<StorageDiagnosis>(payload) {
+                let path = PathBuf::from(diagnosis.storage_directory);
+                if path.exists() {
+                    fsync_tree(&path)?;
+                }
             }
         }
         Ok(())
@@ -5708,7 +5728,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let state = Rc::new(RefCell::new(MockRunnerState {
             commands: Vec::new(),
             responses: VecDeque::from(vec![
-                CommandResult::Status(StatusResult::Drawers(vec![
+                CommandResult::Status(json!([
                     StorageInventory {
                         name: ENTITY_DRAWER.to_string(),
                         record_count: 3,
@@ -5722,7 +5742,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                         register_file_count: 3,
                     },
                 ])),
-                CommandResult::Status(StatusResult::Storage(StorageDiagnosis {
+                CommandResult::Status(json!(StorageDiagnosis {
                     storage_directory: "/data/wardrobe".to_string(),
                     storage_bytes: 12_345,
                     data_bytes: 8_000,
@@ -5740,12 +5760,12 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                         "wardrobe_benchmark_test/library/book".to_string(),
                     ],
                 })),
-                CommandResult::Status(StatusResult::Wal(wardrobe_core::WalVerification {
+                CommandResult::Status(json!(wardrobe_core::WalVerification {
                     path: "/data/wardrobe/.wal".to_string(),
                     entry_count: 4,
                     last_sequence: Some(4),
                 })),
-                CommandResult::Status(StatusResult::Wal(wardrobe_core::WalVerification {
+                CommandResult::Status(json!(wardrobe_core::WalVerification {
                     path: "/data/wardrobe/wardrobe/.wal".to_string(),
                     entry_count: 3,
                     last_sequence: Some(3),

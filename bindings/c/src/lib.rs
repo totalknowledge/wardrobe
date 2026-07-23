@@ -11,7 +11,7 @@ pub struct WardrobeCStatus {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn wardrobe_cabi_version() -> *const c_char {
-    static VERSION: &[u8] = b"wardrobe-cabi-0.1.0\0";
+    static VERSION: &[u8] = b"wardrobe-cabi-0.26.722\0";
     VERSION.as_ptr().cast()
 }
 
@@ -68,7 +68,7 @@ pub extern "C" fn wardrobe_cabi_status_databases(target: *const c_char) -> Wardr
     };
 
     match result {
-        Ok(wardrobe_core::StatusResult::Databases(databases)) => WardrobeCStatus {
+        Ok(databases) => WardrobeCStatus {
             ok: 1,
             database_count: databases.len(),
         },

@@ -1,7 +1,8 @@
 [package]
 name = "wardrobe-core"
-version = "0.1.0"
+version = "0.26.722"
 edition = "2024"
+license = "MIT"
 
 [lib]
 name = "wardrobe_core"

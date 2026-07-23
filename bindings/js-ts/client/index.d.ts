@@ -16,7 +16,29 @@ export type OperationFilter =
   | { drawer: string }
   | { pointer: string }
   | { query: any }
+  | readonly OperationFilter[]
   | any;
+
+export interface StorageInventory {
+  name: string;
+  record_count: number;
+  disk_size_bytes: number;
+  register_file_count: number;
+}
+
+export type StatusRequest =
+  | 'Tenants'
+  | 'Databases'
+  | 'Storage'
+  | 'DrawerNames'
+  | 'CachedDrawerCount'
+  | { Schemas: { database_name: string } }
+  | { Drawers: { database_name: string; schema_name: string } }
+  | { Wal: { database_name?: string | null } }
+  | { Path: { path: string } };
+
+export declare const PACKAGE_NAME: '@wardrobe/client';
+export declare const PACKAGE_VERSION: '0.26.722';
 
 export class WardrobeClient {
   static open(connectionString: string): Promise<WardrobeClient>;
@@ -34,5 +56,12 @@ export class WardrobeClient {
   restore(destinationPath: string, archive: any): Promise<any>;
   grant(request: any): Promise<any>;
   revoke(request: any): Promise<any>;
-  status(request?: any): Promise<any>;
+  status(request: 'Tenants' | 'DrawerNames'): Promise<string[]>;
+  status(request: 'Databases'): Promise<StorageInventory[]>;
+  status(request: { Schemas: { database_name: string } }): Promise<string[]>;
+  status(request: {
+    Drawers: { database_name: string; schema_name: string };
+  }): Promise<StorageInventory[]>;
+  status(request: 'CachedDrawerCount'): Promise<number>;
+  status(request?: StatusRequest): Promise<unknown>;
 }

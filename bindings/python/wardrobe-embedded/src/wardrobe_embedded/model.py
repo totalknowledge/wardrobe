@@ -37,16 +37,44 @@ def normalize_options(options=None):
         "multi": options.get("multi"),
         "atomic": options.get("atomic"),
         "create_if_missing": options.get("create_if_missing", options.get("createIfMissing")),
-        "return_shape": options.get("return_shape", options.get("returnShape")),
+        "return_shape": normalize_return_shape(
+            options.get("return_shape", options.get("returnShape"))
+        ),
         "hydrate": options.get("hydrate"),
         "limit": options.get("limit"),
         "offset": options.get("offset"),
         "order_by": options.get("order_by", options.get("orderBy")),
-        "order_direction": options.get("order_direction", options.get("orderDirection")),
+        "order_direction": normalize_order_direction(
+            options.get("order_direction", options.get("orderDirection"))
+        ),
         "include_diagnostics": options.get(
             "include_diagnostics", options.get("includeDiagnostics")
         ),
     }
+
+
+def normalize_return_shape(return_shape):
+    if not isinstance(return_shape, str):
+        return return_shape
+    return {
+        "default": "Default",
+        "records": "Records",
+        "record": "Record",
+        "pointers": "Pointers",
+        "exists": "Exists",
+        "diagnostics": "Diagnostics",
+    }.get(return_shape.lower(), return_shape)
+
+
+def normalize_order_direction(order_direction):
+    if not isinstance(order_direction, str):
+        return order_direction
+    return {
+        "asc": "Ascending",
+        "ascending": "Ascending",
+        "desc": "Descending",
+        "descending": "Descending",
+    }.get(order_direction.lower(), order_direction)
 
 
 def encode_command(command):

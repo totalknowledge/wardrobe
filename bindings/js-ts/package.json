@@ -1,8 +1,9 @@
 {
-  "name": "@wardrobe/database",
-  "version": "0.1.0",
-  "description": "JavaScript and TypeScript package scaffold for Wardrobe database bindings.",
-  "license": "SEE LICENSE IN LICENSE",
+  "name": "wardrobe-js-ts-bindings",
+  "version": "0.26.722",
+  "description": "Workspace for the Wardrobe client and embedded JavaScript/TypeScript bindings.",
+  "private": true,
+  "license": "MIT",
   "author": "Wardrobe Maintainers",
   "repository": {
     "type": "git",
@@ -20,34 +21,16 @@
     "javascript",
     "bindings"
   ],
-  "main": "./index.js",
-  "types": "./index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
-    }
-  },
-  "files": [
-    "Cargo.toml",
-    "LICENSE",
-    "README.md",
-    "classify.js",
-    "client/index.d.ts",
-    "client/index.js",
-    "client/package.json",
-    "embedded/index.d.ts",
-    "embedded/index.js",
-    "embedded/package.json",
-    "index.d.ts",
-    "index.js",
-    "src"
+  "workspaces": [
+    "client",
+    "embedded"
   ],
   "sideEffects": false,
   "scripts": {
     "fmt": "cargo fmt --manifest-path Cargo.toml --package wardrobe-js-ts -- --check",
     "clippy": "cargo clippy --manifest-path Cargo.toml --all-targets --all-features --no-deps -- -D warnings",
     "test": "cargo test --manifest-path Cargo.toml --all-targets --all-features",
-    "publish:dry-run": "npm publish --dry-run"
+    "publish:client:dry-run": "npm publish --dry-run --workspace @wardrobe/client",
+    "publish:embedded:dry-run": "npm publish --dry-run --workspace @wardrobe/embedded"
   }
 }

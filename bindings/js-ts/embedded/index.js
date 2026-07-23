@@ -1,6 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 
+const PACKAGE_NAME = '@wardrobe/embedded';
+const PACKAGE_VERSION = '0.26.722';
+
 // Determine native addon library name based on platform
 const libName = process.platform === 'win32' ? 'wardrobe_js_ts.dll' : process.platform === 'darwin' ? 'libwardrobe_js_ts.dylib' : 'libwardrobe_js_ts.so';
 
@@ -207,6 +210,9 @@ function unwrapReadResult(readResult) {
 
 function normalizeFilter(filter) {
   if (!filter) return "None";
+  if (Array.isArray(filter)) {
+    return { Many: filter.map(normalizeFilter) };
+  }
   if (typeof filter === 'string') {
     if (filter.startsWith('@')) {
       if (filter.includes(':')) {
@@ -234,14 +240,36 @@ function normalizeOptions(options) {
     multi: options.multi !== undefined ? options.multi : null,
     atomic: options.atomic !== undefined ? options.atomic : null,
     create_if_missing: options.createIfMissing !== undefined ? options.createIfMissing : null,
-    return_shape: options.returnShape !== undefined ? options.returnShape : null,
+    return_shape: options.returnShape !== undefined ? normalizeReturnShape(options.returnShape) : null,
     hydrate: options.hydrate !== undefined ? options.hydrate : null,
     limit: options.limit !== undefined ? options.limit : null,
     offset: options.offset !== undefined ? options.offset : null,
     order_by: options.orderBy !== undefined ? options.orderBy : null,
-    order_direction: options.orderDirection !== undefined ? options.orderDirection : null,
+    order_direction: options.orderDirection !== undefined ? normalizeOrderDirection(options.orderDirection) : null,
     include_diagnostics: options.includeDiagnostics !== undefined ? options.includeDiagnostics : null
   };
 }
 
-module.exports = { WardrobeClient };
+function normalizeReturnShape(returnShape) {
+  const shapes = {
+    default: 'Default',
+    records: 'Records',
+    record: 'Record',
+    pointers: 'Pointers',
+    exists: 'Exists',
+    diagnostics: 'Diagnostics'
+  };
+  return shapes[returnShape.toLowerCase()] || returnShape;
+}
+
+function normalizeOrderDirection(orderDirection) {
+  const directions = {
+    asc: 'Ascending',
+    ascending: 'Ascending',
+    desc: 'Descending',
+    descending: 'Descending'
+  };
+  return directions[orderDirection.toLowerCase()] || orderDirection;
+}
+
+module.exports = { PACKAGE_NAME, PACKAGE_VERSION, WardrobeClient };

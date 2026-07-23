@@ -45,7 +45,7 @@ pub(crate) fn create(result: CommandResult) -> Result<super::CreateResult> {
     }
 }
 
-pub(crate) fn status(result: CommandResult) -> Result<super::StatusResult> {
+pub(crate) fn status(result: CommandResult) -> Result<Value> {
     match result {
         CommandResult::Status(result) => Ok(result),
         other => unexpected_result("status result", other),
@@ -96,9 +96,7 @@ fn unexpected_result<T>(expected: &str, actual: CommandResult) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wrdb_lib::command::{
-        CreateResult, DeleteResult, ReadResult, StatusResult, UpsertResult,
-    };
+    use crate::wrdb_lib::command::{CreateResult, DeleteResult, ReadResult, UpsertResult};
     use crate::wrdb_lib::drawer::VacuumReport;
     use crate::wrdb_lib::storage::StorageInventory;
     use serde_json::json;
@@ -189,10 +187,7 @@ mod tests {
             .unwrap(),
             CreateResult::StorageInventory(inventory())
         );
-        assert_eq!(
-            status(CommandResult::Status(StatusResult::CachedDrawerCount(3))).unwrap(),
-            StatusResult::CachedDrawerCount(3)
-        );
+        assert_eq!(status(CommandResult::Status(json!(3))).unwrap(), json!(3));
         assert_eq!(count(CommandResult::Count(4)).unwrap(), 4);
         assert_eq!(backup(CommandResult::Backup(archive())).unwrap(), archive());
         assert_eq!(

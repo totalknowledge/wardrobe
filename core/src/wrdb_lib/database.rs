@@ -270,8 +270,7 @@ impl Database {
         child_ids: &[String],
     ) -> std::io::Result<()> {
         for child_id in child_ids {
-            self
-                .reverse_relationship_index
+            self.reverse_relationship_index
                 .remove_child(child_drawer, child_id);
         }
 

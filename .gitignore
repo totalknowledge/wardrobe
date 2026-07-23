@@ -6,6 +6,7 @@
 /user_stories
 /project-export
 node_modules/
+/samples/typescript/dist
 AGENTS.md
 .agent/
 .github/copilot-instructions.md

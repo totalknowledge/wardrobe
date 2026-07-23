@@ -1,8 +1,8 @@
 use super::{
     AlterRequest, BackupArchive, CheckReport, Command, CommandResult, CompactMode, CompactRequest,
     CreateRequest, CreateResult, DeleteResult, DrawerInspectionMetrics, DropRequest, InspectResult,
-    OperationFilter, OperationOptions, ReadResult, RestoreReport, StatusRequest, StatusResult,
-    StorageDiagnosis, UpsertResult,
+    OperationFilter, OperationOptions, ReadResult, RestoreReport, StatusRequest, StorageDiagnosis,
+    UpsertResult,
 };
 use crate::engine::{
     OperationSelection, ReturnShapeResolution, UpsertContext, merge_payload_into_record,
@@ -290,42 +290,42 @@ where
     match request {
         StatusRequest::Tenants => engine
             .show_tenants()
-            .map(StatusResult::Tenants)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::Databases => engine
             .show_databases()
-            .map(StatusResult::Databases)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::Schemas { database_name } => engine
             .show_schemas(&database_name)
-            .map(StatusResult::Schemas)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::Drawers {
             database_name,
             schema_name,
         } => engine
             .show_drawers(&database_name, &schema_name)
-            .map(StatusResult::Drawers)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::Wal { database_name } => engine
             .verify_wal(database_name.as_deref())
-            .map(StatusResult::Wal)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::Storage => engine
             .diagnose_storage()
-            .map(StatusResult::Storage)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::Path { path } => engine
             .check_path(&path)
-            .map(StatusResult::Check)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::DrawerNames => engine
             .list_drawer_names()
-            .map(StatusResult::DrawerNames)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
         StatusRequest::CachedDrawerCount => engine
             .cached_drawer_count()
-            .map(StatusResult::CachedDrawerCount)
+            .and_then(super::encode_status_payload)
             .map(CommandResult::Status),
     }
 }
@@ -1250,28 +1250,44 @@ mod tests {
         let archive = backup_archive();
 
         assert_eq!(
-            execute_command(&engine, Command::Status(StatusRequest::tenants())).unwrap(),
-            CommandResult::Status(StatusResult::Tenants(vec!["tenant_a".to_string()]))
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::tenants().into_request())
+            )
+            .unwrap(),
+            CommandResult::Status(json!(["tenant_a"]))
         );
-        assert!(matches!(
-            execute_command(&engine, Command::Status(StatusRequest::databases())).unwrap(),
-            CommandResult::Status(StatusResult::Databases(_))
-        ));
-        assert!(matches!(
-            execute_command(&engine, Command::Status(StatusRequest::wal(Some("db")))).unwrap(),
-            CommandResult::Status(StatusResult::Wal(_))
-        ));
-        assert!(matches!(
-            execute_command(&engine, Command::Status(StatusRequest::schemas("db"))).unwrap(),
-            CommandResult::Status(StatusResult::Schemas(_))
-        ));
+        assert_eq!(
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::databases().into_request())
+            )
+            .unwrap(),
+            CommandResult::Status(json!([inventory("db")]))
+        );
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::Status(StatusRequest::drawers("db", "public")),
+                Command::Status(StatusRequest::wal(Some("db")).into_request())
             )
             .unwrap(),
-            CommandResult::Status(StatusResult::Drawers(_))
+            CommandResult::Status(Value::Object(_))
+        ));
+        assert_eq!(
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::schemas("db").into_request())
+            )
+            .unwrap(),
+            CommandResult::Status(json!(["public"]))
+        );
+        assert!(matches!(
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::drawers("db", "public").into_request()),
+            )
+            .unwrap(),
+            CommandResult::Status(Value::Array(_))
         ));
         assert!(matches!(
             execute_command(&engine, Command::Create(CreateRequest::database("db"))).unwrap(),
@@ -1347,26 +1363,34 @@ mod tests {
         assert!(matches!(
             execute_command(
                 &engine,
-                Command::Status(StatusRequest::path("db/public/gem"))
+                Command::Status(StatusRequest::path("db/public/gem").into_request())
             )
             .unwrap(),
-            CommandResult::Status(StatusResult::Check(_))
+            CommandResult::Status(Value::Object(_))
         ));
         assert!(matches!(
-            execute_command(&engine, Command::Status(StatusRequest::storage())).unwrap(),
-            CommandResult::Status(StatusResult::Storage(_))
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::storage().into_request())
+            )
+            .unwrap(),
+            CommandResult::Status(Value::Object(_))
         ));
         assert!(matches!(
-            execute_command(&engine, Command::Status(StatusRequest::drawer_names())).unwrap(),
-            CommandResult::Status(StatusResult::DrawerNames(_))
+            execute_command(
+                &engine,
+                Command::Status(StatusRequest::drawer_names().into_request())
+            )
+            .unwrap(),
+            CommandResult::Status(Value::Array(_))
         ));
         assert_eq!(
             execute_command(
                 &engine,
-                Command::Status(StatusRequest::cached_drawer_count())
+                Command::Status(StatusRequest::cached_drawer_count().into_request())
             )
             .unwrap(),
-            CommandResult::Status(StatusResult::CachedDrawerCount(1))
+            CommandResult::Status(json!(1))
         );
         assert!(matches!(
             execute_command(
@@ -1700,7 +1724,7 @@ mod tests {
             Command::Drop(DropRequest::database("db")),
             Command::Grant(PermissionRequest::new("alice", "db:r")),
             Command::Revoke(PermissionRequest::new("alice", "db:r")),
-            Command::Status(StatusRequest::databases()),
+            Command::Status(StatusRequest::databases().into_request()),
             Command::ExecuteForTenant {
                 tenant_id: "tenant".to_string(),
                 database_name: "db".to_string(),
@@ -1773,7 +1797,7 @@ mod tests {
             &registry,
             "db",
             "public",
-            &Command::Status(StatusRequest::tenants()),
+            &Command::Status(StatusRequest::tenants().into_request()),
         )
         .expect("commands without drawer names should pass");
     }

@@ -1,0 +1,16 @@
+{
+  "name": "wardrobe-typescript-sample",
+  "version": "0.26.722",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "start": "cd ../.. && node samples/typescript/dist/index.js"
+  },
+  "dependencies": {
+    "@wardrobe/embedded": "file:../../bindings/js-ts/embedded"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

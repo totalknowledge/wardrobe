@@ -9,8 +9,8 @@ use wardrobe_core::{
     AlterRequest, ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig,
     CompactRequest, ConnectionTarget, CreateRequest, CreateResult, Database, DropRequest,
     InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult, StatusRequest,
-    StatusResult, StorageDiagnosis, StorageInventory, VacuumReport, WardrobeClient,
-    emit_application_log, init_application_logging,
+    StorageDiagnosis, StorageInventory, VacuumReport, WardrobeClient, emit_application_log,
+    init_application_logging,
 };
 
 #[derive(Debug)]
@@ -375,63 +375,39 @@ fn repl(client: &WardrobeClient, pretty: bool) -> io::Result<()> {
 }
 
 fn status_drawer_names(client: &WardrobeClient) -> io::Result<Vec<String>> {
-    match client
+    client
         .status(StatusRequest::drawer_names())
-        .map_err(client_error)?
-    {
-        StatusResult::DrawerNames(drawers) => Ok(drawers),
-        other => unexpected_client_result("drawer names", other),
-    }
+        .map_err(client_error)
 }
 
 fn status_storage(client: &WardrobeClient) -> io::Result<StorageDiagnosis> {
-    match client
+    client
         .status(StatusRequest::storage())
-        .map_err(client_error)?
-    {
-        StatusResult::Storage(diagnosis) => Ok(diagnosis),
-        other => unexpected_client_result("storage diagnosis", other),
-    }
+        .map_err(client_error)
 }
 
 fn status_check(client: &WardrobeClient, path: &str) -> io::Result<wardrobe_core::CheckReport> {
-    match client
+    client
         .status(StatusRequest::path(path))
-        .map_err(client_error)?
-    {
-        StatusResult::Check(report) => Ok(report),
-        other => unexpected_client_result("check report", other),
-    }
+        .map_err(client_error)
 }
 
 fn status_tenants(client: &WardrobeClient) -> io::Result<Vec<String>> {
-    match client
+    client
         .status(StatusRequest::tenants())
-        .map_err(client_error)?
-    {
-        StatusResult::Tenants(tenants) => Ok(tenants),
-        other => unexpected_client_result("tenants", other),
-    }
+        .map_err(client_error)
 }
 
 fn status_databases(client: &WardrobeClient) -> io::Result<Vec<StorageInventory>> {
-    match client
+    client
         .status(StatusRequest::databases())
-        .map_err(client_error)?
-    {
-        StatusResult::Databases(databases) => Ok(databases),
-        other => unexpected_client_result("databases", other),
-    }
+        .map_err(client_error)
 }
 
 fn status_schemas(client: &WardrobeClient, database_name: &str) -> io::Result<Vec<String>> {
-    match client
+    client
         .status(StatusRequest::schemas(database_name))
-        .map_err(client_error)?
-    {
-        StatusResult::Schemas(schemas) => Ok(schemas),
-        other => unexpected_client_result("schemas", other),
-    }
+        .map_err(client_error)
 }
 
 fn status_drawers(
@@ -439,13 +415,9 @@ fn status_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> io::Result<Vec<StorageInventory>> {
-    match client
+    client
         .status(StatusRequest::drawers(database_name, schema_name))
-        .map_err(client_error)?
-    {
-        StatusResult::Drawers(drawers) => Ok(drawers),
-        other => unexpected_client_result("drawers", other),
-    }
+        .map_err(client_error)
 }
 
 fn create_inventory(
@@ -588,13 +560,6 @@ fn payload_username(payload: &Value) -> io::Result<String> {
                 "user admin payload requires a non-empty username",
             )
         })
-}
-
-fn unexpected_client_result<T>(expected: &str, actual: StatusResult) -> io::Result<T> {
-    Err(Error::new(
-        ErrorKind::InvalidData,
-        format!("expected {expected}, got {actual:?}"),
-    ))
 }
 
 fn unexpected_create_result<T>(expected: &str, actual: CreateResult) -> io::Result<T> {

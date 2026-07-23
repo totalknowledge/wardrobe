@@ -5,7 +5,7 @@ use crate::wrdb_lib::command::result_expectations;
 use crate::wrdb_lib::command::{
     AlterRequest, BackupArchive, Command, CommandResult, CompactRequest, CreateRequest,
     CreateResult, DeleteResult, DropRequest, InspectResult, OperationFilter, OperationOptions,
-    PermissionRequest, ReadResult, RestoreReport, StatusRequest, StatusResult, UpsertResult,
+    PermissionRequest, ReadResult, RestoreReport, StatusRequest, UpsertResult,
 };
 use crate::wrdb_lib::drawer::VacuumReport;
 use serde_json::Value;
@@ -165,7 +165,7 @@ impl ClientDriver {
         }
     }
 
-    pub(crate) fn status(&self, request: StatusRequest) -> Result<StatusResult> {
+    pub(crate) fn status(&self, request: StatusRequest) -> Result<Value> {
         match self {
             Self::Embedded(engine) => engine.status(request),
             _ => result_expectations::status(self.execute_transport(Command::Status(request))?),

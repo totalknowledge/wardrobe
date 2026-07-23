@@ -1,6 +1,6 @@
 [package]
 name = "armoire"
-version = "0.1.0"
+version = "0.26.722"
 description = "Wardrobe Database Administration Tool"
 authors = ["Bryan Patrick Coleman"]
 license = ""

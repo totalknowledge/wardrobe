@@ -31,7 +31,7 @@ jobs:
           node-version: 24
 
       - name: Install Armoire frontend deps
-        working-directory: samples/armoire
+        working-directory: utilities/armoire
         run: npm ci
 
       - name: Install Rust

@@ -1,0 +1,12 @@
+{
+  "name": "wardrobe-javascript-sample",
+  "version": "0.26.722",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "cd ../.. && node samples/javascript/index.js"
+  },
+  "dependencies": {
+    "@wardrobe/embedded": "file:../../bindings/js-ts/embedded"
+  }
+}
