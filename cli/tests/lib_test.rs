@@ -8,28 +8,20 @@ use wardrobe_cli::{
 };
 use wardrobe_core::{
     Command, CommandResult, CreateRequest, CreateResult, InspectResult, OperationFilter,
-    OperationOptions, PermissionRequest, StatusRequest, StatusResult, StorageInventory,
-    WardrobeClient, WardrobeEngine,
+    OperationOptions, PermissionRequest, StatusRequest, StorageInventory, WardrobeClient,
+    WardrobeEngine,
 };
 
 fn status_databases(client: &WardrobeClient) -> Vec<StorageInventory> {
-    match client
+    client
         .status(StatusRequest::databases())
         .expect("status databases")
-    {
-        StatusResult::Databases(databases) => databases,
-        other => panic!("expected databases, got {other:?}"),
-    }
 }
 
 fn status_schemas(client: &WardrobeClient, database_name: &str) -> Vec<String> {
-    match client
+    client
         .status(StatusRequest::schemas(database_name))
         .expect("status schemas")
-    {
-        StatusResult::Schemas(schemas) => schemas,
-        other => panic!("expected schemas, got {other:?}"),
-    }
 }
 
 fn status_drawers(
@@ -37,13 +29,9 @@ fn status_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> Vec<StorageInventory> {
-    match client
+    client
         .status(StatusRequest::drawers(database_name, schema_name))
         .expect("status drawers")
-    {
-        StatusResult::Drawers(drawers) => drawers,
-        other => panic!("expected drawers, got {other:?}"),
-    }
 }
 
 fn temp_storage_directory(test_name: &str) -> std::path::PathBuf {
@@ -387,14 +375,12 @@ fn test_network_show_commands_via_library() {
     let target = spawn_protocol_server(|mut stream| {
         let _req = wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
             .expect("read");
-        let payload = serde_json::to_vec(&CommandResult::Status(StatusResult::Databases(vec![
-            StorageInventory {
-                name: "net_db".to_string(),
-                record_count: 1,
-                disk_size_bytes: 512,
-                register_file_count: 1,
-            },
-        ])))
+        let payload = serde_json::to_vec(&CommandResult::Status(json!([StorageInventory {
+            name: "net_db".to_string(),
+            record_count: 1,
+            disk_size_bytes: 512,
+            register_file_count: 1,
+        },])))
         .expect("ser");
         wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
             wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
@@ -1204,10 +1190,7 @@ fn test_network_metadata_commands_routing() {
     let target = spawn_protocol_server(|mut stream| {
         let _req = wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
             .expect("read");
-        let payload = serde_json::to_vec(&CommandResult::Status(StatusResult::Schemas(vec![
-            "public".to_string(),
-        ])))
-        .expect("ser");
+        let payload = serde_json::to_vec(&CommandResult::Status(json!(["public"]))).expect("ser");
         wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
             wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
             payload,
@@ -1228,14 +1211,12 @@ fn test_network_metadata_commands_routing() {
     let target_drawers = spawn_protocol_server(|mut stream| {
         let _req = wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
             .expect("read");
-        let payload = serde_json::to_vec(&CommandResult::Status(StatusResult::Drawers(vec![
-            StorageInventory {
-                name: "weapon".to_string(),
-                record_count: 4,
-                disk_size_bytes: 4096,
-                register_file_count: 2,
-            },
-        ])))
+        let payload = serde_json::to_vec(&CommandResult::Status(json!([StorageInventory {
+            name: "weapon".to_string(),
+            record_count: 4,
+            disk_size_bytes: 4096,
+            register_file_count: 2,
+        },])))
         .expect("ser");
         wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
             wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
@@ -1513,11 +1494,12 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
             wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
                 .expect("read");
         let command: Command = serde_json::from_slice(&request.payload).expect("command");
-        assert_eq!(command, Command::Status(StatusRequest::drawer_names()));
-        let payload = serde_json::to_vec(&CommandResult::Status(StatusResult::DrawerNames(vec![
-            "armory/public/gem".to_string(),
-        ])))
-        .expect("ser");
+        assert_eq!(
+            command,
+            Command::Status(StatusRequest::drawer_names().into_request())
+        );
+        let payload =
+            serde_json::to_vec(&CommandResult::Status(json!(["armory/public/gem"]))).expect("ser");
         wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
             wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
             payload,
@@ -1540,8 +1522,11 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
             wardrobe_core::wrdb_lib::protocol::ProtocolFrame::read_from_stream(&mut stream)
                 .expect("read");
         let command: Command = serde_json::from_slice(&request.payload).expect("command");
-        assert_eq!(command, Command::Status(StatusRequest::storage()));
-        let payload = serde_json::to_vec(&CommandResult::Status(StatusResult::Storage(
+        assert_eq!(
+            command,
+            Command::Status(StatusRequest::storage().into_request())
+        );
+        let payload = serde_json::to_vec(&CommandResult::Status(json!(
             wardrobe_core::StorageDiagnosis {
                 storage_directory: "/srv/wardrobe".to_string(),
                 storage_bytes: 4096,
@@ -1554,7 +1539,7 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
                 drawer_count: 1,
                 status: "ok".to_string(),
                 drawers: vec!["armory/public/gem".to_string()],
-            },
+            }
         )))
         .expect("ser");
         wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
@@ -1623,10 +1608,10 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
         let command: Command = serde_json::from_slice(&request.payload).expect("command");
         assert_eq!(
             command,
-            Command::Status(StatusRequest::path("armory/public/gem"))
+            Command::Status(StatusRequest::path("armory/public/gem").into_request())
         );
-        let payload = serde_json::to_vec(&CommandResult::Status(StatusResult::Check(
-            wardrobe_core::CheckReport {
+        let payload =
+            serde_json::to_vec(&CommandResult::Status(json!(wardrobe_core::CheckReport {
                 path: "armory/public/gem".to_string(),
                 kind: "drawer".to_string(),
                 entries: vec![wardrobe_core::CheckEntry {
@@ -1635,9 +1620,8 @@ fn test_network_diagnostic_and_recovery_commands_routing() {
                     exists: true,
                     bytes: Some(10),
                 }],
-            },
-        )))
-        .expect("ser");
+            })))
+            .expect("ser");
         wardrobe_core::wrdb_lib::protocol::ProtocolFrame::new(
             wardrobe_core::wrdb_lib::protocol::ProtocolOpcode::Result,
             payload,

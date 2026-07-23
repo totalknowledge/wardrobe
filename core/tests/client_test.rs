@@ -11,8 +11,8 @@ use wardrobe_core::{
     CommandResult, CompactMode, CompactRequest, ConnectionTarget, CreateRequest, CreateResult,
     DeleteResult, DriverKind, DropRequest, InspectResult, OperationFilter, OperationOptions,
     OrderDirection, PermissionRequest, ProtocolFrame, ProtocolOpcode, QueryModifiers, ReadResult,
-    RestoreReport, StatusRequest, StatusResult, StorageDiagnosis, StorageInventory, StorageLocator,
-    UpsertResult, VacuumReport, WalVerification, WardrobeClient, WardrobeEngine,
+    RestoreReport, StatusRequest, StorageDiagnosis, StorageInventory, StorageLocator, UpsertResult,
+    VacuumReport, WalVerification, WardrobeClient, WardrobeEngine,
 };
 
 #[cfg(unix)]
@@ -115,24 +115,15 @@ where
 }
 
 fn status_tenants(client: &WardrobeClient) -> std::io::Result<Vec<String>> {
-    match client.status(StatusRequest::tenants())? {
-        StatusResult::Tenants(tenants) => Ok(tenants),
-        other => Err(unexpected_status(other)),
-    }
+    client.status(StatusRequest::tenants())
 }
 
 fn status_databases(client: &WardrobeClient) -> std::io::Result<Vec<StorageInventory>> {
-    match client.status(StatusRequest::databases())? {
-        StatusResult::Databases(databases) => Ok(databases),
-        other => Err(unexpected_status(other)),
-    }
+    client.status(StatusRequest::databases())
 }
 
 fn status_schemas(client: &WardrobeClient, database_name: &str) -> std::io::Result<Vec<String>> {
-    match client.status(StatusRequest::schemas(database_name))? {
-        StatusResult::Schemas(schemas) => Ok(schemas),
-        other => Err(unexpected_status(other)),
-    }
+    client.status(StatusRequest::schemas(database_name))
 }
 
 fn status_drawers(
@@ -140,10 +131,7 @@ fn status_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> std::io::Result<Vec<StorageInventory>> {
-    match client.status(StatusRequest::drawers(database_name, schema_name))? {
-        StatusResult::Drawers(drawers) => Ok(drawers),
-        other => Err(unexpected_status(other)),
-    }
+    client.status(StatusRequest::drawers(database_name, schema_name))
 }
 
 fn create_inventory(result: CreateResult) -> StorageInventory {
@@ -151,13 +139,6 @@ fn create_inventory(result: CreateResult) -> StorageInventory {
         CreateResult::StorageInventory(inventory) => inventory,
         other => panic!("expected storage inventory, got {other:?}"),
     }
-}
-
-fn unexpected_status(result: StatusResult) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("unexpected status result {result:?}"),
-    )
 }
 
 fn upsert_command(payload: serde_json::Value, filter: impl Into<OperationFilter>) -> Command {
@@ -521,12 +502,12 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             CommandResult::Compact(report.clone()),
         ),
         (
-            Command::Status(StatusRequest::tenants()),
-            CommandResult::Status(StatusResult::Tenants(vec!["tenant_alpha".to_string()])),
+            Command::Status(StatusRequest::tenants().into_request()),
+            CommandResult::Status(json!(["tenant_alpha"])),
         ),
         (
-            Command::Status(StatusRequest::databases()),
-            CommandResult::Status(StatusResult::Databases(vec![StorageInventory {
+            Command::Status(StatusRequest::databases().into_request()),
+            CommandResult::Status(json!([StorageInventory {
                 name: "main_db".to_string(),
                 record_count: 3,
                 disk_size_bytes: 4096,
@@ -534,12 +515,12 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
             }])),
         ),
         (
-            Command::Status(StatusRequest::schemas("main_db")),
-            CommandResult::Status(StatusResult::Schemas(vec!["tenant_schema".to_string()])),
+            Command::Status(StatusRequest::schemas("main_db").into_request()),
+            CommandResult::Status(json!(["tenant_schema"])),
         ),
         (
-            Command::Status(StatusRequest::drawers("main_db", "tenant_schema")),
-            CommandResult::Status(StatusResult::Drawers(vec![StorageInventory {
+            Command::Status(StatusRequest::drawers("main_db", "tenant_schema").into_request()),
+            CommandResult::Status(json!([StorageInventory {
                 name: "gem".to_string(),
                 record_count: 2,
                 disk_size_bytes: 2048,
@@ -750,7 +731,7 @@ fn opening_unsupported_scheme_returns_error() {
 #[test]
 fn client_show_databases_unexpected_result_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Status(StatusRequest::databases()),
+        Command::Status(StatusRequest::databases().into_request()),
         upsert_result(vec!["@gem:bad"]),
     )]);
 
@@ -765,7 +746,7 @@ fn client_show_databases_unexpected_result_returns_invaliddata() {
 #[test]
 fn client_show_drawers_unexpected_result_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Status(StatusRequest::drawers("db", "schema")),
+        Command::Status(StatusRequest::drawers("db", "schema").into_request()),
         upsert_result(vec!["@gem:bad"]),
     )]);
 
@@ -976,22 +957,20 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
             CommandResult::Revoke(json!({"ok": true, "action": "revoke_permission"})),
         ),
         (
-            Command::Status(StatusRequest::wal(Some("admin_db"))),
-            CommandResult::Status(StatusResult::Wal(wal.clone())),
+            Command::Status(StatusRequest::wal(Some("admin_db")).into_request()),
+            CommandResult::Status(json!(wal.clone())),
         ),
         (
-            Command::Status(StatusRequest::storage()),
-            CommandResult::Status(StatusResult::Storage(diagnosis.clone())),
+            Command::Status(StatusRequest::storage().into_request()),
+            CommandResult::Status(json!(diagnosis.clone())),
         ),
         (
-            Command::Status(StatusRequest::path("admin_db/public/gem")),
-            CommandResult::Status(StatusResult::Check(check.clone())),
+            Command::Status(StatusRequest::path("admin_db/public/gem").into_request()),
+            CommandResult::Status(json!(check.clone())),
         ),
         (
-            Command::Status(StatusRequest::drawer_names()),
-            CommandResult::Status(StatusResult::DrawerNames(vec![
-                "admin_db/public/gem".to_string(),
-            ])),
+            Command::Status(StatusRequest::drawer_names().into_request()),
+            CommandResult::Status(json!(["admin_db/public/gem"])),
         ),
         (
             Command::Inspect {
@@ -1014,8 +993,8 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
             CommandResult::Restore(restore_report.clone()),
         ),
         (
-            Command::Status(StatusRequest::cached_drawer_count()),
-            CommandResult::Status(StatusResult::CachedDrawerCount(1)),
+            Command::Status(StatusRequest::cached_drawer_count().into_request()),
+            CommandResult::Status(json!(1)),
         ),
     ]);
 
@@ -1080,21 +1059,18 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
     );
     assert_eq!(
         client.status(StatusRequest::wal(Some("admin_db"))).unwrap(),
-        StatusResult::Wal(wal)
+        wal
     );
-    assert_eq!(
-        client.status(StatusRequest::storage()).unwrap(),
-        StatusResult::Storage(diagnosis)
-    );
+    assert_eq!(client.status(StatusRequest::storage()).unwrap(), diagnosis);
     assert_eq!(
         client
             .status(StatusRequest::path("admin_db/public/gem"))
             .unwrap(),
-        StatusResult::Check(check)
+        check
     );
     assert_eq!(
         client.status(StatusRequest::drawer_names()).unwrap(),
-        StatusResult::DrawerNames(vec!["admin_db/public/gem".to_string()])
+        vec!["admin_db/public/gem".to_string()]
     );
     assert_eq!(
         client
@@ -1116,7 +1092,7 @@ fn client_remote_canonical_admin_maintenance_and_status_paths() {
         client
             .status(StatusRequest::cached_drawer_count())
             .expect("cached drawer count"),
-        StatusResult::CachedDrawerCount(1)
+        1
     );
 
     handle.join().expect("join failed");
@@ -1253,20 +1229,20 @@ fn client_handles_server_misbehaving_with_command_opcode() {
 fn client_alias_methods_execute_successfully() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (
-            Command::Status(StatusRequest::tenants()),
-            CommandResult::Status(StatusResult::Tenants(vec!["tenant_beta".to_string()])),
+            Command::Status(StatusRequest::tenants().into_request()),
+            CommandResult::Status(json!(["tenant_beta"])),
         ),
         (
-            Command::Status(StatusRequest::databases()),
-            CommandResult::Status(StatusResult::Databases(Vec::new())),
+            Command::Status(StatusRequest::databases().into_request()),
+            CommandResult::Status(json!([])),
         ),
         (
-            Command::Status(StatusRequest::schemas("db")),
-            CommandResult::Status(StatusResult::Schemas(Vec::new())),
+            Command::Status(StatusRequest::schemas("db").into_request()),
+            CommandResult::Status(json!([])),
         ),
         (
-            Command::Status(StatusRequest::drawers("db", "schema")),
-            CommandResult::Status(StatusResult::Drawers(Vec::new())),
+            Command::Status(StatusRequest::drawers("db", "schema").into_request()),
+            CommandResult::Status(json!([])),
         ),
     ]);
 
@@ -1393,7 +1369,7 @@ fn client_unexpected_result_on_migrate_returns_invaliddata() {
 #[test]
 fn client_unexpected_result_on_show_schemas_returns_invaliddata() {
     let (connection, handle) = spawn_tcp_protocol_server(vec![(
-        Command::Status(StatusRequest::schemas("main_database")),
+        Command::Status(StatusRequest::schemas("main_database").into_request()),
         CommandResult::Count(0),
     )]);
 

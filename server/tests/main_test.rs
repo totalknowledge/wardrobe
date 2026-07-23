@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
     AlterRequest, Command, CommandResult, CompactRequest, CreateRequest, CreateResult,
     DurabilityPolicy, InspectResult, OperationFilter, OperationOptions, PermissionRequest,
-    ProtocolFrame, ProtocolOpcode, ReadResult, StatusRequest, StatusResult, StorageCoordinate,
-    WardrobeClient, WardrobeEngine,
+    ProtocolFrame, ProtocolOpcode, ReadResult, StatusRequest, StorageCoordinate, WardrobeClient,
+    WardrobeEngine,
 };
 use wardrobe_server::{ServerConfig, serve_tcp_listener};
 
@@ -66,33 +66,21 @@ fn engine_read_records(engine: &WardrobeEngine, filter: OperationFilter) -> Vec<
 }
 
 fn status_storage(client: &WardrobeClient) -> wardrobe_core::StorageDiagnosis {
-    match client
+    client
         .status(StatusRequest::storage())
         .expect("status storage")
-    {
-        StatusResult::Storage(diagnosis) => diagnosis,
-        other => panic!("expected storage status, got {other:?}"),
-    }
 }
 
 fn status_check(client: &WardrobeClient, path: &str) -> wardrobe_core::CheckReport {
-    match client
+    client
         .status(StatusRequest::path(path))
         .expect("status path")
-    {
-        StatusResult::Check(report) => report,
-        other => panic!("expected check status, got {other:?}"),
-    }
 }
 
 fn status_drawer_names(client: &WardrobeClient) -> Vec<String> {
-    match client
+    client
         .status(StatusRequest::drawer_names())
         .expect("status drawer names")
-    {
-        StatusResult::DrawerNames(drawers) => drawers,
-        other => panic!("expected drawer names, got {other:?}"),
-    }
 }
 
 fn admin_result(result: CreateResult) -> serde_json::Value {

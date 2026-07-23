@@ -11,9 +11,9 @@ use wardrobe_core::{
     AlterRequest, BackupArchive, BackupArchiveFile, BsonBinaryFormat, Command, CommandResult,
     CompactMode, CompactRequest, CreateRequest, CreateResult, DatabaseReader, DeleteResult,
     NativeBinaryIndexFormat, OperationFilter, OperationOptions, OrderDirection, QueryModifiers,
-    ReadResult, ReturnShape, StatusRequest, StatusResult, StorageCoordinate, StorageFormat,
-    StorageInventory, StorageLocator, StorageScope, UpsertResult, WAL_FILE_NAME, WalJournal,
-    WalOperation, WardrobeConfig, WardrobeEngine, application_logging_is_configured,
+    ReadResult, ReturnShape, StatusRequest, StorageCoordinate, StorageFormat, StorageInventory,
+    StorageLocator, StorageScope, UpsertResult, WAL_FILE_NAME, WalJournal, WalOperation,
+    WardrobeConfig, WardrobeEngine, application_logging_is_configured,
     shutdown_application_logging,
 };
 
@@ -437,24 +437,15 @@ fn create_inventory(result: CreateResult) -> StorageInventory {
 }
 
 fn status_tenants(engine: &WardrobeEngine) -> std::io::Result<Vec<String>> {
-    match engine.status(StatusRequest::tenants())? {
-        StatusResult::Tenants(tenants) => Ok(tenants),
-        other => Err(unexpected_status(other)),
-    }
+    engine.status(StatusRequest::tenants())
 }
 
 fn status_databases(engine: &WardrobeEngine) -> std::io::Result<Vec<StorageInventory>> {
-    match engine.status(StatusRequest::databases())? {
-        StatusResult::Databases(databases) => Ok(databases),
-        other => Err(unexpected_status(other)),
-    }
+    engine.status(StatusRequest::databases())
 }
 
 fn status_schemas(engine: &WardrobeEngine, database_name: &str) -> std::io::Result<Vec<String>> {
-    match engine.status(StatusRequest::schemas(database_name))? {
-        StatusResult::Schemas(schemas) => Ok(schemas),
-        other => Err(unexpected_status(other)),
-    }
+    engine.status(StatusRequest::schemas(database_name))
 }
 
 fn status_drawers(
@@ -462,41 +453,22 @@ fn status_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> std::io::Result<Vec<StorageInventory>> {
-    match engine.status(StatusRequest::drawers(database_name, schema_name))? {
-        StatusResult::Drawers(drawers) => Ok(drawers),
-        other => Err(unexpected_status(other)),
-    }
+    engine.status(StatusRequest::drawers(database_name, schema_name))
 }
 
 fn status_storage(engine: &WardrobeEngine) -> std::io::Result<wardrobe_core::StorageDiagnosis> {
-    match engine.status(StatusRequest::storage())? {
-        StatusResult::Storage(diagnosis) => Ok(diagnosis),
-        other => Err(unexpected_status(other)),
-    }
+    engine.status(StatusRequest::storage())
 }
 
 fn status_wal(
     engine: &WardrobeEngine,
     database_name: Option<&str>,
 ) -> std::io::Result<wardrobe_core::WalVerification> {
-    match engine.status(StatusRequest::wal(database_name))? {
-        StatusResult::Wal(verification) => Ok(verification),
-        other => Err(unexpected_status(other)),
-    }
+    engine.status(StatusRequest::wal(database_name))
 }
 
 fn status_cached_drawer_count(engine: &WardrobeEngine) -> std::io::Result<usize> {
-    match engine.status(StatusRequest::cached_drawer_count())? {
-        StatusResult::CachedDrawerCount(count) => Ok(count),
-        other => Err(unexpected_status(other)),
-    }
-}
-
-fn unexpected_status(result: StatusResult) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("unexpected status result {result:?}"),
-    )
+    engine.status(StatusRequest::cached_drawer_count())
 }
 
 #[test]
@@ -918,7 +890,9 @@ fn bug_018_command_read_hydrates_fully_qualified_plant_type_pointer() {
         .expect("plant should upsert");
 
     let hydrated = engine
-        .execute_command(read_command(OperationFilter::drawer("nispuk/default/plants")))
+        .execute_command(read_command(OperationFilter::drawer(
+            "nispuk/default/plants",
+        )))
         .expect("command read should succeed");
     let CommandResult::Read(ReadResult::Records(records)) = hydrated else {
         panic!("expected hydrated records");
@@ -2906,12 +2880,9 @@ fn us_048_show_tenants_discovers_active_tenant_namespaces() {
     );
 
     let command_result = engine
-        .execute_command(Command::Status(StatusRequest::tenants()))
+        .execute_command(Command::Status(StatusRequest::tenants().into_request()))
         .expect("show tenants command should succeed");
-    assert_eq!(
-        command_result,
-        CommandResult::Status(StatusResult::Tenants(tenants))
-    );
+    assert_eq!(command_result, CommandResult::Status(json!(tenants)));
 }
 
 #[test]
@@ -3000,12 +2971,9 @@ fn us_049_show_databases_discovers_database_footprints_with_inventory() {
     }
 
     let command_result = engine
-        .execute_command(Command::Status(StatusRequest::databases()))
+        .execute_command(Command::Status(StatusRequest::databases().into_request()))
         .expect("show databases command should succeed");
-    assert_eq!(
-        command_result,
-        CommandResult::Status(StatusResult::Databases(databases))
-    );
+    assert_eq!(command_result, CommandResult::Status(json!(databases)));
 }
 
 #[test]
@@ -3083,12 +3051,11 @@ fn us_050_show_schemas_discovers_nested_and_flat_namespaces() {
     assert_eq!(routed_schemas, vec!["core".to_string()]);
 
     let command_result = engine
-        .execute_command(Command::Status(StatusRequest::schemas("main_db")))
+        .execute_command(Command::Status(
+            StatusRequest::schemas("main_db").into_request(),
+        ))
         .expect("show schemas command should succeed");
-    assert_eq!(
-        command_result,
-        CommandResult::Status(StatusResult::Schemas(schemas))
-    );
+    assert_eq!(command_result, CommandResult::Status(json!(schemas)));
 }
 
 #[test]
@@ -3199,15 +3166,11 @@ fn us_051_show_drawers_discovers_scoped_drawers_with_live_counts() {
     assert_eq!(routed_drawers[0].record_count, 1);
 
     let command_result = engine
-        .execute_command(Command::Status(StatusRequest::drawers(
-            "main_db",
-            "tenant_schema",
-        )))
+        .execute_command(Command::Status(
+            StatusRequest::drawers("main_db", "tenant_schema").into_request(),
+        ))
         .expect("show drawers command should succeed");
-    assert_eq!(
-        command_result,
-        CommandResult::Status(StatusResult::Drawers(drawers))
-    );
+    assert_eq!(command_result, CommandResult::Status(json!(drawers)));
 }
 
 #[test]
@@ -5737,8 +5700,11 @@ fn bug_023_backup_omits_tombstoned_records() {
         .join("default")
         .join("plants_backup.drw");
     assert_eq!(drawer_tombstone_count(&restored_data), 0);
-    let restored = read_records(&engine, OperationFilter::drawer("garden/default/plants_backup"))
-        .expect("restored drawer should read");
+    let restored = read_records(
+        &engine,
+        OperationFilter::drawer("garden/default/plants_backup"),
+    )
+    .expect("restored drawer should read");
     assert_eq!(restored, vec![json!({"_id": "basil", "name": "Basil"})]);
 }
 
@@ -5950,12 +5916,11 @@ fn us_066_binary_wal_logs_mutating_commands() {
     assert_eq!(verification.last_sequence, Some(3));
 
     let command_result = engine
-        .execute_command(Command::Status(StatusRequest::wal(None::<String>)))
+        .execute_command(Command::Status(
+            StatusRequest::wal(None::<String>).into_request(),
+        ))
         .expect("wal verification command should succeed");
-    assert_eq!(
-        command_result,
-        CommandResult::Status(StatusResult::Wal(verification))
-    );
+    assert_eq!(command_result, CommandResult::Status(json!(verification)));
 
     engine
         .execute(

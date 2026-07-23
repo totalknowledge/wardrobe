@@ -4,8 +4,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use wardrobe_core::{
-    OperationFilter, OperationOptions, ReadResult, StatusRequest, StatusResult, StorageInventory,
-    WardrobeClient,
+    OperationFilter, OperationOptions, ReadResult, StatusRequest, StorageInventory, WardrobeClient,
 };
 
 fn read_records(client: &WardrobeClient, filter: OperationFilter) -> Vec<serde_json::Value> {
@@ -33,13 +32,9 @@ fn status_drawers(
     database_name: &str,
     schema_name: &str,
 ) -> Vec<StorageInventory> {
-    match client
+    client
         .status(StatusRequest::drawers(database_name, schema_name))
         .expect("status should succeed")
-    {
-        StatusResult::Drawers(drawers) => drawers,
-        other => panic!("expected drawers, got {other:?}"),
-    }
 }
 
 fn cwd_lock() -> &'static Mutex<()> {
@@ -72,30 +67,30 @@ fn sample_runs_extended_lifecycle_and_cleans_related_records() {
     assert!(output.status.success());
     assert!(
         working_directory
-            .join("wardrobe/basic-usage/public/user.drw")
+            .join("wardrobe/publishing-house/public/publisher.drw")
             .is_file()
     );
     assert!(
         working_directory
-            .join("wardrobe/basic-usage/public/gem.drw")
+            .join("wardrobe/publishing-house/public/person.drw")
             .is_file()
     );
     assert!(
         working_directory
-            .join("wardrobe/basic-usage/public/weapon.drw")
+            .join("wardrobe/publishing-house/public/book.drw")
             .is_file()
     );
     assert!(stdout.contains("Phase 1: Metadata & Inventory Discovery"));
     assert!(stdout.contains("Phase 2: Relational Data Population"));
     assert!(stdout.contains("Phase 3: Filter Query Execution"));
     assert!(stdout.contains("Phase 4: Relation Verification"));
-    assert!(stdout.contains("Phase 5: Targeted Lifecycle Cleanup"));
-    assert!(stdout.contains("Phase 6: Scoped Maintenance & Stress Test"));
-    assert!(stdout.contains("Phase 7: State Reconciliation"));
-    assert!(stdout.contains("Drawers in basic-usage/public:"));
-    assert!(stdout.contains("Filtered gems for tag match: 1"));
-    assert!(stdout.contains("Relation check:"));
-    assert!(stdout.contains("Deleted 3 gems linked to user"));
+    assert!(stdout.contains("Phase 5: Maintenance & Stress Test Cycle"));
+    assert!(stdout.contains("Phase 6: Detailed Engine Inspection"));
+    assert!(stdout.contains("Phase 7: Final State Reconciliation & Integrity"));
+    assert!(stdout.contains("Drawers in publishing-house/public:"));
+    assert!(stdout.contains("Found 1 matching personnel records:"));
+    assert!(stdout.contains("Book lookup check: true"));
+    assert!(stdout.contains("Stress test cycle completed (5 temporary book upserts/deletes)."));
 
     let root_client = WardrobeClient::open(
         working_directory
@@ -104,31 +99,44 @@ fn sample_runs_extended_lifecycle_and_cleans_related_records() {
             .expect("unicode path"),
     )
     .expect("root client should initialize");
-    let drawers = status_drawers(&root_client, "basic-usage", "public");
-    assert!(drawers.iter().any(|drawer| drawer.name == "user"));
-    assert!(drawers.iter().any(|drawer| drawer.name == "gem"));
+    let drawers = status_drawers(&root_client, "publishing-house", "public");
+    assert!(drawers.iter().any(|drawer| drawer.name == "publisher"));
+    assert!(drawers.iter().any(|drawer| drawer.name == "person"));
+    assert!(drawers.iter().any(|drawer| drawer.name == "book"));
 
     let scoped_client = WardrobeClient::open(
         working_directory
-            .join("wardrobe/basic-usage/public")
+            .join("wardrobe/publishing-house/public")
             .to_str()
             .expect("unicode path"),
     )
     .expect("scoped client should initialize");
 
-    let gems = read_records(
+    let temporary_books = read_records(
         &scoped_client,
         OperationFilter::query_in(
-            "gem",
+            "book",
             serde_json::json!({
-                "user_id": "@user:user_001"
+                "title": "Temporary Draft"
             }),
         ),
     );
-    assert!(gems.is_empty());
+    assert!(temporary_books.is_empty());
 
-    let user = read_record(&scoped_client, OperationFilter::pointer("@user:user_001"));
-    assert!(user.is_none());
+    let publisher = read_record(
+        &scoped_client,
+        OperationFilter::pointer("@publisher:pub_001"),
+    );
+    assert!(publisher.is_some());
+
+    let author = read_record(
+        &scoped_client,
+        OperationFilter::pointer("@person:author_001"),
+    );
+    assert!(author.is_some());
+
+    let book = read_record(&scoped_client, OperationFilter::pointer("@book:book_001"));
+    assert!(book.is_some());
 }
 
 #[test]
