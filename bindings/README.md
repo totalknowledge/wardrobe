@@ -58,6 +58,8 @@ Embedded mode is a good fit for:
 
 All bindings use the shared serialized `Command` and `CommandResult` model. Rust uses `AlterRequest::relationship`, JavaScript and TypeScript use `relationshipRequest`, Python uses `relationship_request`, and C uses `wardrobe_cabi_relationship_command` to construct the same relationship declaration. Database, schema, and drawer status requests return raw arrays directly; result payloads are not wrapped in `Databases`, `Schemas`, or `Drawers` objects.
 
+Objects and array elements without `_id` remain inline values in the parent record. An `_id`-only object is a strict reference; an object with `_id` and additional fields cascade-upserts its target. Each mixed-array element is classified independently, and non-hydrated reads preserve stored reference pointers.
+
 ## C ABI Binding
 
 The C ABI binding lives under `bindings/c` and exposes a narrow native surface for C and C-compatible consumers.

@@ -836,6 +836,7 @@ impl WardrobeEngine {
             query,
             None,
             ExecutionContext::root(),
+            false,
         )?;
         if matched_records.is_empty() {
             if options.create_if_missing == Some(false) {
@@ -898,6 +899,7 @@ impl WardrobeEngine {
                     &self.database_core,
                     &pointer,
                     ExecutionContext::root(),
+                    options.hydrate.unwrap_or(true),
                 )? {
                     records.push(record);
                 }
@@ -917,6 +919,7 @@ impl WardrobeEngine {
                 query,
                 options.query_modifiers(),
                 ExecutionContext::root(),
+                options.hydrate.unwrap_or(true),
             );
         }
 
@@ -924,6 +927,7 @@ impl WardrobeEngine {
             &self.database_core,
             &drawer_name,
             ExecutionContext::root(),
+            options.hydrate.unwrap_or(true),
         )?;
         crate::wrdb_lib::query::apply_query_modifiers(
             &mut records,
@@ -980,6 +984,7 @@ impl WardrobeEngine {
                 &self.database_core,
                 &pointer,
                 ExecutionContext::root(),
+                false,
             )?
             .is_some()
             {

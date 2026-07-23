@@ -211,7 +211,7 @@ The current administrative surface can attach or remove:
 
 Those mutations flow through `alter` and `drop` in the Rust API and the matching CLI command families.
 
-Nested JSON objects containing `_id` values still participate in relationship-aware graph processing:
+Nested JSON values without `_id` remain embedded in their parent record, including nested objects and array elements. Only ID-bearing nested objects participate in relationship-aware graph processing:
 
 - full nested objects with `_id` can trigger cascade upsert behavior
 - `_id`-only objects are treated as strict references

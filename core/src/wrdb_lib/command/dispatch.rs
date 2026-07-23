@@ -94,12 +94,14 @@ pub(crate) trait DatabaseCommandExecutor {
         database: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Vec<Value>>;
 
     fn find_by_id_in_database(
         database: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Option<Value>>;
 
     fn find_by_filter_in_database(
@@ -108,6 +110,7 @@ pub(crate) trait DatabaseCommandExecutor {
         filter: Value,
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Vec<Value>>;
 
     fn count_in_database(
@@ -494,7 +497,7 @@ where
         )
     })?;
     let matched_records =
-        E::find_by_filter_in_database(database, drawer_name, query, None, context)?;
+        E::find_by_filter_in_database(database, drawer_name, query, None, context, false)?;
     if matched_records.is_empty() {
         if options.create_if_missing == Some(false) {
             return Ok(Vec::new());
@@ -544,10 +547,11 @@ where
     E: DatabaseCommandExecutor,
 {
     let selection = OperationSelection::from_filter(filter)?;
+    let hydrate = options.hydrate.unwrap_or(true);
     let mut records = if !selection.pointers.is_empty() {
         let mut records = Vec::new();
         for pointer in selection.resolved_pointers()? {
-            if let Some(record) = E::find_by_id_in_database(database, &pointer, context)? {
+            if let Some(record) = E::find_by_id_in_database(database, &pointer, context, hydrate)? {
                 records.push(record);
             }
         }
@@ -565,9 +569,10 @@ where
                 query,
                 options.query_modifiers(),
                 context,
+                hydrate,
             )?
         } else {
-            let mut records = E::find_all_in_database(database, &drawer_name, context)?;
+            let mut records = E::find_all_in_database(database, &drawer_name, context, hydrate)?;
             crate::wrdb_lib::query::apply_query_modifiers(
                 &mut records,
                 options.query_modifiers().as_ref(),
@@ -577,7 +582,7 @@ where
     };
 
     let read_shape = resolve_read_shape(options.return_shape, &selection);
-    if options.hydrate.unwrap_or(true) && selection.pointers.is_empty() {
+    if hydrate && selection.pointers.is_empty() {
         match read_shape {
             ReturnShapeResolution::Record | ReturnShapeResolution::Records => {
                 hydrate_read_records_in_database::<E>(database, &mut records, context)?;
@@ -611,7 +616,7 @@ where
     let mut cache = hydration::HydrationCache::default();
     hydration::hydrate_records_with_cache(records, true, &mut cache, |drawer_name, record_key| {
         let pointer = pointer::format_pointer(drawer_name, record_key);
-        E::find_by_id_in_database(database, &pointer, context)
+        E::find_by_id_in_database(database, &pointer, context, false)
     })
 }
 
@@ -628,7 +633,7 @@ where
     if !selection.pointers.is_empty() {
         let mut count = 0;
         for pointer in selection.resolved_pointers()? {
-            if E::find_by_id_in_database(database, &pointer, context)?.is_some() {
+            if E::find_by_id_in_database(database, &pointer, context, false)?.is_some() {
                 count += 1;
             }
         }
@@ -1123,6 +1128,7 @@ mod tests {
             _database: &RwLock<Database>,
             drawer_name: &str,
             context: ExecutionContext<'_>,
+            _hydrate: bool,
         ) -> Result<Vec<Value>> {
             if drawer_name == "nispuk/default/plants" {
                 return Ok(vec![json!({
@@ -1142,6 +1148,7 @@ mod tests {
             _database: &RwLock<Database>,
             pointer: &str,
             _context: ExecutionContext<'_>,
+            _hydrate: bool,
         ) -> Result<Option<Value>> {
             if pointer == "@nispuk/default/plant_types:fab3d886c9094b61bd6cbd1806daac0e" {
                 return Ok(Some(json!({
@@ -1160,6 +1167,7 @@ mod tests {
             filter: Value,
             modifiers: Option<QueryModifiers>,
             _context: ExecutionContext<'_>,
+            _hydrate: bool,
         ) -> Result<Vec<Value>> {
             Ok(vec![json!({
                 "drawer": drawer_name,

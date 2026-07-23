@@ -200,6 +200,10 @@ fn inventory(client: &WardrobeClient) -> std::io::Result<()> {
 
 The command protocol keeps the operation envelope, for example `{"status":[...]}`, but the status payload itself is a raw array. JavaScript, TypeScript, and Python status methods return that array directly.
 
+### Embedded Values and Relationships
+
+Nested JSON objects and array elements without `_id` remain embedded in their parent record. ID-bearing objects express relationships: an `_id`-only object is a strict reference, while an `_id` plus additional fields cascade-upserts the referenced record. Direct Wardrobe pointer strings are stored as references. Set `OperationOptions::hydrate(false)` to read stored pointers without resolving them.
+
 ## Language Bindings
 
 | Ecosystem | Server-backed | Embedded |

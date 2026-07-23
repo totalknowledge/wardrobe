@@ -6505,3 +6505,93 @@ fn us_141_nested_indexes_and_constraints_resolve_fixed_inline_paths() {
         .expect_err("null nested value should fail");
     assert_eq!(null_error.kind(), std::io::ErrorKind::InvalidData);
 }
+
+#[test]
+fn us_142_keeps_idless_objects_and_mixed_array_elements_inline() {
+    let database = TempDatabase::new("us_142_inline_objects_arrays");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+    let stats = json!({
+        "strength": 18,
+        "dexterity": 14,
+        "intelligence": 12,
+        "details": {"bonuses": [1, {"source": "ancestry", "amount": 2}]}
+    });
+    let inventory_summary = json!([
+        {"slot": "head", "item_name": "Iron Helm"},
+        {"_id": "@item:helm"},
+        {"_id": "@item:armor", "name": "Leather Armor", "armor": 2},
+        "@item:helm",
+        null,
+        7,
+        {"slot": "chest", "item_name": "Travel Cloak"}
+    ]);
+
+    engine
+        .upsert(
+            json!({"_id": "helm", "name": "Iron Helm", "armor": 1}),
+            OperationFilter::drawer("item"),
+            None::<OperationOptions>,
+        )
+        .expect("strict target should seed");
+    engine
+        .upsert(
+            json!({
+                "_id": "hero",
+                "name": "Bob",
+                "stats": stats,
+                "inventory_summary": inventory_summary
+            }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect("character should upsert");
+
+    let raw = drawer_records_from_disk(&database.path.join("character.drw"))
+        .into_iter()
+        .find(|record| record["_id"] == "hero")
+        .expect("raw parent should exist");
+    assert_eq!(raw["stats"], stats);
+    assert_eq!(
+        raw["inventory_summary"],
+        json!([
+            {"slot": "head", "item_name": "Iron Helm"},
+            "@item:helm",
+            "@item:armor",
+            "@item:helm",
+            null,
+            7,
+            {"slot": "chest", "item_name": "Travel Cloak"}
+        ])
+    );
+    assert!(!database.path.join("stat.drw").exists());
+    assert!(!database.path.join("inventory_summary.drw").exists());
+
+    let unhydrated = read_record(
+        &engine,
+        (
+            OperationFilter::pointer("@character:hero"),
+            OperationOptions::new()
+                .hydrate(false)
+                .return_shape(ReturnShape::Record),
+        ),
+    )
+    .expect("unhydrated read should succeed")
+    .expect("character should exist");
+    assert_eq!(unhydrated["stats"], stats);
+    assert_eq!(unhydrated["inventory_summary"], raw["inventory_summary"]);
+
+    let hydrated = read_record(&engine, OperationFilter::pointer("@character:hero"))
+        .expect("hydrated read should succeed")
+        .expect("character should exist");
+    assert_eq!(hydrated["stats"], stats);
+    assert_eq!(hydrated["inventory_summary"][0], raw["inventory_summary"][0]);
+    assert_eq!(hydrated["inventory_summary"][4], json!(null));
+    assert_eq!(hydrated["inventory_summary"][5], json!(7));
+    assert_eq!(
+        hydrated["inventory_summary"][6],
+        raw["inventory_summary"][6]
+    );
+    assert_eq!(hydrated["inventory_summary"][1]["name"], "Iron Helm");
+    assert_eq!(hydrated["inventory_summary"][2]["name"], "Leather Armor");
+}

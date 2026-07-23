@@ -18,6 +18,8 @@ The package split is intentional for Python:
 
 Both expose the same serialized command operations and `relationship_request` constructor. Database, schema, and drawer status calls return Python lists directly without result-side variant wrappers.
 
+Nested objects and array elements without `_id` are stored inline. An `_id`-only object is a strict reference, while an object with `_id` and additional fields cascade-upserts its target. Mixed arrays classify each element independently; pass `{"hydrate": False}` in read options to retain stored pointer strings.
+
 ## Local Validation
 
 ```powershell

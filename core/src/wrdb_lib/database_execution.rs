@@ -393,6 +393,7 @@ impl WardrobeEngine {
         database_core: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> std::io::Result<Vec<Value>> {
         let physical_drawer_name =
             routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
@@ -407,23 +408,25 @@ impl WardrobeEngine {
             Vec::new()
         };
 
-        let mut hydration_cache = RequestHydrationCache::default();
-        hydration::hydrate_records_with_cache(
-            &mut records,
-            true,
-            &mut hydration_cache.records,
-            |drawer_name, record_key| {
-                Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
-            },
-        )?;
-        Self::attach_virtual_relationships(
-            database_core,
-            &physical_drawer_name,
-            &mut records,
-            true,
-            context,
-            &mut hydration_cache,
-        )?;
+        if hydrate {
+            let mut hydration_cache = RequestHydrationCache::default();
+            hydration::hydrate_records_with_cache(
+                &mut records,
+                true,
+                &mut hydration_cache.records,
+                |drawer_name, record_key| {
+                    Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+                },
+            )?;
+            Self::attach_virtual_relationships(
+                database_core,
+                &physical_drawer_name,
+                &mut records,
+                true,
+                context,
+                &mut hydration_cache,
+            )?;
+        }
         Self::remove_hidden_fields_from_records(
             database_core,
             &physical_drawer_name,
@@ -439,6 +442,7 @@ impl WardrobeEngine {
         filter: Value,
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Vec<Value>> {
         let filter_map = query::filter_map(&filter)?;
         let physical_drawer_name =
@@ -464,23 +468,25 @@ impl WardrobeEngine {
             query::record_matches_filter(record, filter_map, context.drawer_namespace)
         });
         query::apply_query_modifiers(&mut records, modifiers.as_ref());
-        let mut hydration_cache = RequestHydrationCache::default();
-        hydration::hydrate_records_with_cache(
-            &mut records,
-            true,
-            &mut hydration_cache.records,
-            |drawer_name, record_key| {
-                Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
-            },
-        )?;
-        Self::attach_virtual_relationships(
-            database_core,
-            &physical_drawer_name,
-            &mut records,
-            true,
-            context,
-            &mut hydration_cache,
-        )?;
+        if hydrate {
+            let mut hydration_cache = RequestHydrationCache::default();
+            hydration::hydrate_records_with_cache(
+                &mut records,
+                true,
+                &mut hydration_cache.records,
+                |drawer_name, record_key| {
+                    Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+                },
+            )?;
+            Self::attach_virtual_relationships(
+                database_core,
+                &physical_drawer_name,
+                &mut records,
+                true,
+                context,
+                &mut hydration_cache,
+            )?;
+        }
         Self::remove_hidden_fields_from_records(
             database_core,
             &physical_drawer_name,
@@ -589,6 +595,7 @@ impl WardrobeEngine {
         database_core: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Option<Value>> {
         let physical_pointer = routing::scoped_pointer(pointer, context.drawer_namespace);
         let (drawer_name, record_key) = pointer::parse_pointer(&physical_pointer)?;
@@ -602,6 +609,7 @@ impl WardrobeEngine {
             let found_record =
                 Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?;
             if let Some(mut record) = found_record {
+                if hydrate {
                 let mut active_pointer_path = HashSet::from([physical_pointer]);
                 let mut hydration_cache = RequestHydrationCache::default();
                 hydration::hydrate_value_with_cache(
@@ -621,6 +629,7 @@ impl WardrobeEngine {
                     context,
                     &mut hydration_cache,
                 )?;
+                }
                 Self::remove_hidden_fields_from_value(database_core, &drawer_name, &mut record)?;
                 if let Value::Object(ref mut map) = record {
                     map.remove("_id");
@@ -1313,16 +1322,18 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         database: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Vec<Value>> {
-        WardrobeEngine::find_all_in_database(database, drawer_name, context)
+        WardrobeEngine::find_all_in_database(database, drawer_name, context, hydrate)
     }
 
     fn find_by_id_in_database(
         database: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Option<Value>> {
-        WardrobeEngine::find_by_id_in_database(database, pointer, context)
+        WardrobeEngine::find_by_id_in_database(database, pointer, context, hydrate)
     }
 
     fn find_by_filter_in_database(
@@ -1331,6 +1342,7 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         filter: Value,
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
+        hydrate: bool,
     ) -> Result<Vec<Value>> {
         WardrobeEngine::find_by_filter_in_database(
             database,
@@ -1338,6 +1350,7 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
             filter,
             modifiers,
             context,
+            hydrate,
         )
     }
 

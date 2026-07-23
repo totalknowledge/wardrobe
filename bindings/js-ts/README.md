@@ -32,6 +32,8 @@ The dry run verifies npm package contents without uploading anything to the regi
 
 Both packages expose `WardrobeClient` with `upsert`, `read`, `delete`, `inspect`, `count`, `clean`, `create`, `alter`, `drop`, `backup`, `restore`, `grant`, `revoke`, and `status`, plus `relationshipRequest` for constructing the canonical relationship declaration. `@wardrobe/client` connects to a running server, while `@wardrobe/embedded` opens local storage through the native binding without starting a server.
 
+Nested objects and array elements without `_id` are stored inline. An `_id`-only object is a strict reference, while an object with `_id` and additional fields cascade-upserts its target. Mixed arrays classify each element independently; use `{ hydrate: false }` in read options to retain stored pointer strings.
+
 Database, schema, and drawer status calls return `StorageInventory[]`, `string[]`, and `StorageInventory[]` directly. The TypeScript declarations include overloads for those request shapes.
 
 Connection targets follow the Rust routing syntax, split by package:
