@@ -10,7 +10,9 @@ use wardrobe_core::{
     CompactRequest, ConnectionTarget, CreateRequest, CreateResult, Database, DropRequest,
     InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult, StatusRequest,
     StorageDiagnosis, StorageInventory, VacuumReport, WardrobeClient, emit_application_log,
-    init_application_logging,
+    init_application_logging, issue_managed_client_certificate, list_managed_certificates,
+    managed_identity_certificates, remove_managed_identity, renew_managed_client_certificate,
+    revoke_managed_certificate,
 };
 
 #[derive(Debug)]
@@ -19,6 +21,7 @@ pub struct CliConfig {
     pub pretty: bool,
     pub command_parts: Vec<String>,
     pub logging: ApplicationLoggingConfig,
+    pub profile: Option<PathBuf>,
 }
 
 impl CliConfig {
@@ -33,6 +36,7 @@ impl CliConfig {
         let mut logging_format = None;
         let mut logging_destination = None;
         let mut logging_file = None;
+        let mut profile = None;
 
         let mut args = args.into_iter();
         let Some(first_arg) = args.next() else {
@@ -89,6 +93,14 @@ impl CliConfig {
                         Error::new(ErrorKind::InvalidInput, "--log-file requires a file path")
                     })?));
                 }
+                "--profile" => {
+                    profile = Some(PathBuf::from(args.next().ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidInput,
+                            "--profile requires a client profile path",
+                        )
+                    })?));
+                }
                 _ => {
                     command_parts.push(arg);
                 }
@@ -105,6 +117,7 @@ impl CliConfig {
                 logging_destination.as_deref(),
                 logging_file,
             )?,
+            profile,
         })
     }
 }
@@ -116,6 +129,7 @@ const HELP_TEXT: &str = r#"wardrobe:
     --log-format <format>       Application log format: pretty or json
     --log-destination <dest>    Application log destination: stderr, stdout, or file
     --log-file <path>           File path when --log-destination file is used
+    --profile <path>            Use an X.509 client profile for a TCP connection
 
     The first argument to the CLI is always the target connection context.
     It can be a filesystem path (e.g., ./wardrobe) for embedded mode, or a network connection string or socket location
@@ -232,6 +246,14 @@ const HELP_TEXT: &str = r#"wardrobe:
         Strip functional access rights from a user identity.
         Example: revoke permission dev_admin my_wardrobe/my_bay:d
 
+    identity <create|enroll|renew|list|inspect|remove> [identity] [options]
+        Manage Wardrobe-issued client identities in the local security directory supplied as the connection context.
+        Example: wardrobe ./security identity create adminuser --device desktop --server-name localhost
+
+    certificate <issue|renew|revoke|list> [identity_or_serial] [options]
+        Issue, renew, revoke, and list Wardrobe-managed client certificates.
+        Example: wardrobe ./security certificate revoke 0123456789abcdef
+
     ===========================================================================
     CORE ARCHITECTURAL RULES
     ===========================================================================
@@ -296,7 +318,22 @@ pub fn run_cli_logic(config: CliConfig) -> io::Result<()> {
             ),
         ],
     );
-    let client = match WardrobeClient::open(&config.connection) {
+    if matches!(
+        config.command_parts.first().map(String::as_str),
+        Some("identity" | "certificate")
+    ) {
+        return run_security_command(
+            Path::new(&config.connection),
+            &config.command_parts,
+            config.pretty,
+        );
+    }
+
+    let client_result = match config.profile {
+        Some(profile) => WardrobeClient::open_with_profile(&config.connection, profile),
+        None => WardrobeClient::open(&config.connection),
+    };
+    let client = match client_result {
         Ok(client) => client,
         Err(error) => {
             cli_log(
@@ -567,6 +604,275 @@ fn unexpected_create_result<T>(expected: &str, actual: CreateResult) -> io::Resu
         ErrorKind::InvalidData,
         format!("expected {expected}, got {actual:?}"),
     ))
+}
+
+struct CertificateCommandOptions {
+    device: String,
+    output: Option<PathBuf>,
+    server_name: String,
+    service: bool,
+}
+
+fn run_security_command(security_dir: &Path, parts: &[String], pretty: bool) -> io::Result<()> {
+    match parts.first().map(String::as_str) {
+        Some("identity") => run_identity_command(security_dir, parts, pretty),
+        Some("certificate") => run_certificate_command(security_dir, parts, pretty),
+        _ => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "security command requires identity or certificate",
+        )),
+    }
+}
+
+fn run_identity_command(security_dir: &Path, parts: &[String], pretty: bool) -> io::Result<()> {
+    let action = parts.get(1).map(String::as_str).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "identity requires create, enroll, renew, list, inspect, or remove",
+        )
+    })?;
+    match action {
+        "list" => print_json(&list_managed_certificates(security_dir)?, pretty),
+        "create" | "enroll" | "renew" => {
+            let name = parts.get(2).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("identity {action} requires a user or service name"),
+                )
+            })?;
+            let options = certificate_command_options(parts, 3)?;
+            let identity = certificate_identity_uri(name, options.service)?;
+            let record = if action == "renew" {
+                renew_managed_client_certificate(
+                    security_dir,
+                    &identity,
+                    &options.device,
+                    options.output.as_deref(),
+                    &options.server_name,
+                )?
+            } else {
+                issue_managed_client_certificate(
+                    security_dir,
+                    &identity,
+                    &options.device,
+                    options.output.as_deref(),
+                    &options.server_name,
+                )?
+            };
+            print_json(&record, pretty)
+        }
+        "inspect" => {
+            let name = parts.get(2).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "identity inspect requires a user or service name",
+                )
+            })?;
+            let options = certificate_command_options(parts, 3)?;
+            let identity = certificate_identity_uri(name, options.service)?;
+            print_json(
+                &managed_identity_certificates(security_dir, &identity)?,
+                pretty,
+            )
+        }
+        "remove" => {
+            let name = parts.get(2).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "identity remove requires a user or service name",
+                )
+            })?;
+            let options = certificate_command_options(parts, 3)?;
+            let identity = certificate_identity_uri(name, options.service)?;
+            print_json(
+                &json!({
+                    "identity": identity,
+                    "revoked": remove_managed_identity(security_dir, &identity)?,
+                }),
+                pretty,
+            )
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown identity action: {other}"),
+        )),
+    }
+}
+
+fn run_certificate_command(security_dir: &Path, parts: &[String], pretty: bool) -> io::Result<()> {
+    let action = parts.get(1).map(String::as_str).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "certificate requires issue, renew, revoke, or list",
+        )
+    })?;
+    match action {
+        "list" => print_json(&list_managed_certificates(security_dir)?, pretty),
+        "issue" => {
+            let name = parts.get(2).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "certificate issue requires an identity",
+                )
+            })?;
+            let options = certificate_command_options(parts, 3)?;
+            let identity = certificate_identity_uri(name, options.service)?;
+            let record = issue_managed_client_certificate(
+                security_dir,
+                &identity,
+                &options.device,
+                options.output.as_deref(),
+                &options.server_name,
+            )?;
+            print_json(&record, pretty)
+        }
+        "renew" => {
+            let target = parts.get(2).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "certificate renew requires an identity or certificate serial",
+                )
+            })?;
+            let options = certificate_command_options(parts, 3)?;
+            let (identity, device, existing_output) =
+                certificate_renewal_target(security_dir, target, options.service, &options.device)?;
+            let output = options.output.as_deref().or(existing_output.as_deref());
+            let record = renew_managed_client_certificate(
+                security_dir,
+                &identity,
+                &device,
+                output,
+                &options.server_name,
+            )?;
+            print_json(&record, pretty)
+        }
+        "revoke" => {
+            let serial = parts.get(2).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "certificate revoke requires a certificate serial",
+                )
+            })?;
+            print_json(
+                &json!({
+                    "serial": serial,
+                    "revoked": revoke_managed_certificate(security_dir, serial)?,
+                }),
+                pretty,
+            )
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Unknown certificate action: {other}"),
+        )),
+    }
+}
+
+fn certificate_command_options(
+    parts: &[String],
+    start: usize,
+) -> io::Result<CertificateCommandOptions> {
+    let mut options = CertificateCommandOptions {
+        device: "default".to_string(),
+        output: None,
+        server_name: "localhost".to_string(),
+        service: false,
+    };
+    let mut index = start;
+    while index < parts.len() {
+        match parts[index].as_str() {
+            "--device" => {
+                index += 1;
+                options.device = parts.get(index).cloned().ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidInput, "--device requires a name")
+                })?;
+            }
+            "--output" => {
+                index += 1;
+                options.output = Some(PathBuf::from(parts.get(index).ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidInput, "--output requires a path")
+                })?));
+            }
+            "--server-name" => {
+                index += 1;
+                options.server_name = parts.get(index).cloned().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        "--server-name requires a DNS name or IP address",
+                    )
+                })?;
+            }
+            "--service" => options.service = true,
+            unknown => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("Unknown certificate option: {unknown}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    Ok(options)
+}
+
+fn certificate_identity_uri(name: &str, service: bool) -> io::Result<String> {
+    if name.starts_with("wardrobe:user:") || name.starts_with("wardrobe:service:") {
+        return Ok(name.to_string());
+    }
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "identity name must contain only letters, digits, dash, underscore, or dot",
+        ));
+    }
+    let kind = if service { "service" } else { "user" };
+    Ok(format!("wardrobe:{kind}:{name}"))
+}
+
+fn certificate_renewal_target(
+    security_dir: &Path,
+    target: &str,
+    service: bool,
+    default_device: &str,
+) -> io::Result<(String, String, Option<PathBuf>)> {
+    if target.len() >= 16
+        && target
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == ':')
+    {
+        let normalized_target = normalized_certificate_serial(target);
+        if let Some(record) = list_managed_certificates(security_dir)?
+            .into_iter()
+            .find(|record| normalized_certificate_serial(&record.serial) == normalized_target)
+        {
+            return Ok((
+                record.identity,
+                record.device,
+                record.profile.parent().map(Path::to_path_buf),
+            ));
+        }
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!("certificate serial '{target}' is not in the managed registry"),
+        ));
+    }
+    Ok((
+        certificate_identity_uri(target, service)?,
+        default_device.to_string(),
+        None,
+    ))
+}
+
+fn normalized_certificate_serial(serial: &str) -> String {
+    serial
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 pub fn run_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> io::Result<()> {
@@ -2106,5 +2412,260 @@ mod tests {
         assert!(resolve_inspect_target(&storage, &[String::from("../bad")]).is_err());
 
         let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn local_identity_commands_delegate_to_managed_pki() {
+        let root = temp_dir("managed_identity");
+        wardrobe_core::initialize_managed_pki(
+            &root,
+            &["localhost".to_string()],
+            &["127.0.0.1".parse().expect("IP should parse")],
+        )
+        .expect("managed PKI should initialize");
+        let config = CliConfig {
+            connection: root.display().to_string(),
+            pretty: false,
+            command_parts: vec![
+                "identity".to_string(),
+                "create".to_string(),
+                "adminuser".to_string(),
+                "--device".to_string(),
+                "desktop".to_string(),
+                "--server-name".to_string(),
+                "localhost".to_string(),
+            ],
+            logging: ApplicationLoggingConfig::default(),
+            profile: None,
+        };
+
+        run_cli_logic(config).expect("identity command should succeed");
+        let records = list_managed_certificates(&root).expect("managed certificates should list");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].identity, "wardrobe:user:adminuser");
+        assert_eq!(records[0].device, "desktop");
+
+        let parsed = CliConfig::from_args(vec![
+            "wardrobe://localhost:24842".to_string(),
+            "--profile".to_string(),
+            records[0].profile.display().to_string(),
+            "status".to_string(),
+            "wardrobes".to_string(),
+        ])
+        .expect("profile flag should parse");
+        assert_eq!(parsed.profile, Some(records[0].profile.clone()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_identity_and_certificate_commands_cover_lifecycle_and_validation() {
+        let root = temp_dir("managed_commands");
+        wardrobe_core::initialize_managed_pki(
+            &root,
+            &["localhost".to_string()],
+            &["127.0.0.1".parse().expect("IP should parse")],
+        )
+        .expect("managed PKI should initialize");
+
+        assert!(run_security_command(&root, &[], false).is_err());
+        assert!(run_identity_command(&root, &["identity".into()], false).is_err());
+        assert!(
+            run_identity_command(&root, &["identity".into(), "unknown".into()], false).is_err()
+        );
+        assert!(run_identity_command(&root, &["identity".into(), "create".into()], false).is_err());
+        assert!(
+            run_identity_command(&root, &["identity".into(), "inspect".into()], false).is_err()
+        );
+        assert!(run_identity_command(&root, &["identity".into(), "remove".into()], false).is_err());
+
+        let service_output = root.join("service-output");
+        run_security_command(
+            &root,
+            &[
+                "identity".into(),
+                "enroll".into(),
+                "sync".into(),
+                "--service".into(),
+                "--device".into(),
+                "worker".into(),
+                "--output".into(),
+                service_output.display().to_string(),
+                "--server-name".into(),
+                "localhost".into(),
+            ],
+            true,
+        )
+        .expect("service identity should enroll");
+        run_identity_command(
+            &root,
+            &[
+                "identity".into(),
+                "inspect".into(),
+                "sync".into(),
+                "--service".into(),
+            ],
+            false,
+        )
+        .expect("service identity should inspect");
+        run_identity_command(
+            &root,
+            &[
+                "identity".into(),
+                "renew".into(),
+                "sync".into(),
+                "--service".into(),
+                "--device".into(),
+                "worker".into(),
+                "--output".into(),
+                service_output.display().to_string(),
+            ],
+            false,
+        )
+        .expect("service identity should renew");
+        run_identity_command(
+            &root,
+            &[
+                "identity".into(),
+                "remove".into(),
+                "sync".into(),
+                "--service".into(),
+            ],
+            false,
+        )
+        .expect("service identity should remove");
+        run_identity_command(&root, &["identity".into(), "list".into()], true)
+            .expect("identities should list");
+
+        assert!(run_certificate_command(&root, &["certificate".into()], false).is_err());
+        assert!(
+            run_certificate_command(&root, &["certificate".into(), "issue".into()], false).is_err()
+        );
+        assert!(
+            run_certificate_command(&root, &["certificate".into(), "renew".into()], false).is_err()
+        );
+        assert!(
+            run_certificate_command(&root, &["certificate".into(), "revoke".into()], false)
+                .is_err()
+        );
+        assert!(
+            run_certificate_command(&root, &["certificate".into(), "unknown".into()], false)
+                .is_err()
+        );
+
+        run_certificate_command(
+            &root,
+            &[
+                "certificate".into(),
+                "issue".into(),
+                "alice".into(),
+                "--device".into(),
+                "laptop".into(),
+            ],
+            false,
+        )
+        .expect("certificate should issue");
+        let issued = list_managed_certificates(&root)
+            .expect("certificates should list")
+            .into_iter()
+            .find(|record| record.identity == "wardrobe:user:alice")
+            .expect("alice certificate should exist");
+        run_certificate_command(
+            &root,
+            &[
+                "certificate".into(),
+                "renew".into(),
+                issued.serial.clone(),
+                "--server-name".into(),
+                "localhost".into(),
+            ],
+            false,
+        )
+        .expect("certificate serial should renew");
+        run_certificate_command(
+            &root,
+            &[
+                "certificate".into(),
+                "renew".into(),
+                "bob".into(),
+                "--device".into(),
+                "phone".into(),
+            ],
+            false,
+        )
+        .expect("certificate identity should renew");
+        let active_bob = list_managed_certificates(&root)
+            .expect("certificates should list")
+            .into_iter()
+            .find(|record| record.identity == "wardrobe:user:bob" && !record.revoked)
+            .expect("bob certificate should exist");
+        run_certificate_command(
+            &root,
+            &["certificate".into(), "revoke".into(), active_bob.serial],
+            false,
+        )
+        .expect("certificate should revoke");
+        run_certificate_command(&root, &["certificate".into(), "list".into()], true)
+            .expect("certificates should list");
+
+        let options = certificate_command_options(
+            &[
+                "certificate".into(),
+                "issue".into(),
+                "sync".into(),
+                "--service".into(),
+            ],
+            3,
+        )
+        .expect("service option should parse");
+        assert!(options.service);
+        assert_eq!(options.device, "default");
+        for option in ["--device", "--output", "--server-name"] {
+            assert!(
+                certificate_command_options(
+                    &[
+                        "certificate".into(),
+                        "issue".into(),
+                        "alice".into(),
+                        option.into(),
+                    ],
+                    3,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            certificate_command_options(
+                &[
+                    "certificate".into(),
+                    "issue".into(),
+                    "alice".into(),
+                    "--unknown".into(),
+                ],
+                3,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            certificate_identity_uri("wardrobe:user:alice", true).unwrap(),
+            "wardrobe:user:alice"
+        );
+        assert_eq!(
+            certificate_identity_uri("sync", true).unwrap(),
+            "wardrobe:service:sync"
+        );
+        assert!(certificate_identity_uri("bad identity", false).is_err());
+        assert_eq!(normalized_certificate_serial("AA:bb-12"), "aabb12");
+        assert!(
+            certificate_renewal_target(
+                &root,
+                "0123456789abcdef0123456789abcdef",
+                false,
+                "default",
+            )
+            .is_err()
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

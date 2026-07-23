@@ -322,6 +322,7 @@ fn test_embedded_drawers_and_diagnose_execution() {
         pretty: false,
         command_parts: vec!["status".to_string(), "drawer-names".to_string()],
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        profile: None,
     };
     assert!(run_cli_logic(config).is_ok());
 
@@ -330,6 +331,7 @@ fn test_embedded_drawers_and_diagnose_execution() {
         pretty: false,
         command_parts: vec!["status".to_string(), "storage".to_string()],
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        profile: None,
     };
     assert!(run_cli_logic(config_diag).is_ok());
 
@@ -356,6 +358,7 @@ fn test_embedded_inspect_and_records_execution() {
         pretty: true,
         command_parts: vec!["inspect".to_string(), "gem".to_string()],
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        profile: None,
     };
     assert!(run_cli_logic(config_inspect).is_ok());
 
@@ -364,6 +367,7 @@ fn test_embedded_inspect_and_records_execution() {
         pretty: false,
         command_parts: vec!["read".to_string(), "gem".to_string()],
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        profile: None,
     };
     assert!(run_cli_logic(config_records).is_ok());
 
@@ -395,6 +399,7 @@ fn test_network_show_commands_via_library() {
         pretty: false,
         command_parts: vec!["status".to_string(), "wardrobes".to_string()],
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        profile: None,
     };
     assert!(run_cli_logic(config).is_ok());
 }

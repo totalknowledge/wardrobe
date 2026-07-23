@@ -22,8 +22,13 @@ pub use wrdb_lib::application_logging::{
     init_application_logging, shutdown_application_logging,
 };
 pub use wrdb_lib::config::{
-    CacheConfig, DataConfig, NetworkConfig, SecurityConfig, TransactionConfig,
-    TransactionRecoveryMode, WalConfig, WardrobeConfig,
+    CacheConfig, CertificateIdentity, CertificateRecord, ClientCertificateProfile, ClientTlsConfig,
+    DataConfig, NetworkConfig, PkiInitialization, SecurityConfig, SecurityMode, TransactionConfig,
+    TransactionRecoveryMode, WalConfig, WardrobeConfig, certificate_identity_from_der,
+    certificate_identity_from_pem, certificate_is_revoked, initialize_managed_pki,
+    issue_managed_client_certificate, list_managed_certificates, managed_identity_certificates,
+    reissue_managed_server_certificate, remove_managed_identity, renew_managed_client_certificate,
+    revoke_managed_certificate, rotate_managed_ca,
 };
 pub use wrdb_lib::connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use wrdb_lib::core::reader::DatabaseReader;

@@ -2,7 +2,7 @@
 
 Command-line management for Wardrobe embedded and remote targets.
 
-The package crate is named `wardrobe-cli`, the installed binary is `wardrobe`, and the current MIT-licensed release is `0.26.722`.
+The package crate is named `wardrobe-cli`, the installed binary is `wardrobe`, and the current MIT-licensed release is `0.26.723`.
 
 ```sh
 cargo build --release -p wardrobe-cli

@@ -1,10 +1,9 @@
 use std::io;
-use wardrobe_server::{ServerConfig, run};
+use wardrobe_server::run_from_args;
 
 fn main() -> io::Result<()> {
-    let config = ServerConfig::from_args(std::env::args().skip(1))?;
     install_shutdown_handler()?;
-    run(config)
+    run_from_args(std::env::args().skip(1))
 }
 
 fn install_shutdown_handler() -> io::Result<()> {

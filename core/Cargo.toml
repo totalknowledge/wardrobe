@@ -1,6 +1,6 @@
 [package]
 name = "wardrobe-core"
-version = "0.26.722"
+version = "0.26.723"
 edition = "2024"
 license = "MIT"
 
@@ -16,3 +16,7 @@ toml = "0.9.12"
 bson = "2.13.0"
 uuid = { version = "1.0", features = ["v4"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+rcgen = { version = "0.14.8", features = ["x509-parser"] }
+rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+x509-parser = "0.18.1"

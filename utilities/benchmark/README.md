@@ -1,6 +1,6 @@
 # Wardrobe Benchmark
 
-`wardrobe-benchmark` version `0.26.722` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
+`wardrobe-benchmark` version `0.26.723` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
 
 The default run uses only embedded Wardrobe so it works without external database services:
 
@@ -35,7 +35,7 @@ bash utilities/benchmark/start-neo4j-docker.sh
 bash utilities/benchmark/start-wardrobe-docker.sh
 ```
 
-Each script starts or reuses a named container, waits for readiness, writes any service credentials the benchmark needs under `target/wardrobe-benchmark`, and prints the matching benchmark flags. When a MySQL or Neo4j container already exists, the helper reads Docker's stored container environment first so the fallback credentials file matches the running service. The Wardrobe script runs the current workspace code inside the official Rust image, with named Docker volumes for storage, Cargo caches, and the Linux build target.
+Each script starts or reuses a named container, waits for readiness, writes any service credentials the benchmark needs under `target/wardrobe-benchmark`, and prints the matching benchmark flags. When a MySQL or Neo4j container already exists, the helper reads Docker's stored container environment first so the fallback credentials file matches the running service. The Wardrobe script runs the current workspace code inside the official Rust image, initializes managed PKI, bootstraps the `wardrobe_benchmark` administrator, and writes its client profile under `target/wardrobe-benchmark/wardrobe-security`. Named Docker volumes retain storage, Cargo caches, and the Linux build target.
 
 Useful examples:
 
@@ -56,13 +56,16 @@ cargo run -p wardrobe-benchmark -- --targets neo4j
 
 ```bash
 bash utilities/benchmark/start-wardrobe-docker.sh
-cargo run -p wardrobe-benchmark -- --targets wardrobe-remote --wardrobe-remote-uri wardrobe://127.0.0.1:24842
+cargo run -p wardrobe-benchmark -- \
+  --targets wardrobe-remote \
+  --wardrobe-remote-uri wardrobe://127.0.0.1:24842 \
+  --wardrobe-client-profile target/wardrobe-benchmark/wardrobe-security/benchmark-client/profile.toml
 ```
 
 Targets:
 
 - `wardrobe-embedded` uses the in-process Wardrobe engine directly.
-- `wardrobe-remote` uses a TCP Wardrobe server. If `--wardrobe-remote-uri` is omitted, the harness starts an in-process server on a loopback port for the run.
+- `wardrobe-remote` uses an authenticated TLS Wardrobe server. If `--wardrobe-remote-uri` is omitted, the harness initializes managed PKI and starts an authenticated in-process server on a loopback port. An existing server requires `--wardrobe-client-profile`.
 - `sqlite` uses an in-process persistent `rusqlite` connection backed by a WAL file under the run directory by default.
 - `mongodb` uses a persistent native MongoDB Rust client against `--mongo-uri` and `--mongo-database`.
 - `mysql` uses a persistent native MySQL Rust connection against `--mysql-host`, `--mysql-port`, and `--mysql-database`.

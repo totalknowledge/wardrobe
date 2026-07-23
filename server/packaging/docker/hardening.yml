@@ -1,0 +1,37 @@
+---
+- name: Harden the Wardrobe server container
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Create the Wardrobe system group
+      ansible.builtin.group:
+        name: wardrobe
+        system: true
+
+    - name: Create the Wardrobe service account
+      ansible.builtin.user:
+        name: wardrobe
+        group: wardrobe
+        system: true
+        create_home: false
+        home: /var/lib/wardrobe
+        shell: /usr/sbin/nologin
+
+    - name: Create the Wardrobe data directory
+      ansible.builtin.file:
+        path: /var/lib/wardrobe
+        state: directory
+        owner: wardrobe
+        group: wardrobe
+        mode: "0750"
+
+    - name: Restrict the server binary permissions
+      ansible.builtin.file:
+        path: /usr/local/bin/wardrobe-server
+        state: touch
+        modification_time: preserve
+        access_time: preserve
+        owner: root
+        group: root
+        mode: "0755"

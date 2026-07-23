@@ -1,12 +1,13 @@
 use crate::wrdb_lib::connection::{ConnectionTarget, DriverKind};
 use crate::wrdb_lib::driver::ClientDriver;
 use crate::{
-    AlterRequest, BackupArchive, CompactRequest, CreateRequest, CreateResult, DeleteResult,
-    DropRequest, InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult,
-    RestoreReport, StatusRequestOutput, UpsertResult, VacuumReport,
+    AlterRequest, BackupArchive, ClientTlsConfig, CompactRequest, CreateRequest, CreateResult,
+    DeleteResult, DropRequest, InspectResult, OperationFilter, OperationOptions, PermissionRequest,
+    ReadResult, RestoreReport, StatusRequestOutput, UpsertResult, VacuumReport,
 };
 use serde_json::Value;
 use std::io::Result;
+use std::path::Path;
 
 pub struct WardrobeClient {
     target: ConnectionTarget,
@@ -18,6 +19,19 @@ impl WardrobeClient {
         let target = ConnectionTarget::parse(connection_string.as_ref())?;
         let driver = ClientDriver::open(&target)?;
         Ok(Self { target, driver })
+    }
+
+    pub fn open_with_tls(connection_string: impl AsRef<str>, tls: ClientTlsConfig) -> Result<Self> {
+        let target = ConnectionTarget::parse(connection_string.as_ref())?;
+        let driver = ClientDriver::open_with_tls(&target, Some(&tls))?;
+        Ok(Self { target, driver })
+    }
+
+    pub fn open_with_profile(
+        connection_string: impl AsRef<str>,
+        profile: impl AsRef<Path>,
+    ) -> Result<Self> {
+        Self::open_with_tls(connection_string, ClientTlsConfig::from_profile(profile)?)
     }
 
     pub fn connection_target(&self) -> &ConnectionTarget {

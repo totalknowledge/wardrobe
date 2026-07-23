@@ -1,7 +1,7 @@
 const net = require('net');
 
 const PACKAGE_NAME = '@wardrobe/client';
-const PACKAGE_VERSION = '0.26.722';
+const PACKAGE_VERSION = '0.26.723';
 
 function writeFrame(socket, opcode, payloadStr) {
   const payload = Buffer.from(payloadStr, 'utf8');

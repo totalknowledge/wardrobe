@@ -1288,6 +1288,10 @@ impl WardrobeEngine {
         self.durability_policy.clone()
     }
 
+    pub fn resolve_certificate_identity(&self, identity: &str) -> Result<Option<String>> {
+        access_control::resolve_certificate_identity(&self.root_directory, identity)
+    }
+
     fn manage_user_authorization(&self, action: &str, payload: Value) -> Result<Value> {
         if self.server_lock.is_some() {
             access_control::manage_user_with_server_lock(&self.root_directory, action, payload)

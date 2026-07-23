@@ -1,9 +1,9 @@
 [package]
 name = "armoire"
-version = "0.26.722"
+version = "0.26.723"
 description = "Wardrobe Database Administration Tool"
 authors = ["Bryan Patrick Coleman"]
-license = ""
+license-file = "../LICENSE"
 repository = ""
 edition = "2021"
 rust-version = "1.96.0"

@@ -2,7 +2,7 @@
 
 [![coverage](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml/badge.svg)](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml)
 
-Current workspace release: `0.26.722`.
+Current workspace release: `0.26.723`.
 
 Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
 
@@ -268,6 +268,321 @@ Useful server flags:
 
 Application logs are operator-facing diagnostics only. They are separate from Wardrobe's logical WAL and transaction WAL, and they are never used for recovery.
 
+## Certificate Security and Server Bootstrap
+
+Wardrobe separates authentication from authorization. TLS client certificates authenticate a stable URI SAN identity such as `wardrobe:user:adminuser`; the existing `_wardrobe_access_control.json` registry resolves that identity to a Wardrobe user and continues to hold the user's role and permissions. Renewing a certificate keeps the URI SAN unchanged, so it does not replace or invalidate the user's authorization record.
+
+TCP deployments support three security modes:
+
+- `managed`: Wardrobe owns a private CA and issues the server and client certificates.
+- `external`: the operator supplies the server identity and one or more trusted client CA bundles.
+- `disabled`: TCP is plaintext and has no authentication. It is accepted only on localhost unless `unsafe_allow_remote_disabled = true` or `--unsafe-disable-auth` is explicitly set. Unix sockets use disabled mode and rely on local filesystem permissions.
+
+Embedded use does not open a network listener and therefore does not perform TLS authentication. Filesystem access remains the local authority boundary.
+
+### Managed Security Mode
+
+Initialize managed PKI once, before starting the server:
+
+```text
+cargo run -p wardrobe-server -- init \
+  --data-dir ./data \
+  --security-dir ./security \
+  --server-name localhost \
+  --server-name wardrobe \
+  --server-name wardrobe.test \
+  --server-ip 127.0.0.1 \
+  --server-ip ::1
+```
+
+Initialization fails if a CA or server identity already exists. Normal server startup only loads those files and never regenerates them.
+
+Create `wardrobe.toml`:
+
+```toml
+[data]
+directory = "./data"
+
+[network]
+tcp_enabled = true
+tcp_bind = "127.0.0.1:24842"
+unix_socket_enabled = false
+
+[security]
+mode = "managed"
+security_dir = "./security"
+server_names = ["localhost", "wardrobe", "wardrobe.test"]
+server_ips = ["127.0.0.1", "::1"]
+```
+
+Bootstrap the first administrator through local filesystem access:
+
+```text
+cargo run -p wardrobe-server -- bootstrap-admin \
+  --data-dir ./data \
+  --security-dir ./security \
+  --username adminuser \
+  --server-name localhost \
+  --output ./security/bootstrap/adminuser
+```
+
+This creates the `adminuser` Wardrobe user with administrator authority and writes `client.crt`, `client.key`, `ca.crt`, and `profile.toml`. The bootstrap operation is a local server executable command; it is not an unauthenticated network endpoint.
+
+Start the server and connect with the profile:
+
+```text
+cargo run -p wardrobe-server -- ./wardrobe.toml
+cargo run -p wardrobe-cli -- wardrobe://localhost:24842 \
+  --profile ./security/bootstrap/adminuser/profile.toml \
+  status wardrobes
+```
+
+Create distinct certificates for each workstation, device, or service. The first CLI argument is the local security directory for identity and certificate administration:
+
+```text
+cargo run -p wardrobe-cli -- ./security identity create adminuser \
+  --device desktop \
+  --server-name localhost \
+  --output ./profiles/adminuser-desktop
+
+cargo run -p wardrobe-cli -- ./security identity enroll adminuser \
+  --device laptop \
+  --server-name localhost \
+  --output ./profiles/adminuser-laptop
+
+cargo run -p wardrobe-cli -- ./security identity create nispuk \
+  --service \
+  --device backend \
+  --server-name wardrobe \
+  --output ./profiles/nispuk-backend
+```
+
+Do not share client private keys or profiles. Each person/device or service/device pair should have its own certificate serial.
+
+### Managed Certificate Lifecycle
+
+List or inspect managed identities:
+
+```text
+cargo run -p wardrobe-cli -- ./security identity list
+cargo run -p wardrobe-cli -- ./security identity inspect adminuser
+cargo run -p wardrobe-cli -- ./security certificate list
+```
+
+Renew a device certificate while preserving `wardrobe:user:adminuser`:
+
+```text
+cargo run -p wardrobe-cli -- ./security identity renew adminuser \
+  --device desktop \
+  --server-name localhost \
+  --output ./profiles/adminuser-desktop
+```
+
+The previous active serial for that identity/device is added to `revoked.json`. A certificate can also be renewed by serial:
+
+```text
+cargo run -p wardrobe-cli -- ./security certificate renew 0123456789abcdef \
+  --server-name localhost
+```
+
+Revoke a compromised certificate or remove all active certificates for an identity:
+
+```text
+cargo run -p wardrobe-cli -- ./security certificate revoke 0123456789abcdef
+cargo run -p wardrobe-cli -- ./security identity remove adminuser
+```
+
+Revocation is read for each new TLS connection. Existing connections should be disconnected operationally when immediate cutoff is required.
+
+Server certificates are replaced only through the explicit reissue command:
+
+```text
+cargo run -p wardrobe-server -- reissue-server-certificate \
+  --security-dir ./security \
+  --server-name localhost \
+  --server-name wardrobe \
+  --server-ip 127.0.0.1 \
+  --server-ip ::1
+```
+
+Restart the server after reissuing its certificate.
+
+Rotate the managed CA only through the local rotation command:
+
+```text
+cargo run -p wardrobe-server -- rotate-ca \
+  --security-dir ./security \
+  --server-name localhost \
+  --server-name wardrobe \
+  --server-ip 127.0.0.1 \
+  --server-ip ::1
+```
+
+Rotation archives the previous CA, creates a new CA, reissues the server certificate, and builds `ca/ca-bundle.crt` with both trust anchors. Wardrobe updates locally tracked client-profile CA bundles so existing client certificates remain usable during the migration. Redistribute the updated bundle to profiles stored on other machines before restarting the server. Renew clients under the new CA, then retain or retire the archived CA according to the deployment's security policy.
+
+### Security Directory Layout
+
+```text
+security/
+  ca/
+    ca.crt
+    ca.key
+    ca-bundle.crt
+    archive/
+  server/
+    server.crt
+    server.key
+  bootstrap/
+    adminuser/
+      client.crt
+      client.key
+      ca.crt
+      profile.toml
+  clients/
+  certificates.json
+  revoked.json
+```
+
+Keep `security/` outside container images and source control. Back it up as sensitive state and restrict `ca.key`, `server.key`, and client keys to their owners.
+
+### Docker Bootstrap
+
+Mount data and security as persistent volumes:
+
+```yaml
+services:
+  wardrobe:
+    image: wardrobe-server:0.26.723
+    command: ["/config/wardrobe.toml"]
+    volumes:
+      - wardrobe-data:/data
+      - wardrobe-security:/security
+      - ./wardrobe.toml:/config/wardrobe.toml:ro
+
+volumes:
+  wardrobe-data:
+  wardrobe-security:
+```
+
+Initialize and bootstrap from inside the container or a one-shot container with the same volumes:
+
+```text
+docker compose run --rm wardrobe wardrobe-server init \
+  --data-dir /data \
+  --security-dir /security \
+  --server-name wardrobe \
+  --server-name localhost \
+  --server-ip 127.0.0.1
+
+docker compose run --rm wardrobe wardrobe-server bootstrap-admin \
+  --data-dir /data \
+  --security-dir /security \
+  --username adminuser \
+  --server-name wardrobe \
+  --output /security/bootstrap/adminuser
+```
+
+Copy `/security/bootstrap/adminuser` to the administrator workstation through an approved secret-transfer channel. Never bake it into the image.
+
+### Local and LAN Deployments
+
+For local development, initialize SANs for `localhost`, `127.0.0.1`, and `::1`; public DNS is not required. For Docker Compose, add the service name such as `wardrobe`. For LAN access, add the exact LAN DNS name and IP before issuing the server certificate, bind the listener to that interface, and keep managed mode enabled:
+
+```toml
+[network]
+tcp_enabled = true
+tcp_bind = "192.168.1.20:24842"
+
+[security]
+mode = "managed"
+security_dir = "/srv/wardrobe/security"
+server_names = ["wardrobe.lan"]
+server_ips = ["192.168.1.20"]
+```
+
+Clients must use a profile whose `server_name` matches one of those SAN values.
+
+### External or Enterprise PKI
+
+External mode uses the same mutual-TLS authentication and URI SAN mapping but never reads or operates a CA private key:
+
+```toml
+[data]
+directory = "/srv/wardrobe/data"
+
+[network]
+tcp_enabled = true
+tcp_bind = "0.0.0.0:24842"
+unix_socket_enabled = false
+
+[security]
+mode = "external"
+security_dir = "/srv/wardrobe/security-state"
+server_certificate = "/etc/wardrobe-pki/server.crt"
+server_private_key = "/etc/wardrobe-pki/server.key"
+trusted_client_ca_bundles = [
+  "/etc/wardrobe-pki/client-root-a.crt",
+  "/etc/wardrobe-pki/client-root-b.crt",
+]
+```
+
+The server certificate must contain the DNS/IP SAN used by clients. Each client certificate must be valid for client authentication, chain to one configured client CA, and contain exactly one Wardrobe URI SAN. This works with enterprise PKI, Vault, Smallstep, Kubernetes issuers, SPIFFE/SPIRE certificate delivery, and Active Directory Certificate Services when those certificate requirements are met.
+
+Register the first external administrator certificate locally:
+
+```text
+cargo run -p wardrobe-server -- bootstrap-admin \
+  --data-dir /srv/wardrobe/data \
+  --username adminuser \
+  --certificate /secure-transfer/adminuser.crt
+```
+
+The certificate must contain `wardrobe:user:adminuser`. The operator retains and distributes the matching private key and creates a client profile:
+
+```toml
+identity = "wardrobe:user:adminuser"
+server_name = "wardrobe.example.com"
+ca_cert = "server-ca.crt"
+client_cert = "adminuser.crt"
+client_key = "adminuser.key"
+```
+
+Relative profile paths are resolved from the directory containing `profile.toml`. Multiple `trusted_client_ca_bundles` allow CA rotation or mixed enterprise and Wardrobe trust during a controlled migration. External certificate renewal and revocation remain the external PKI operator's responsibility; Wardrobe's local serial revocation file can additionally deny a client serial.
+
+### Disabled Mode
+
+Local plaintext development can be configured explicitly:
+
+```toml
+[network]
+tcp_enabled = true
+tcp_bind = "127.0.0.1:24842"
+
+[security]
+mode = "disabled"
+```
+
+Wardrobe rejects a non-loopback TCP bind in disabled mode. The unsafe override is intentionally conspicuous:
+
+```toml
+[security]
+mode = "disabled"
+unsafe_allow_remote_disabled = true
+```
+
+Do not use that override on an untrusted network. Prefer managed or external mode.
+
+### Certificate Troubleshooting
+
+- `certificate identity is not registered`: run local bootstrap for `adminuser`, or ensure the existing user record includes the certificate URI SAN.
+- `certificate does not contain a URI SAN`: issue a client certificate with exactly one `wardrobe:user:<name>` or `wardrobe:service:<name>` URI SAN.
+- `unknown issuer` or `bad certificate`: verify the client chains to one of `trusted_client_ca_bundles` and the client profile trusts the CA that signed the server.
+- `certificate is not valid for name`: set the profile's `server_name` to a DNS/IP SAN in the server certificate, or explicitly reissue the managed server certificate with the required name/IP.
+- `certificate has been revoked`: issue or renew a distinct device certificate and update the client profile.
+- `managed CA/server file not found`: run `wardrobe-server init` once with the same persistent security volume; startup never repairs or silently replaces missing identity files.
+- clients fail after CA rotation: redistribute `ca/ca-bundle.crt` or the refreshed profile `ca.crt` before restarting, then renew each client under the new CA.
+- TLS works on one host but not another: check clock synchronization, certificate validity dates, DNS resolution, mounted file paths, and file permissions.
+
 ## CLI Usage
 
 `NOTES.txt` and `wardrobe --help` are the authority for the CLI capability set. The package crate remains `wardrobe-cli`, while the installed binary is `wardrobe`. The binary accepts the connection context as the first positional argument, then runs the canonical command families from the help output.
@@ -281,6 +596,8 @@ cargo run -p wardrobe-cli -- <connection> [--pretty] <command> [args]
 If no command is supplied, the CLI enters an interactive REPL. If standard input is piped in, the CLI executes the piped command instead.
 
 CLI application logging uses the same `--log-level`, `--log-format`, `--log-destination`, and `--log-file` controls as the server. Logging is off by default, and when enabled it writes to stderr by default so JSON command output remains script-friendly.
+
+Use `--profile <profile.toml>` for certificate-authenticated TCP connections. Identity and certificate lifecycle commands target a local managed security directory and do not open a server connection.
 
 Examples:
 

@@ -1,6 +1,6 @@
 [package]
 name = "wardrobe-js-ts"
-version = "0.26.722"
+version = "0.26.723"
 edition = "2024"
 authors = ["Wardrobe Maintainers"]
 description = "Native implementation and validation crate for Wardrobe JavaScript and TypeScript bindings."

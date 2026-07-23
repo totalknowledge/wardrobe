@@ -1,0 +1,9 @@
+Package: wardrobe-cli
+Version: @VERSION@
+Section: database
+Priority: optional
+Architecture: @ARCHITECTURE@
+Maintainer: Bryan Patrick Coleman
+Depends: libc6
+Description: Wardrobe command-line management tool
+ Wardrobe CLI manages embedded and remote Wardrobe targets.

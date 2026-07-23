@@ -1,0 +1,9 @@
+Package: wardrobe-server
+Version: @VERSION@
+Section: database
+Priority: optional
+Architecture: @ARCHITECTURE@
+Maintainer: Bryan Patrick Coleman
+Depends: libc6
+Description: Wardrobe database server
+ Wardrobe Server hosts a shared Wardrobe engine over TCP or Unix sockets.

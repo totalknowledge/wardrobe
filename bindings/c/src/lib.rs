@@ -11,7 +11,7 @@ pub struct WardrobeCStatus {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn wardrobe_cabi_version() -> *const c_char {
-    static VERSION: &[u8] = b"wardrobe-cabi-0.26.722\0";
+    static VERSION: &[u8] = b"wardrobe-cabi-0.26.723\0";
     VERSION.as_ptr().cast()
 }
 

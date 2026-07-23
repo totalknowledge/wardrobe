@@ -1,6 +1,6 @@
 # Wardrobe API
 
-This document describes the canonical public Rust API exposed by `wardrobe-core` in workspace release `0.26.722`.
+This document describes the canonical public Rust API exposed by `wardrobe-core` in workspace release `0.26.723`.
 
 The current operation vocabulary is:
 

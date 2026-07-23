@@ -1,13 +1,18 @@
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConnection, StreamOwned};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wardrobe_core::{
-    ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig, Command, DurabilityPolicy,
-    ProtocolFrame, ProtocolOpcode, WardrobeConfig, WardrobeEngine, emit_application_log,
-    init_application_logging,
+    ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig, Command, CreateRequest,
+    DurabilityPolicy, ProtocolFrame, ProtocolOpcode, SecurityConfig, SecurityMode, WardrobeConfig,
+    WardrobeEngine, certificate_identity_from_der, certificate_identity_from_pem,
+    certificate_is_revoked, emit_application_log, init_application_logging, initialize_managed_pki,
+    issue_managed_client_certificate, reissue_managed_server_certificate, rotate_managed_ca,
 };
 
 const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 5;
@@ -29,11 +34,18 @@ pub struct ServerConfig {
     pub durability_policy: DurabilityPolicy,
     pub profile_commands: bool,
     pub logging: ApplicationLoggingConfig,
+    pub security: SecurityConfig,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ServerRuntimeConfig {
     pub profile_commands: bool,
+}
+
+#[derive(Clone)]
+struct ServerTlsRuntime {
+    config: Arc<rustls::ServerConfig>,
+    security_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +133,56 @@ impl ServerConfig {
                     );
                 }
                 "--profile-commands" => profile_commands = true,
+                "--security-mode" => {
+                    wardrobe_config.security.mode =
+                        SecurityMode::parse(&args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--security-mode requires managed, external, or disabled",
+                            )
+                        })?)?;
+                }
+                "--security-dir" => {
+                    wardrobe_config.security.security_dir =
+                        PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--security-dir requires a directory path",
+                            )
+                        })?);
+                }
+                "--server-certificate" => {
+                    wardrobe_config.security.server_certificate =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--server-certificate requires a PEM file path",
+                            )
+                        })?));
+                }
+                "--server-private-key" => {
+                    wardrobe_config.security.server_private_key =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--server-private-key requires a PEM file path",
+                            )
+                        })?));
+                }
+                "--trusted-client-ca" => {
+                    wardrobe_config
+                        .security
+                        .trusted_client_ca_bundles
+                        .push(PathBuf::from(args.next().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "--trusted-client-ca requires a PEM bundle path",
+                            )
+                        })?));
+                }
+                "--unsafe-disable-auth" => {
+                    wardrobe_config.security.unsafe_allow_remote_disabled = true;
+                }
                 "--log-level" => {
                     let raw = args.next().ok_or_else(|| {
                         io::Error::new(
@@ -197,6 +259,7 @@ impl ServerConfig {
             durability_policy: wardrobe_config.wal.durability,
             profile_commands,
             logging: wardrobe_config.logging,
+            security: wardrobe_config.security,
         })
     }
 
@@ -216,6 +279,7 @@ impl ServerConfig {
         config.wal.checkpoint_size_bytes = self.wal_checkpoint_size_bytes;
         config.wal.checkpoint_ops = self.wal_checkpoint_ops;
         config.logging = self.logging.clone();
+        config.security = self.security.clone();
         config
     }
 }
@@ -270,8 +334,273 @@ fn set_config_path(slot: &mut Option<PathBuf>, path: PathBuf) -> io::Result<()> 
     Ok(())
 }
 
+pub fn run_from_args<I>(args: I) -> io::Result<()>
+where
+    I: IntoIterator<Item = String>,
+{
+    let args = args.into_iter().collect::<Vec<_>>();
+    match args.first().map(String::as_str) {
+        Some("init") => run_init_command(&args[1..]),
+        Some("bootstrap-admin") => run_bootstrap_admin_command(&args[1..]),
+        Some("reissue-server-certificate") => run_reissue_server_certificate_command(&args[1..]),
+        Some("rotate-ca") => run_rotate_ca_command(&args[1..]),
+        _ => run(ServerConfig::from_args(args)?),
+    }
+}
+
+fn run_init_command(args: &[String]) -> io::Result<()> {
+    let mut data_dir = PathBuf::from("./wardrobe");
+    let mut security_dir = PathBuf::from("./security");
+    let mut server_names = Vec::new();
+    let mut server_ips = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--data-dir" => data_dir = PathBuf::from(command_value(args, &mut index)?),
+            "--security-dir" => security_dir = PathBuf::from(command_value(args, &mut index)?),
+            "--server-name" => server_names.push(command_value(args, &mut index)?.to_string()),
+            "--server-ip" => {
+                let raw = command_value(args, &mut index)?;
+                server_ips.push(raw.parse().map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Invalid --server-ip '{raw}': {error}"),
+                    )
+                })?);
+            }
+            unknown => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unknown init argument: {unknown}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    if server_names.is_empty() && server_ips.is_empty() {
+        server_names.push("localhost".to_string());
+        server_ips.push(
+            "127.0.0.1"
+                .parse()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error}")))?,
+        );
+        server_ips.push(
+            "::1"
+                .parse()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error}")))?,
+        );
+    }
+    std::fs::create_dir_all(&data_dir)?;
+    let initialized = initialize_managed_pki(&security_dir, &server_names, &server_ips)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&initialized).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to render initialization result: {error}"),
+            )
+        })?
+    );
+    Ok(())
+}
+
+fn run_reissue_server_certificate_command(args: &[String]) -> io::Result<()> {
+    let mut security_dir = PathBuf::from("./security");
+    let mut server_names = Vec::new();
+    let mut server_ips = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--security-dir" => security_dir = PathBuf::from(command_value(args, &mut index)?),
+            "--server-name" => server_names.push(command_value(args, &mut index)?.to_string()),
+            "--server-ip" => {
+                let raw = command_value(args, &mut index)?;
+                server_ips.push(raw.parse().map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Invalid --server-ip '{raw}': {error}"),
+                    )
+                })?);
+            }
+            unknown => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unknown reissue-server-certificate argument: {unknown}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    let initialized =
+        reissue_managed_server_certificate(&security_dir, &server_names, &server_ips)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&initialized).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to render server certificate result: {error}"),
+            )
+        })?
+    );
+    Ok(())
+}
+
+fn run_rotate_ca_command(args: &[String]) -> io::Result<()> {
+    let mut security_dir = PathBuf::from("./security");
+    let mut server_names = Vec::new();
+    let mut server_ips = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--security-dir" => security_dir = PathBuf::from(command_value(args, &mut index)?),
+            "--server-name" => server_names.push(command_value(args, &mut index)?.to_string()),
+            "--server-ip" => {
+                let raw = command_value(args, &mut index)?;
+                server_ips.push(raw.parse().map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Invalid --server-ip '{raw}': {error}"),
+                    )
+                })?);
+            }
+            unknown => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unknown rotate-ca argument: {unknown}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    let initialized = rotate_managed_ca(&security_dir, &server_names, &server_ips)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&initialized).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to render CA rotation result: {error}"),
+            )
+        })?
+    );
+    Ok(())
+}
+
+fn run_bootstrap_admin_command(args: &[String]) -> io::Result<()> {
+    let mut data_dir = PathBuf::from("./wardrobe");
+    let mut security_dir = PathBuf::from("./security");
+    let mut username = None;
+    let mut output = None;
+    let mut certificate = None;
+    let mut server_name = "localhost".to_string();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--data-dir" => data_dir = PathBuf::from(command_value(args, &mut index)?),
+            "--security-dir" => security_dir = PathBuf::from(command_value(args, &mut index)?),
+            "--username" => username = Some(command_value(args, &mut index)?.to_string()),
+            "--output" => output = Some(PathBuf::from(command_value(args, &mut index)?)),
+            "--certificate" => certificate = Some(PathBuf::from(command_value(args, &mut index)?)),
+            "--server-name" => server_name = command_value(args, &mut index)?.to_string(),
+            unknown => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unknown bootstrap-admin argument: {unknown}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    let username = username.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bootstrap-admin requires --username",
+        )
+    })?;
+    validate_bootstrap_username(&username)?;
+    let identity = format!("wardrobe:user:{username}");
+    let certificate_record = if let Some(certificate) = certificate {
+        let certificate_identity = certificate_identity_from_pem(&certificate)?;
+        if certificate_identity.identity != identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "bootstrap certificate identity '{}' does not match '{}'",
+                    certificate_identity.identity, identity
+                ),
+            ));
+        }
+        None
+    } else {
+        let output =
+            output.unwrap_or_else(|| security_dir.join("bootstrap").join(username.as_str()));
+        Some(issue_managed_client_certificate(
+            &security_dir,
+            &identity,
+            "bootstrap",
+            Some(&output),
+            &server_name,
+        )?)
+    };
+
+    let engine = WardrobeEngine::open(data_dir.to_string_lossy().as_ref())?;
+    engine.create(CreateRequest::user(serde_json::json!({
+        "username": username,
+        "role": "administrator",
+        "permissions": ["*"],
+        "certificate_identities": [identity],
+    })))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "username": username,
+            "role": "administrator",
+            "certificate": certificate_record,
+        }))
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to render bootstrap result: {error}"),
+            )
+        })?
+    );
+    Ok(())
+}
+
+fn command_value<'a>(args: &'a [String], index: &mut usize) -> io::Result<&'a str> {
+    *index += 1;
+    args.get(*index).map(String::as_str).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} requires a value", args[*index - 1]),
+        )
+    })
+}
+
+fn validate_bootstrap_username(username: &str) -> io::Result<()> {
+    if username.is_empty()
+        || !username
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bootstrap username must contain only letters, digits, dash, underscore, or dot",
+        ));
+    }
+    Ok(())
+}
+
 pub fn print_help() {
     println!("wardrobe-server");
+    println!("  init [options]             Initialize managed CA and persistent server identity");
+    println!(
+        "  bootstrap-admin [options]  Locally create the first administrator and client profile"
+    );
+    println!(
+        "  reissue-server-certificate [options]  Explicitly replace the managed server certificate"
+    );
+    println!("  rotate-ca [options]        Rotate the managed CA with overlapping trust");
     println!("  <config.toml>              Optional first positional TOML config file");
     println!("  --config <path>            Load TOML config file");
     println!("  --data-dir <path>          Storage directory for the Wardrobe database");
@@ -290,6 +619,12 @@ pub fn print_help() {
         "  --group-commit-max-batch <count>  Grouped WAL max batch, default {DEFAULT_GROUP_COMMIT_MAX_BATCH}"
     );
     println!("  --profile-commands         Print per-command protocol and engine timings");
+    println!("  --security-mode <mode>     Security mode: managed, external, or disabled");
+    println!("  --security-dir <path>      Persistent managed security directory");
+    println!("  --server-certificate <path>  External server certificate");
+    println!("  --server-private-key <path>  External server private key");
+    println!("  --trusted-client-ca <path>   Trusted external client CA bundle; repeatable");
+    println!("  --unsafe-disable-auth      Allow disabled authentication on a non-local TCP bind");
     println!(
         "  --log-level <level>        Application log level: trace, debug, info, warn, error, off"
     );
@@ -319,8 +654,115 @@ fn server_error_fields(error: &io::Error) -> Vec<(&'static str, String)> {
     ]
 }
 
+fn build_server_tls_runtime(security: &SecurityConfig) -> io::Result<Option<ServerTlsRuntime>> {
+    if security.mode == SecurityMode::Disabled {
+        return Ok(None);
+    }
+    let (server_certificate, server_private_key, trusted_client_cas) = match security.mode {
+        SecurityMode::Managed => (
+            security.security_dir.join("server").join("server.crt"),
+            security.security_dir.join("server").join("server.key"),
+            vec![{
+                let bundle = security.security_dir.join("ca").join("ca-bundle.crt");
+                if bundle.is_file() {
+                    bundle
+                } else {
+                    security.security_dir.join("ca").join("ca.crt")
+                }
+            }],
+        ),
+        SecurityMode::External => (
+            security.server_certificate.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "external security requires a server certificate",
+                )
+            })?,
+            security.server_private_key.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "external security requires a server private key",
+                )
+            })?,
+            security.trusted_client_ca_bundles.clone(),
+        ),
+        SecurityMode::Disabled => return Ok(None),
+    };
+    let mut roots = RootCertStore::empty();
+    for path in &trusted_client_cas {
+        for certificate in load_certificates(path)? {
+            roots.add(certificate).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid trusted client CA {}: {error}", path.display()),
+                )
+            })?;
+        }
+    }
+    if roots.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "certificate authentication requires at least one trusted client CA",
+        ));
+    }
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to build client certificate verifier: {error}"),
+            )
+        })?;
+    let config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(
+            load_certificates(&server_certificate)?,
+            load_private_key(&server_private_key)?,
+        )
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid server TLS identity: {error}"),
+            )
+        })?;
+    Ok(Some(ServerTlsRuntime {
+        config: Arc::new(config),
+        security_dir: security.security_dir.clone(),
+    }))
+}
+
+fn load_certificates(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
+    let bytes = std::fs::read(path)?;
+    let mut reader = io::BufReader::new(bytes.as_slice());
+    let certificates = rustls_pemfile::certs(&mut reader).collect::<io::Result<Vec<_>>>()?;
+    if certificates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("No certificates found in {}", path.display()),
+        ));
+    }
+    Ok(certificates)
+}
+
+fn load_private_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
+    let bytes = std::fs::read(path)?;
+    rustls_pemfile::private_key(&mut io::BufReader::new(bytes.as_slice()))?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("No private key found in {}", path.display()),
+        )
+    })
+}
+
 pub fn run(config: ServerConfig) -> io::Result<()> {
+    let engine_config = config.engine_config();
+    if config.check_only {
+        engine_config.validate()?;
+    } else {
+        engine_config.validate_for_server()?;
+    }
     init_application_logging(config.logging.clone())?;
+    let tls_security = build_server_tls_runtime(&config.security)?;
     server_log(
         ApplicationLogLevel::Info,
         "config_loaded",
@@ -348,6 +790,7 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
                 "log_destination",
                 config.logging.destination.as_str().to_string(),
             ),
+            ("security_mode", config.security.mode.as_str().to_string()),
         ],
     );
     server_log(
@@ -358,7 +801,6 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
             ("storage_root", config.data_dir.clone()),
         ],
     );
-    let engine_config = config.engine_config();
     let engine = match WardrobeEngine::open_for_server_with_config(engine_config) {
         Ok(engine) => Arc::new(engine),
         Err(error) => {
@@ -438,8 +880,15 @@ pub fn run(config: ServerConfig) -> io::Result<()> {
         let runtime = ServerRuntimeConfig {
             profile_commands: config.profile_commands,
         };
+        let tls_security = tls_security.clone();
         listener_threads.push(thread::spawn(move || {
-            serve_tcp_listener_with_config(listener, engine, connection_pool_limit, runtime)
+            serve_tcp_listener_with_security(
+                listener,
+                engine,
+                connection_pool_limit,
+                runtime,
+                tls_security,
+            )
         }));
     }
 
@@ -516,6 +965,38 @@ pub fn serve_tcp_listener_with_config(
     connection_pool_limit: Option<usize>,
     runtime: ServerRuntimeConfig,
 ) -> io::Result<()> {
+    serve_tcp_listener_with_security(listener, engine, connection_pool_limit, runtime, None)
+}
+
+pub fn serve_tls_tcp_listener(
+    listener: TcpListener,
+    engine: Arc<WardrobeEngine>,
+    connection_pool_limit: Option<usize>,
+    security: SecurityConfig,
+) -> io::Result<()> {
+    if security.mode == SecurityMode::Disabled {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TLS listener requires managed or external security",
+        ));
+    }
+    let tls_security = build_server_tls_runtime(&security)?;
+    serve_tcp_listener_with_security(
+        listener,
+        engine,
+        connection_pool_limit,
+        ServerRuntimeConfig::default(),
+        tls_security,
+    )
+}
+
+fn serve_tcp_listener_with_security(
+    listener: TcpListener,
+    engine: Arc<WardrobeEngine>,
+    connection_pool_limit: Option<usize>,
+    runtime: ServerRuntimeConfig,
+    tls_security: Option<ServerTlsRuntime>,
+) -> io::Result<()> {
     let connection_pool = connection_pool_limit.map(ConnectionPool::new);
     let mut idle_polls = 0usize;
 
@@ -534,13 +1015,23 @@ pub fn serve_tcp_listener_with_config(
                         ("peer_addr", peer_addr.to_string()),
                     ],
                 );
-                spawn_connection_handler(
-                    Arc::clone(&engine),
-                    stream,
-                    permit,
-                    runtime,
-                    ProtocolWritePolicy::Unflushed,
-                );
+                if let Some(tls_security) = tls_security.clone() {
+                    spawn_tls_connection_handler(
+                        Arc::clone(&engine),
+                        stream,
+                        permit,
+                        runtime,
+                        tls_security,
+                    );
+                } else {
+                    spawn_connection_handler(
+                        Arc::clone(&engine),
+                        stream,
+                        permit,
+                        runtime,
+                        ProtocolWritePolicy::Unflushed,
+                    );
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 drop(permit);
@@ -1041,6 +1532,97 @@ fn spawn_connection_handler<S>(
     });
 }
 
+fn spawn_tls_connection_handler(
+    engine: Arc<WardrobeEngine>,
+    stream: TcpStream,
+    permit: Option<ConnectionPoolPermit>,
+    runtime: ServerRuntimeConfig,
+    tls: ServerTlsRuntime,
+) {
+    thread::spawn(move || {
+        let _permit = permit;
+        if let Err(error) = handle_authenticated_tls_connection(engine, stream, runtime, tls) {
+            server_log(
+                ApplicationLogLevel::Warn,
+                "authentication_failure",
+                vec![
+                    ("operation", "client_authentication".to_string()),
+                    ("error_kind", format!("{:?}", error.kind())),
+                    ("error", error.to_string()),
+                    ("success", "false".to_string()),
+                ],
+            );
+        }
+    });
+}
+
+fn handle_authenticated_tls_connection(
+    engine: Arc<WardrobeEngine>,
+    mut stream: TcpStream,
+    runtime: ServerRuntimeConfig,
+    tls: ServerTlsRuntime,
+) -> io::Result<()> {
+    let mut connection = ServerConnection::new(tls.config).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to initialize server TLS connection: {error}"),
+        )
+    })?;
+    while connection.is_handshaking() {
+        connection.complete_io(&mut stream).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("TLS client authentication failed: {error}"),
+            )
+        })?;
+    }
+    let certificate = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TLS client did not provide a certificate",
+            )
+        })?;
+    let identity = certificate_identity_from_der(certificate.as_ref())?;
+    if certificate_is_revoked(&tls.security_dir, &identity.serial)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Client certificate {} has been revoked", identity.serial),
+        ));
+    }
+    let username = engine
+        .resolve_certificate_identity(&identity.identity)?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "Certificate identity '{}' is not registered to a Wardrobe user",
+                    identity.identity
+                ),
+            )
+        })?;
+    server_log(
+        ApplicationLogLevel::Info,
+        "authentication_success",
+        vec![
+            ("operation", "client_authentication".to_string()),
+            ("username", username),
+            ("certificate_identity", identity.identity),
+            ("certificate_serial", identity.serial),
+            ("success", "true".to_string()),
+        ],
+    );
+    let mut tls_stream = StreamOwned::new(connection, stream);
+    handle_protocol_stream_with_policy(
+        engine,
+        &mut tls_stream,
+        runtime,
+        ProtocolWritePolicy::Unflushed,
+    )
+}
+
 fn listener_is_idle(connection_pool: Option<&ConnectionPool>, idle_polls: &mut usize) -> bool {
     if connection_pool.is_none_or(ConnectionPool::is_idle) {
         *idle_polls += 1;
@@ -1133,12 +1715,21 @@ mod tests {
     use serde_json::json;
     use std::io::Cursor;
     use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use wardrobe_core::{
         AlterRequest, ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel,
         BackupArchive, BackupArchiveFile, CompactRequest, CreateRequest, DropRequest,
         OperationFilter, OperationOptions, PermissionRequest, StatusRequest, StorageCoordinate,
-        StorageScope,
+        StorageScope, WardrobeClient,
     };
+
+    fn security_test_directory(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wardrobe_server_security_{name}_{nanos}"))
+    }
 
     #[test]
     fn server_config_from_args_defaults() {
@@ -1157,6 +1748,193 @@ mod tests {
         let cfg = ServerConfig::from_args(vec!["--profile-commands".to_string()])
             .expect("profile flag should parse");
         assert!(cfg.profile_commands);
+    }
+
+    #[test]
+    fn server_config_parses_security_modes_and_enforces_disabled_bind_safety() {
+        let managed = ServerConfig::from_args(vec![
+            "--security-mode".to_string(),
+            "managed".to_string(),
+            "--security-dir".to_string(),
+            "/security".to_string(),
+        ])
+        .expect("managed security flags should parse");
+        assert_eq!(managed.security.mode, SecurityMode::Managed);
+        assert_eq!(managed.security.security_dir, PathBuf::from("/security"));
+
+        let external = ServerConfig::from_args(vec![
+            "--tcp-bind".to_string(),
+            "0.0.0.0:24842".to_string(),
+            "--security-mode".to_string(),
+            "external".to_string(),
+            "--server-certificate".to_string(),
+            "/pki/server.crt".to_string(),
+            "--server-private-key".to_string(),
+            "/pki/server.key".to_string(),
+            "--trusted-client-ca".to_string(),
+            "/pki/clients-a.crt".to_string(),
+            "--trusted-client-ca".to_string(),
+            "/pki/clients-b.crt".to_string(),
+        ])
+        .expect("external security flags should parse");
+        assert_eq!(external.security.mode, SecurityMode::External);
+        assert_eq!(external.security.trusted_client_ca_bundles.len(), 2);
+
+        assert!(
+            ServerConfig::from_args(vec![
+                "--tcp-bind".to_string(),
+                "0.0.0.0:24842".to_string(),
+                "--security-mode".to_string(),
+                "disabled".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            ServerConfig::from_args(vec![
+                "--tcp-bind".to_string(),
+                "0.0.0.0:24842".to_string(),
+                "--security-mode".to_string(),
+                "disabled".to_string(),
+                "--unsafe-disable-auth".to_string(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn managed_init_and_bootstrap_commands_persist_admin_profile() {
+        let root = security_test_directory("bootstrap");
+        let data_dir = root.join("data");
+        let security_dir = root.join("security");
+        let output = root.join("admin-profile");
+
+        run_from_args(vec![
+            "init".to_string(),
+            "--data-dir".to_string(),
+            data_dir.display().to_string(),
+            "--security-dir".to_string(),
+            security_dir.display().to_string(),
+            "--server-name".to_string(),
+            "localhost".to_string(),
+            "--server-ip".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .expect("init command should succeed");
+        run_from_args(vec![
+            "bootstrap-admin".to_string(),
+            "--data-dir".to_string(),
+            data_dir.display().to_string(),
+            "--security-dir".to_string(),
+            security_dir.display().to_string(),
+            "--username".to_string(),
+            "adminuser".to_string(),
+            "--output".to_string(),
+            output.display().to_string(),
+        ])
+        .expect("bootstrap command should succeed");
+
+        assert!(security_dir.join("ca").join("ca.crt").is_file());
+        assert!(security_dir.join("server").join("server.crt").is_file());
+        assert!(output.join("profile.toml").is_file());
+        let registry = std::fs::read_to_string(data_dir.join("_wardrobe_access_control.json"))
+            .expect("access-control registry should exist");
+        assert!(registry.contains("\"adminuser\""));
+        assert!(registry.contains("\"administrator\""));
+        assert!(
+            run_from_args(vec![
+                "init".to_string(),
+                "--security-dir".to_string(),
+                security_dir.display().to_string(),
+            ])
+            .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn managed_tls_authenticates_registered_identity_and_rejects_revocation() {
+        let root = security_test_directory("managed_tls");
+        let data_dir = root.join("data");
+        let security_dir = root.join("security");
+        initialize_managed_pki(
+            &security_dir,
+            &["localhost".to_string()],
+            &["127.0.0.1".parse().expect("IP should parse")],
+        )
+        .expect("managed PKI should initialize");
+        let certificate = issue_managed_client_certificate(
+            &security_dir,
+            "wardrobe:user:adminuser",
+            "desktop",
+            None,
+            "localhost",
+        )
+        .expect("client certificate should issue");
+        rotate_managed_ca(
+            &security_dir,
+            &["localhost".to_string()],
+            &["127.0.0.1".parse().expect("IP should parse")],
+        )
+        .expect("managed CA should rotate with overlapping trust");
+        let engine =
+            Arc::new(WardrobeEngine::open(data_dir.to_string_lossy().as_ref()).expect("engine"));
+        engine
+            .create(CreateRequest::user(json!({
+                "username": "adminuser",
+                "role": "administrator",
+                "certificate_identities": ["wardrobe:user:adminuser"]
+            })))
+            .expect("user should register");
+
+        let mut security = SecurityConfig::default();
+        security.mode = SecurityMode::Managed;
+        security.security_dir = security_dir.clone();
+        let tls = build_server_tls_runtime(&security)
+            .expect("TLS config should build")
+            .expect("managed mode should enable TLS");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener address");
+        listener
+            .set_nonblocking(true)
+            .expect("listener should be nonblocking");
+        let server_engine = Arc::clone(&engine);
+        let server = thread::spawn(move || {
+            serve_tcp_listener_with_security(
+                listener,
+                server_engine,
+                Some(2),
+                ServerRuntimeConfig::default(),
+                Some(tls),
+            )
+        });
+
+        let client = WardrobeClient::open_with_profile(
+            format!("wardrobe://{address}"),
+            &certificate.profile,
+        )
+        .expect("TLS client should connect");
+        let tenants = client
+            .status(StatusRequest::tenants())
+            .expect("authenticated command should execute");
+        assert!(tenants.is_empty());
+        drop(client);
+
+        wardrobe_core::revoke_managed_certificate(&security_dir, &certificate.serial)
+            .expect("certificate should revoke");
+        let revoked_client = WardrobeClient::open_with_profile(
+            format!("wardrobe://{address}"),
+            &certificate.profile,
+        )
+        .expect("TCP connection should open before TLS command");
+        assert!(revoked_client.status(StatusRequest::tenants()).is_err());
+        drop(revoked_client);
+
+        server
+            .join()
+            .expect("server thread should join")
+            .expect("server should stop after idle");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

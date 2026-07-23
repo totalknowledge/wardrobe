@@ -1,6 +1,6 @@
 # Wardrobe Server
 
-`wardrobe-server` is the standalone Wardrobe daemon at version `0.26.722`. It hosts a shared `WardrobeEngine` behind a protocol boundary so multiple clients can connect to the same storage root over TCP or Unix sockets.
+`wardrobe-server` is the standalone Wardrobe daemon at version `0.26.723`. It hosts a shared `WardrobeEngine` behind a protocol boundary so multiple clients can connect to the same storage root over TCP or Unix sockets.
 
 The server is licensed under Business Source License 1.1. Its change date is July 22, 2030, and its change license is GPL version 2 or later. See `server/LICENSE` for the authoritative terms.
 

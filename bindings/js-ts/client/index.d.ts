@@ -38,7 +38,7 @@ export type StatusRequest =
   | { Path: { path: string } };
 
 export declare const PACKAGE_NAME: '@wardrobe/client';
-export declare const PACKAGE_VERSION: '0.26.722';
+export declare const PACKAGE_VERSION: '0.26.723';
 
 export class WardrobeClient {
   static open(connectionString: string): Promise<WardrobeClient>;

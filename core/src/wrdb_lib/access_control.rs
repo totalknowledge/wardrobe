@@ -20,6 +20,41 @@ pub(super) fn manage_user_with_server_lock(
     manage_user_locked(root_directory, action, payload)
 }
 
+pub(super) fn resolve_certificate_identity(
+    root_directory: &Path,
+    identity: &str,
+) -> Result<Option<String>> {
+    let registry = read_access_control_registry(root_directory)?;
+    let users = registry
+        .get("users")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "access-control users registry must be a JSON object",
+            )
+        })?;
+    for (username, user) in users {
+        let explicitly_mapped = user
+            .get("certificate_identities")
+            .and_then(Value::as_array)
+            .map(|identities| {
+                identities
+                    .iter()
+                    .any(|candidate| candidate.as_str() == Some(identity))
+            })
+            .unwrap_or(false);
+        let conventional_user_identity = identity
+            .strip_prefix("wardrobe:user:")
+            .map(|candidate| candidate == username)
+            .unwrap_or(false);
+        if explicitly_mapped || conventional_user_identity {
+            return Ok(Some(username.clone()));
+        }
+    }
+    Ok(None)
+}
+
 fn manage_user_locked(root_directory: &Path, action: &str, payload: Value) -> Result<Value> {
     let normalized_action = action.replace('-', "_").to_ascii_lowercase();
     let mut registry = read_access_control_registry(root_directory)?;
@@ -430,6 +465,38 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             ErrorKind::InvalidData
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn certificate_identities_resolve_to_registered_users() {
+        let root = temp_root("certificate_identity");
+        manage_user(
+            &root,
+            "add_user",
+            json!({
+                "username": "adminuser",
+                "certificate_identities": ["wardrobe:service:nispuk"]
+            }),
+        )
+        .expect("user should register");
+
+        assert_eq!(
+            resolve_certificate_identity(&root, "wardrobe:user:adminuser")
+                .expect("conventional identity should resolve"),
+            Some("adminuser".to_string())
+        );
+        assert_eq!(
+            resolve_certificate_identity(&root, "wardrobe:service:nispuk")
+                .expect("explicit identity should resolve"),
+            Some("adminuser".to_string())
+        );
+        assert_eq!(
+            resolve_certificate_identity(&root, "wardrobe:user:unknown")
+                .expect("unknown identity lookup should succeed"),
+            None
         );
 
         let _ = fs::remove_dir_all(root);

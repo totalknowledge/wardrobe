@@ -4,15 +4,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 DEFAULT_CONNECTION="$SCRIPT_DIR/data"
-BACKUP_DIR="$SCRIPT_DIR/backups"
-BACKUP_FILE="$BACKUP_DIR/library-backup.wrb"
+WARDROBE_NAME="publishing-house"
+BAY_NAME="public-cli"
+PERSON_DRAWER="person"
+PUBLISHER_DRAWER="publisher"
+BOOK_DRAWER="book"
 
-AUTHOR_PAYLOAD='{"_id":"author-mara","name":"Mara Stone","role":"author"}'
-EDITOR_PAYLOAD='{"_id":"editor-oren","name":"Oren Vale","role":"editor"}'
-BOOK_DOWNTOWN_PAYLOAD='{"_id":"book-lantern-downtown","title":"The Lantern Index","branch":"downtown","quantity":4,"author_id":"@wardrobe/library/people:author-mara","editor_id":"@wardrobe/library/people:editor-oren"}'
-BOOK_UPTOWN_PAYLOAD='{"_id":"book-lantern-uptown","title":"The Lantern Index","branch":"uptown","quantity":2,"author_id":"@wardrobe/library/people:author-mara","editor_id":"@wardrobe/library/people:editor-oren"}'
-BOOK_DRAFT_PAYLOAD='{"_id":"book-draft","title":"Temporary Draft","branch":"downtown","quantity":1,"author_id":"@wardrobe/library/people:author-mara","editor_id":"@wardrobe/library/people:editor-oren"}'
-ADMIN_PAYLOAD='{"username":"branch_admin","role":"operator","display_name":"Branch Admin"}'
+PUBLISHER_PAYLOAD='{"_id":"pub_001","name":"Apex Press","founded_year":1994,"active":true}'
+AUTHOR_PAYLOAD='{"_id":"author_001","name":"Elena Vance","role":"author","genres":["sci-fi","thriller"]}'
+EDITOR_PAYLOAD='{"_id":"editor_001","name":"Marcus Sterling","role":"editor","department":"fiction"}'
+BOOK_PAYLOAD='{"_id":"book_001","title":"The Quantum Horizon","publisher_id":"@publishing-house/public-cli/publisher:pub_001","author_id":"@publishing-house/public-cli/person:author_001","editor_id":"@publishing-house/public-cli/person:editor_001","page_count":420}'
 
 usage() {
   cat <<'EOF'
@@ -31,7 +32,7 @@ section() {
 }
 
 run_cli() {
-  cargo run --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p wardrobe-cli -- --target "$CONNECTION" --pretty "$@"
+  cargo run --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p wardrobe-cli -- "$CONNECTION" --pretty "$@"
 }
 
 CONNECTION="$DEFAULT_CONNECTION"
@@ -90,60 +91,66 @@ esac
 if [[ "$REMOTE_MODE" == false ]]; then
   mkdir -p "$CONNECTION"
 fi
-mkdir -p "$BACKUP_DIR"
 
 printf 'Using connection: %s\n' "$CONNECTION"
 
-section "Discovery before setup"
+section "Phase 1: Metadata & Inventory Discovery"
 run_cli status tenants
 run_cli status wardrobes
 
-section "Create the wardrobe library"
-run_cli create wardrobe wardrobe
-run_cli create bay wardrobe/library
-run_cli create drawer wardrobe/library/people
-run_cli create drawer wardrobe/library/book
+run_cli create wardrobe "$WARDROBE_NAME"
+run_cli create bay "$WARDROBE_NAME/$BAY_NAME"
+run_cli create drawer "$WARDROBE_NAME/$BAY_NAME/$PUBLISHER_DRAWER"
+run_cli create drawer "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER"
+run_cli create drawer "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER"
 
-section "Verify structure"
+printf "System Wardrobes:\n"
 run_cli status wardrobes
-run_cli status bays wardrobe
-run_cli status drawers wardrobe/library
-run_cli status path wardrobe/library/book
+printf "Available Bays in '%s':\n" "$WARDROBE_NAME"
+run_cli status bays "$WARDROBE_NAME"
+printf "Drawers in %s/%s:\n" "$WARDROBE_NAME" "$BAY_NAME"
+run_cli status drawers "$WARDROBE_NAME/$BAY_NAME"
 
-section "Schema and relationship setup"
-run_cli alter index wardrobe/library/book title
-run_cli drop index wardrobe/library/book title
-run_cli alter relationship wardrobe/library/book author_id wardrobe/library/people M:1
-run_cli alter relationship wardrobe/library/book editor_id wardrobe/library/people M:1
+section "Phase 2: Relational Data Population"
+run_cli upsert "$WARDROBE_NAME/$BAY_NAME/$PUBLISHER_DRAWER" "$PUBLISHER_PAYLOAD"
+printf 'Persisted publisher -> @%s/%s/%s:pub_001\n' "$WARDROBE_NAME" "$BAY_NAME" "$PUBLISHER_DRAWER"
+run_cli upsert "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER" "$AUTHOR_PAYLOAD"
+printf 'Persisted author (in person drawer) -> @%s/%s/%s:author_001\n' "$WARDROBE_NAME" "$BAY_NAME" "$PERSON_DRAWER"
+run_cli upsert "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER" "$EDITOR_PAYLOAD"
+printf 'Persisted editor (in person drawer) -> @%s/%s/%s:editor_001\n' "$WARDROBE_NAME" "$BAY_NAME" "$PERSON_DRAWER"
+run_cli upsert "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER" "$BOOK_PAYLOAD"
+printf 'Persisted book -> @%s/%s/%s:book_001\n' "$WARDROBE_NAME" "$BAY_NAME" "$BOOK_DRAWER"
 
-section "People and branch listings"
-run_cli upsert wardrobe/library/people "$AUTHOR_PAYLOAD"
-run_cli upsert wardrobe/library/people "$EDITOR_PAYLOAD"
-run_cli upsert wardrobe/library/book "$BOOK_DOWNTOWN_PAYLOAD"
-run_cli upsert wardrobe/library/book "$BOOK_UPTOWN_PAYLOAD"
-run_cli upsert wardrobe/library/book "$BOOK_DRAFT_PAYLOAD"
-run_cli count wardrobe/library/book '{"branch":"downtown"}'
-run_cli count wardrobe/library/book '{"branch":"uptown"}'
-run_cli read wardrobe/library/book '{"branch":"downtown"}'
-run_cli read wardrobe/library/book '{"branch":"uptown"}'
-run_cli inspect wardrobe/library/book
-run_cli delete wardrobe/library/book '{"_id":"book-draft"}'
-run_cli count wardrobe/library/book
+section "Phase 3: Filter Query Execution"
+run_cli read "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER" '{"role":"author"}' '{"order_by":"name","order_direction":"asc","offset":0,"limit":10}'
 
-section "Maintenance"
-run_cli compact wardrobe/library
+section "Phase 4: Relation Verification"
+run_cli read '@publishing-house/public-cli/book:book_001'
+run_cli read '@publishing-house/public-cli/person:author_001'
+run_cli read '@publishing-house/public-cli/person:editor_001'
 
-section "Backup and restore"
-run_cli backup wardrobe/library "$BACKUP_FILE"
-run_cli restore wardrobe/library-archive "$BACKUP_FILE"
-run_cli status bays wardrobe
-run_cli status drawers wardrobe/library-archive
-run_cli count wardrobe/library-archive/book '{"branch":"downtown"}'
-run_cli count wardrobe/library-archive/book '{"branch":"uptown"}'
-run_cli read wardrobe/library-archive/book '{"branch":"downtown"}'
-run_cli read wardrobe/library-archive/book '{"branch":"uptown"}'
+section "Phase 5: Maintenance & Stress Test Cycle"
+run_cli count "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER"
+run_cli count "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER"
+printf 'Maintenance check above: personnel count then book count\n'
 
-section "User administration"
-run_cli create user "$ADMIN_PAYLOAD"
-run_cli grant permission branch_admin wardrobe/library:rud
-run_cli revoke permission branch_admin wardrobe/library:d
+for i in 0 1 2 3 4; do
+  run_cli upsert "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER" "{\"_id\":\"temp_book_${i}\",\"title\":\"Temporary Draft\",\"page_count\":100}"
+  run_cli delete "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER" "{\"_id\":\"temp_book_${i}\"}"
+done
+printf 'Stress test cycle completed (5 temporary book upserts/deletes).\n'
+
+section "Phase 6: Detailed Engine Inspection"
+run_cli status wardrobes
+run_cli status bays "$WARDROBE_NAME"
+run_cli status drawers "$WARDROBE_NAME/$BAY_NAME"
+run_cli count "$WARDROBE_NAME/$BAY_NAME/$PUBLISHER_DRAWER"
+run_cli count "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER"
+run_cli count "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER"
+
+section "Phase 7: Final State Reconciliation & Integrity"
+run_cli read "$WARDROBE_NAME/$BAY_NAME/$PERSON_DRAWER"
+run_cli read "$WARDROBE_NAME/$BAY_NAME/$BOOK_DRAWER"
+run_cli read '@publishing-house/public-cli/publisher:pub_001'
+
+printf '\nPublishing domain integration test suite executed successfully. All 7 phases completed.\n'

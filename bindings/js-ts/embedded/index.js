@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 
 const PACKAGE_NAME = '@wardrobe/embedded';
-const PACKAGE_VERSION = '0.26.722';
+const PACKAGE_VERSION = '0.26.723';
 
 // Determine native addon library name based on platform
 const libName = process.platform === 'win32' ? 'wardrobe_js_ts.dll' : process.platform === 'darwin' ? 'libwardrobe_js_ts.dylib' : 'libwardrobe_js_ts.so';

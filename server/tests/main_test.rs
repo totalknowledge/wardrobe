@@ -640,6 +640,7 @@ fn run_returns_error_when_no_listeners_enabled() {
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        security: wardrobe_core::SecurityConfig::default(),
     };
     let res = wardrobe_server::run(cfg);
     assert!(res.is_err());
@@ -711,6 +712,7 @@ fn run_execution_with_check_only_flag() {
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        security: wardrobe_core::SecurityConfig::default(),
     };
     assert!(wardrobe_server::run(cfg).is_ok());
     let _ = std::fs::remove_dir_all(storage_directory);
@@ -731,6 +733,7 @@ fn run_execution_unsupported_unix_platform_guard() {
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
         logging: wardrobe_core::ApplicationLoggingConfig::default(),
+        security: wardrobe_core::SecurityConfig::default(),
     };
     assert!(wardrobe_server::run(cfg).is_err());
 }

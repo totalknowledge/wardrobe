@@ -7,6 +7,7 @@ use crate::wrdb_lib::command::{
     CreateResult, DeleteResult, DropRequest, InspectResult, OperationFilter, OperationOptions,
     PermissionRequest, ReadResult, RestoreReport, StatusRequest, UpsertResult,
 };
+use crate::wrdb_lib::config::ClientTlsConfig;
 use crate::wrdb_lib::drawer::VacuumReport;
 use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
@@ -19,16 +20,39 @@ pub(crate) enum ClientDriver {
 
 impl ClientDriver {
     pub(crate) fn open(target: &ConnectionTarget) -> Result<Self> {
+        Self::open_with_tls(target, None)
+    }
+
+    pub(crate) fn open_with_tls(
+        target: &ConnectionTarget,
+        tls: Option<&ClientTlsConfig>,
+    ) -> Result<Self> {
         match target {
-            ConnectionTarget::EmbeddedPath(path) => Ok(Self::Embedded(WardrobeEngine::open(
-                path.to_string_lossy().as_ref(),
-            )?)),
+            ConnectionTarget::EmbeddedPath(path) => {
+                if tls.is_some() {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "certificate profiles apply only to TCP Wardrobe connections",
+                    ));
+                }
+                Ok(Self::Embedded(WardrobeEngine::open(
+                    path.to_string_lossy().as_ref(),
+                )?))
+            }
             ConnectionTarget::Network { host, port } => Ok(Self::Network(
-                NetworkTransport::connect(host.clone(), *port)?,
+                NetworkTransport::connect(host.clone(), *port, tls)?,
             )),
-            ConnectionTarget::UnixSocket { path } => Ok(Self::UnixSocket(
-                UnixSocketTransport::connect(path.clone())?,
-            )),
+            ConnectionTarget::UnixSocket { path } => {
+                if tls.is_some() {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "certificate profiles apply only to TCP Wardrobe connections",
+                    ));
+                }
+                Ok(Self::UnixSocket(UnixSocketTransport::connect(
+                    path.clone(),
+                )?))
+            }
         }
     }
 
