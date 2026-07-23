@@ -16,6 +16,18 @@ SUPPORTED_OPERATIONS = (
 )
 
 
+def relationship_request(drawer_name, field_name, target_drawer):
+    return {
+        "SchemaRule": {
+            "drawer_name": drawer_name,
+            "action": "add",
+            "kind": "relationship",
+            "field_name": field_name,
+            "payload": {"type": "M:1", "target_drawer": target_drawer},
+        }
+    }
+
+
 def normalize_filter(filter_value=None):
     if filter_value is None:
         return "None"

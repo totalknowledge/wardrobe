@@ -7,7 +7,7 @@ This package builds a Python extension with PyO3 and calls `wardrobe-core` direc
 ## Usage
 
 ```python
-from wardrobe_embedded import WardrobeEmbedded
+from wardrobe_embedded import WardrobeEmbedded, relationship_request
 
 root = WardrobeEmbedded.open("./wardrobe")
 root.create({"Database": {"database_name": "publishing-house"}})
@@ -25,6 +25,14 @@ root.create(
 )
 
 engine = WardrobeEmbedded.open("./wardrobe/publishing-house/public")
+engine.alter(relationship_request("character", "item_map", "item"))
+engine.upsert(
+    {
+        "_id": "hero",
+        "attributes": {"strength": 18, "proficiencies": ["athletics"]},
+    },
+    "character",
+)
 engine.upsert({"_id": "book-01", "title": "The Lantern Index"}, "book")
 records = engine.read("book")
 databases = root.status("Databases")

@@ -30,7 +30,7 @@ The dry run verifies npm package contents without uploading anything to the regi
 
 ## Current Surface
 
-Both packages expose `WardrobeClient` with `upsert`, `read`, `delete`, `inspect`, `count`, `clean`, `create`, `alter`, `drop`, `backup`, `restore`, `grant`, `revoke`, and `status`. `@wardrobe/client` connects to a running server, while `@wardrobe/embedded` opens local storage through the native binding without starting a server.
+Both packages expose `WardrobeClient` with `upsert`, `read`, `delete`, `inspect`, `count`, `clean`, `create`, `alter`, `drop`, `backup`, `restore`, `grant`, `revoke`, and `status`, plus `relationshipRequest` for constructing the canonical relationship declaration. `@wardrobe/client` connects to a running server, while `@wardrobe/embedded` opens local storage through the native binding without starting a server.
 
 Database, schema, and drawer status calls return `StorageInventory[]`, `string[]`, and `StorageInventory[]` directly. The TypeScript declarations include overloads for those request shapes.
 

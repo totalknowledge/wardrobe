@@ -198,8 +198,7 @@ impl Drawer {
 
             let mut deletions_by_value: HashMap<String, Vec<u64>> = HashMap::new();
             for (record, offset) in deleted_records {
-                if let Some(field_value) = record
-                    .get(&indexed_field)
+                if let Some(field_value) = query::resolve_field_path(record, &indexed_field)
                     .and_then(Self::secondary_index_key)
                 {
                     deletions_by_value
@@ -296,9 +295,9 @@ impl Drawer {
         if update_secondary_indexes {
             let fields_to_clear = self.unique_constraints.clone();
             for indexed_field in fields_to_clear {
-                if let Some(field_value) = deleted_record
-                    .get(&indexed_field)
-                    .and_then(Self::secondary_index_key)
+                if let Some(field_value) =
+                    query::resolve_field_path(&deleted_record, &indexed_field)
+                        .and_then(Self::secondary_index_key)
                 {
                     if let Some(field_map) = self.secondary_memory_index.get_mut(&indexed_field) {
                         if let Some(offsets) = field_map.get_mut(&field_value) {

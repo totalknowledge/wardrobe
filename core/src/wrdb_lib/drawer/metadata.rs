@@ -264,7 +264,9 @@ impl Drawer {
         if let Some(offset) = candidate_offset {
             if let Some(record) = data_reader.read_record_at_offset(offset, Some(field_name_map))? {
                 let decoded = Self::decode_value_from_storage(record, field_name_map);
-                if let Some(index_key) = decoded.get(field).and_then(Self::secondary_index_key) {
+                if let Some(index_key) =
+                    query::resolve_field_path(&decoded, field).and_then(Self::secondary_index_key)
+                {
                     return Ok(index_key);
                 }
             }

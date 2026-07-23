@@ -275,7 +275,7 @@ mod tests {
     fn benchmark_config_parses_full_option_matrix() {
         let ParseOutcome::Run(config) = BenchmarkConfig::from_args([
             "--targets".to_string(),
-            "wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql,neo4j".to_string(),
+            "wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,neo4j".to_string(),
             "--work-dir".to_string(),
             "target/custom-bench".to_string(),
             "--output".to_string(),
@@ -492,13 +492,14 @@ IGNORED=value
 
     #[test]
     fn parse_targets_supports_aliases_and_case_insensitive_values() {
-        let targets = parse_targets("embedded,REMOTE,mongo,mariadb,neo")
+        let targets = parse_targets("embedded,REMOTE,redb,mongo,mariadb,neo")
             .expect("target aliases should parse");
         assert_eq!(
             targets,
             vec![
                 TargetSpec::WardrobeEmbedded,
                 TargetSpec::WardrobeRemote,
+                TargetSpec::Redb,
                 TargetSpec::MongoDb,
                 TargetSpec::MySql,
                 TargetSpec::Neo4j,
@@ -869,6 +870,10 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             "Wardrobe (Remote TCP Server Mode)"
         );
         assert_eq!(TargetSpec::Sqlite.label(), "SQLite (Local WAL File Mode)");
+        assert_eq!(
+            TargetSpec::Redb.label(),
+            "redb (Pure Rust Embedded Key-Value Mode)"
+        );
         assert_eq!(
             TargetSpec::MongoDb.label(),
             "MongoDB (Document Store Base Comparison)"
@@ -1249,6 +1254,40 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         assert_eq!(report.targets[0].name, "SQLite (Local WAL File Mode)");
         assert!(sqlite_path.is_file());
         assert!(report.targets[0].storage_bytes > 0);
+
+        let _ = fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn tiny_redb_benchmark_uses_file_backed_database() {
+        let work_dir = env::temp_dir().join(format!(
+            "wardrobe_benchmark_redb_test_{}",
+            unix_timestamp_micros()
+        ));
+        let config = BenchmarkConfig {
+            targets: vec![TargetSpec::Redb],
+            profile: tiny_profile(),
+            work_dir: work_dir.clone(),
+            ..BenchmarkConfig::default()
+        };
+
+        let report = run_benchmark(config).expect("tiny redb benchmark should run");
+        let redb_path = report.run_dir.join("redb").join("library.redb");
+
+        assert_eq!(report.targets.len(), 1);
+        assert_eq!(
+            report.targets[0].name,
+            "redb (Pure Rust Embedded Key-Value Mode)"
+        );
+        assert_eq!(report.targets[0].phases.len(), 8);
+        assert!(redb_path.is_file());
+        assert!(report.targets[0].storage_bytes > 0);
+        assert!(
+            report.targets[0]
+                .storage_diagnostics
+                .iter()
+                .any(|line| line.contains("allocated pages"))
+        );
 
         let _ = fs::remove_dir_all(work_dir);
     }

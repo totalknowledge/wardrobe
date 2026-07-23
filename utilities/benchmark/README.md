@@ -16,7 +16,7 @@ cargo run -p wardrobe-benchmark -- --entities 100 --books 500 --traversal-querie
 
 Progress messages are enabled by default and are written to stderr so the Markdown report remains clean on stdout or in `--output`. Pass `--quiet` or `--no-progress` to suppress them.
 
-Run the full six-target matrix when the target drivers and services are available:
+Run the full seven-target matrix when the target drivers and services are available:
 
 ```bash
 cargo run -p wardrobe-benchmark -- --targets all --output target/wardrobe-benchmark/report.md
@@ -67,6 +67,7 @@ Targets:
 - `wardrobe-embedded` uses the in-process Wardrobe engine directly.
 - `wardrobe-remote` uses an authenticated TLS Wardrobe server. If `--wardrobe-remote-uri` is omitted, the harness initializes managed PKI and starts an authenticated in-process server on a loopback port. An existing server requires `--wardrobe-client-profile`.
 - `sqlite` uses an in-process persistent `rusqlite` connection backed by a WAL file under the run directory by default.
+- `redb` uses the in-process pure Rust embedded key-value database with typed tables and native multimap secondary indexes.
 - `mongodb` uses a persistent native MongoDB Rust client against `--mongo-uri` and `--mongo-database`.
 - `mysql` uses a persistent native MySQL Rust connection against `--mysql-host`, `--mysql-port`, and `--mysql-database`.
 - `neo4j` uses a persistent native Neo4j Rust driver against `--neo4j-uri`, `--neo4j-database`, `--neo4j-user`, and `--neo4j-password-env`.
@@ -85,7 +86,7 @@ The benchmark phases are:
 - Complex Traversal: query books where author and editor criteria overlap using each engine's server-side traversal behavior, without benchmark-side N+1 follow-up fetches.
 - Index Mutation: create, drop, and rebuild the book ISBN index.
 - Delete by ID: delete deterministic random book records by primary id and verify they are gone.
-- Targeted Purge: delete books matching a purge bucket filter using one server-side filter-delete command per target phase sample.
+- Targeted Purge: delete books matching a purge bucket filter using one native indexed transaction or server-side filter-delete command per target phase sample.
 - Compaction: run the target's compact directive or closest native maintenance equivalent.
 
 Neo4j semantic notes:

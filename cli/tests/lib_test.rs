@@ -885,7 +885,12 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
     }
 
     for args in [
-        vec!["alter", "index", "armory/public/user", "tool.type"],
+        vec![
+            "alter",
+            "index",
+            "armory/public/user",
+            "attributes.strength",
+        ],
         vec![
             "alter",
             "key",
@@ -897,24 +902,24 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
             "alter",
             "constraint",
             "armory/public/user",
-            "email",
+            "attributes.strength",
             "unique",
         ],
         vec![
             "alter",
             "constraint",
             "armory/public/user",
-            "age",
+            "attributes.dexterity",
             "non-null",
         ],
         vec![
             "alter",
             "relationship",
             "armory/public/user",
-            "tool_id",
+            "item_map",
             "armory/public/tool",
         ],
-        vec!["alter", "cascade-delete", "armory/public/user", "tool_id"],
+        vec!["alter", "cascade-delete", "armory/public/user", "item_map"],
         vec![
             "alter",
             "trigger",
@@ -934,20 +939,20 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
     let metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
     assert_eq!(
-        metadata["relationship_constraints"]["tool_id"]["target_drawer"],
+        metadata["relationship_constraints"]["item_map"]["target_drawer"],
         "armory/public/tool"
     );
     assert_eq!(
-        metadata["relationship_constraints"]["tool_id"]["type"],
+        metadata["relationship_constraints"]["item_map"]["type"],
         "M:1"
     );
-    assert_eq!(metadata["cascade_delete_rules"]["tool_id"], true);
-    assert_eq!(metadata["delete_rules"]["tool_id"]["action"], "Cascade");
+    assert_eq!(metadata["cascade_delete_rules"]["item_map"], true);
+    assert_eq!(metadata["delete_rules"]["item_map"]["action"], "Cascade");
     assert!(
         metadata["unique_constraints"]
             .as_array()
             .unwrap()
-            .contains(&json!("email"))
+            .contains(&json!("attributes.strength"))
     );
     assert!(
         metadata["unique_constraints"]
@@ -959,32 +964,32 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
         metadata["schema"]["required"]
             .as_array()
             .unwrap()
-            .contains(&json!("age"))
+            .contains(&json!("attributes.dexterity"))
     );
-    assert!(metadata["schema"]["x-wardrobe-cli"]["indexes"]["tool.type"].is_object());
+    assert!(metadata["schema"]["x-wardrobe-cli"]["indexes"]["attributes.strength"].is_object());
     assert_eq!(
         metadata["schema"]["x-wardrobe-cli"]["triggers"]["on_upsert"]["command"],
         "./scripts/sync_profile.sh"
     );
 
     for args in [
-        vec!["drop", "index", "armory/public/user", "tool.type"],
+        vec!["drop", "index", "armory/public/user", "attributes.strength"],
         vec![
             "drop",
             "constraint",
             "armory/public/user",
-            "email",
+            "attributes.strength",
             "unique",
         ],
         vec![
             "drop",
             "constraint",
             "armory/public/user",
-            "age",
+            "attributes.dexterity",
             "non-null",
         ],
-        vec!["drop", "relationship", "armory/public/user", "tool_id"],
-        vec!["drop", "cascade-delete", "armory/public/user", "tool_id"],
+        vec!["drop", "relationship", "armory/public/user", "item_map"],
+        vec!["drop", "cascade-delete", "armory/public/user", "item_map"],
         vec!["drop", "trigger", "armory/public/user", "on_upsert"],
     ] {
         let args = args.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
@@ -993,20 +998,20 @@ fn test_schema_and_relationship_management_commands_execution_paths() {
 
     let metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
-    assert!(metadata["relationship_constraints"]["tool_id"].is_null());
-    assert!(metadata["cascade_delete_rules"]["tool_id"].is_null());
-    assert!(metadata["delete_rules"]["tool_id"].is_null());
+    assert!(metadata["relationship_constraints"]["item_map"].is_null());
+    assert!(metadata["cascade_delete_rules"]["item_map"].is_null());
+    assert!(metadata["delete_rules"]["item_map"].is_null());
     assert!(
         !metadata["unique_constraints"]
             .as_array()
             .unwrap()
-            .contains(&json!("email"))
+            .contains(&json!("attributes.strength"))
     );
     assert!(
         !metadata["schema"]["required"]
             .as_array()
             .unwrap()
-            .contains(&json!("age"))
+            .contains(&json!("attributes.dexterity"))
     );
     assert!(metadata["schema"]["x-wardrobe-cli"]["indexes"]["tool.type"].is_null());
     assert!(metadata["schema"]["x-wardrobe-cli"]["triggers"]["on_upsert"].is_null());

@@ -170,18 +170,30 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
         .upsert(
             json!({
                 "_id": "server_fire",
-                "element": "Fire"
+                "element": "Fire",
+                "attributes": {
+                    "strength": 18,
+                    "proficiencies": ["arcana", "athletics"]
+                }
             }),
             OperationFilter::drawer("gem"),
             None::<OperationOptions>,
         )
         .expect("upsert should route through server");
     assert_eq!(pointer, vec!["@gem:server_fire".to_string()]);
+    let gems = read_records(&client, OperationFilter::drawer("gem"));
+    assert_eq!(
+        gems[0]["attributes"],
+        json!({
+            "strength": 18,
+            "proficiencies": ["arcana", "athletics"]
+        })
+    );
 
     assert_eq!(
         client
             .count(
-                OperationFilter::query_in("gem", json!({"element": "Fire"})),
+                OperationFilter::query_in("gem", json!({"attributes.strength": 18})),
                 None::<OperationOptions>
             )
             .expect("count should route through server"),
@@ -201,15 +213,10 @@ fn tcp_daemon_routes_client_commands_to_shared_engine() {
         .create(CreateRequest::drawer("nispuk", "default", "plants"))
         .expect("remote plants drawer should create");
     client
-        .alter(AlterRequest::schema_rule(
+        .alter(AlterRequest::relationship(
             "nispuk/default/plants",
-            "add",
-            "relationship",
             "plantType",
-            json!({
-                "type": "M:1",
-                "target_drawer": "nispuk/default/plant_types"
-            }),
+            "nispuk/default/plant_types",
         ))
         .expect("remote plant type relationship should create");
     client

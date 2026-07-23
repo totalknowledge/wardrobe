@@ -65,15 +65,15 @@ impl Drawer {
         }
 
         for unique_field in &self.unique_constraints {
-            if let Some(field_value) = record.get(unique_field).and_then(Self::secondary_index_key)
-            {
+            let unique_value = query::resolve_field_path(&record, unique_field);
+            if let Some(field_value) = unique_value.and_then(Self::secondary_index_key) {
                 if let Some(field_map) = self.secondary_memory_index.get(unique_field) {
                     if let Some(offsets) = field_map.get(&field_value) {
                         if offsets.iter().any(|&o| Some(o) != old_data_offset) {
                             return Ok(Err(format!(
                                 "Unique constraint violation: Field '{}' with value '{}' already exists",
                                 unique_field,
-                                record.get(unique_field).unwrap_or(&Value::Null)
+                                unique_value.unwrap_or(&Value::Null)
                             )));
                         }
                     }
@@ -155,10 +155,10 @@ impl Drawer {
         }
 
         let old_field_value = old_record
-            .and_then(|value| value.get(indexed_field))
+            .and_then(|value| query::resolve_field_path(value, indexed_field))
             .and_then(Self::secondary_index_key);
         let new_field_value = new_record
-            .and_then(|value| value.get(indexed_field))
+            .and_then(|value| query::resolve_field_path(value, indexed_field))
             .and_then(Self::secondary_index_key);
         let mut keys_to_write = Vec::new();
 
@@ -238,9 +238,8 @@ impl Drawer {
 
             let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
             for unique_field in &self.unique_constraints {
-                let Some(field_value) =
-                    record.get(unique_field).and_then(Self::secondary_index_key)
-                else {
+                let unique_value = query::resolve_field_path(record, unique_field);
+                let Some(field_value) = unique_value.and_then(Self::secondary_index_key) else {
                     continue;
                 };
 
@@ -250,7 +249,7 @@ impl Drawer {
                             return Ok(Err(format!(
                                 "Unique constraint violation: Field '{}' with value '{}' already exists",
                                 unique_field,
-                                record.get(unique_field).unwrap_or(&Value::Null)
+                                unique_value.unwrap_or(&Value::Null)
                             )));
                         }
                     }

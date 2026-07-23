@@ -4,7 +4,8 @@ use crate::config::{
 };
 use crate::report::{BenchmarkReport, PhaseMetrics, TargetReport};
 use crate::targets::{
-    BenchmarkTarget, MongoTarget, MySqlTarget, Neo4jTarget, SqliteTarget, WardrobeTarget,
+    BenchmarkTarget, MongoTarget, MySqlTarget, Neo4jTarget, RedbTarget, SqliteTarget,
+    WardrobeTarget,
 };
 use crate::utils::unix_timestamp_micros;
 use std::fs;
@@ -17,6 +18,7 @@ pub enum TargetSpec {
     WardrobeEmbedded,
     WardrobeRemote,
     Sqlite,
+    Redb,
     MongoDb,
     MySql,
     Neo4j,
@@ -28,6 +30,7 @@ impl TargetSpec {
             Self::WardrobeEmbedded,
             Self::WardrobeRemote,
             Self::Sqlite,
+            Self::Redb,
             Self::MongoDb,
             Self::MySql,
             Self::Neo4j,
@@ -39,6 +42,7 @@ impl TargetSpec {
             Self::WardrobeEmbedded => "Wardrobe (Embedded Flat-File Mode)",
             Self::WardrobeRemote => "Wardrobe (Remote TCP Server Mode)",
             Self::Sqlite => "SQLite (Local WAL File Mode)",
+            Self::Redb => "redb (Pure Rust Embedded Key-Value Mode)",
             Self::MongoDb => "MongoDB (Document Store Base Comparison)",
             Self::MySql => "MySQL / MariaDB (Relational Pointer Base Comparison)",
             Self::Neo4j => "Neo4j (Graph Database Base Comparison)",
@@ -458,6 +462,15 @@ pub(crate) fn build_target(
                 db_path.display()
             ));
             Ok(Box::new(SqliteTarget::new(db_path)?))
+        }
+        TargetSpec::Redb => {
+            let db_path = run_dir.join("redb").join("library.redb");
+            progress.log(format!(
+                "{}: opening persistent redb file at {}",
+                spec.label(),
+                db_path.display()
+            ));
+            Ok(Box::new(RedbTarget::new(db_path)?))
         }
         TargetSpec::MongoDb => {
             progress.log(format!(

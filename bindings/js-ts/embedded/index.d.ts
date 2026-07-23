@@ -37,8 +37,26 @@ export type StatusRequest =
   | { Wal: { database_name?: string | null } }
   | { Path: { path: string } };
 
+export interface RelationshipRequest {
+  SchemaRule: {
+    drawer_name: string;
+    action: 'add';
+    kind: 'relationship';
+    field_name: string;
+    payload: {
+      type: 'M:1';
+      target_drawer: string;
+    };
+  };
+}
+
 export declare const PACKAGE_NAME: '@wardrobe/embedded';
 export declare const PACKAGE_VERSION: '0.26.723';
+export declare function relationshipRequest(
+  drawerName: string,
+  fieldName: string,
+  targetDrawer: string
+): RelationshipRequest;
 
 export class WardrobeClient {
   static open(connectionString: string): Promise<WardrobeClient>;

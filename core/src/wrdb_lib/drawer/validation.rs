@@ -340,7 +340,7 @@ impl Drawer {
         required_fields: &Value,
         path: &str,
     ) -> Result<(), String> {
-        let Some(object) = value.as_object() else {
+        let Some(_) = value.as_object() else {
             return Ok(());
         };
         let Some(required_fields) = required_fields.as_array() else {
@@ -352,7 +352,8 @@ impl Drawer {
                 continue;
             };
 
-            if !object.contains_key(field_name) {
+            let resolved = query::resolve_field_path(value, field_name);
+            if resolved.is_none() || resolved == Some(&Value::Null) {
                 return Err(format!("{path}.{field_name} is required by schema"));
             }
         }

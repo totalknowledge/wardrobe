@@ -1,6 +1,7 @@
 pub(crate) mod mongodb;
 pub(crate) mod mysql;
 pub(crate) mod neo4j;
+pub(crate) mod redb;
 pub(crate) mod sqlite;
 pub(crate) mod wardrobe_embedded;
 pub(crate) mod wardrobe_remote;
@@ -8,6 +9,7 @@ pub(crate) mod wardrobe_remote;
 pub(crate) use mongodb::MongoTarget;
 pub(crate) use mysql::MySqlTarget;
 pub(crate) use neo4j::Neo4jTarget;
+pub(crate) use redb::RedbTarget;
 pub(crate) use sqlite::SqliteTarget;
 pub(crate) use wardrobe_embedded::WardrobeTarget;
 

@@ -198,3 +198,42 @@ impl BsonBinaryFormat {
         ordinal.checked_add(token_ordinal)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn version_two_record_with_json_encoded_object_value_remains_readable() {
+        let field_name_map = BTreeMap::from([
+            ("_".to_string(), "_id".to_string()),
+            ("a".to_string(), "attributes".to_string()),
+        ]);
+        let mut payload = Vec::new();
+        write_varint(2, &mut payload);
+        payload.push(0b0000_0011);
+        serialize_native_value(&json!("hero"), &mut payload).expect("id should serialize");
+        let attributes = json!({"strength": 18, "tags": ["athletics"]});
+        let json_bytes = serde_json::to_vec(attributes.as_object().expect("object")).expect("json");
+        payload.push(0x08);
+        write_varint(json_bytes.len() as u64, &mut payload);
+        payload.extend_from_slice(&json_bytes);
+        let frame_len = BSON_FRAME_HEADER_LEN + payload.len();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&BSON_FRAME_MAGIC);
+        frame.push(BSON_NATIVE_FRAME_VERSION);
+        frame.push(0);
+        frame.extend_from_slice(&0u16.to_be_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&(frame_len as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let decoded = BsonBinaryFormat::deserialize_record_with_map(&frame, Some(&field_name_map))
+            .expect("legacy frame should deserialize")
+            .expect("legacy frame should contain a record");
+
+        assert_eq!(decoded["_"], "hero");
+        assert_eq!(decoded["a"], attributes);
+    }
+}

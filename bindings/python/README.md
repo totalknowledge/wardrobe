@@ -16,7 +16,7 @@ The package split is intentional for Python:
 - Use `wardrobe-client` when connecting to a running Wardrobe server.
 - Use `wardrobe-embedded` when local embedded storage is required.
 
-Both expose the same serialized command operations. Database, schema, and drawer status calls return Python lists directly without result-side variant wrappers.
+Both expose the same serialized command operations and `relationship_request` constructor. Database, schema, and drawer status calls return Python lists directly without result-side variant wrappers.
 
 ## Local Validation
 

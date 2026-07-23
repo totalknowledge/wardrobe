@@ -654,6 +654,23 @@ impl AlterRequest {
             payload,
         }
     }
+
+    pub fn relationship(
+        drawer_name: impl Into<String>,
+        field_name: impl Into<String>,
+        target_drawer: impl Into<String>,
+    ) -> Self {
+        Self::schema_rule(
+            drawer_name,
+            "add",
+            "relationship",
+            field_name,
+            serde_json::json!({
+                "type": "M:1",
+                "target_drawer": target_drawer.into()
+            }),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1236,6 +1253,16 @@ mod tests {
                 kind: "index".to_string(),
                 field_name: "field".to_string(),
                 payload: json!({"x": true})
+            }
+        );
+        assert_eq!(
+            AlterRequest::relationship("w/b/character", "item_map", "w/b/item"),
+            AlterRequest::SchemaRule {
+                drawer_name: "w/b/character".to_string(),
+                action: "add".to_string(),
+                kind: "relationship".to_string(),
+                field_name: "item_map".to_string(),
+                payload: json!({"type": "M:1", "target_drawer": "w/b/item"})
             }
         );
 

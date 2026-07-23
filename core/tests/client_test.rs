@@ -685,10 +685,20 @@ fn client_unix_socket_driver_sends_command_frames() {
         let (mut stream, _) = listener.accept().expect("accept failed");
         run_protocol_script(
             &mut stream,
-            vec![(
-                count_command(OperationFilter::drawer("gem")),
-                CommandResult::Count(7),
-            )],
+            vec![
+                (
+                    count_command(OperationFilter::drawer("gem")),
+                    CommandResult::Count(7),
+                ),
+                (
+                    Command::Alter(AlterRequest::relationship(
+                        "w/b/character",
+                        "item_map",
+                        "w/b/item",
+                    )),
+                    CommandResult::Alter(json!({"ok": true})),
+                ),
+            ],
         );
     });
 
@@ -703,6 +713,16 @@ fn client_unix_socket_driver_sends_command_frames() {
             .count(OperationFilter::drawer("gem"), None::<OperationOptions>)
             .expect("count failed"),
         7
+    );
+    assert_eq!(
+        client
+            .alter(AlterRequest::relationship(
+                "w/b/character",
+                "item_map",
+                "w/b/item",
+            ))
+            .expect("relationship alter failed"),
+        json!({"ok": true})
     );
     handle.join().expect("join failed");
 }

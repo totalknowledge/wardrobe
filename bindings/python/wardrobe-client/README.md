@@ -7,9 +7,23 @@ This package speaks the Wardrobe protocol directly over TCP or Unix socket conne
 ## Usage
 
 ```python
-from wardrobe_client import WardrobeClient
+from wardrobe_client import WardrobeClient, relationship_request
 
 with WardrobeClient.open("wardrobe://localhost:24842") as client:
+    client.alter(
+        relationship_request(
+            "publishing-house/public/character",
+            "item_map",
+            "publishing-house/public/item",
+        )
+    )
+    client.upsert(
+        {
+            "_id": "hero",
+            "attributes": {"strength": 18, "proficiencies": ["athletics"]},
+        },
+        "publishing-house/public/character",
+    )
     databases = client.status("Databases")
     schemas = client.status({"Schemas": {"database_name": "publishing-house"}})
     drawers = client.status(

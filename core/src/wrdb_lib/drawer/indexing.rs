@@ -90,7 +90,8 @@ impl Drawer {
             let Some(record) = self.read_logical_record_at_offset(*offset)? else {
                 continue;
             };
-            let Some(field_value) = record.get(field_name).and_then(Self::secondary_index_key)
+            let Some(field_value) =
+                query::resolve_field_path(&record, field_name).and_then(Self::secondary_index_key)
             else {
                 continue;
             };

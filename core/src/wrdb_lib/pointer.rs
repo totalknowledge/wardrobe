@@ -192,6 +192,16 @@ mod tests {
         };
         assert_eq!(locator_to_pointer(explicit), "@gem:abc".to_string());
     }
+
+    #[test]
+    fn inline_pointer_drawers_stop_at_relationship_object_identity() {
+        let value = serde_json::json!({
+            "_id": "@item:sword",
+            "enchantment": {"_id": "@spell:fire"}
+        });
+
+        assert_eq!(inline_pointer_drawer_names(&value), vec!["item"]);
+    }
 }
 
 pub(crate) fn inline_pointer_drawer_names(value: &Value) -> Vec<String> {
@@ -234,6 +244,14 @@ fn collect_inline_pointer_drawer_names(value: &Value, drawer_names: &mut Vec<Str
             }
         }
         Value::Object(map) => {
+            if let Some((drawer_name, _)) = map
+                .get("_id")
+                .and_then(Value::as_str)
+                .and_then(try_parse_pointer)
+            {
+                drawer_names.push(drawer_name);
+                return;
+            }
             for value in map.values() {
                 collect_inline_pointer_drawer_names(value, drawer_names);
             }

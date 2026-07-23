@@ -3,7 +3,40 @@ use crate::wrdb_lib::pointer;
 use crate::wrdb_lib::routing::ExecutionContext;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
+
+pub(crate) fn validate_declared_relationship_targets(
+    map: &Map<String, Value>,
+    current_drawer_name: &str,
+    relationship_constraints: &BTreeMap<String, Value>,
+    context: ExecutionContext<'_>,
+) -> Result<()> {
+    for (field_name, rule) in relationship_constraints {
+        let Some(value) = map.get(field_name) else {
+            continue;
+        };
+        let allowed_drawers = allowed_target_drawers(rule, current_drawer_name, context);
+        if allowed_drawers.is_empty() {
+            continue;
+        }
+
+        for explicit_drawer in pointer::inline_pointer_drawer_names(value) {
+            let resolved_drawer =
+                resolve_drawer_name(&explicit_drawer, current_drawer_name, context);
+            if !allowed_drawers.contains(&resolved_drawer) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "relationship field '{field_name}' expected target drawer '{}' but pointer targets '{explicit_drawer}'",
+                        allowed_drawers.join("' or '")
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
 
 pub(crate) fn register_inline_relationship_aliases<F>(
     map: &Map<String, Value>,
@@ -42,27 +75,24 @@ where
             current_drawer_name,
             relationship_constraints,
         );
-        let mut drawer_name = relationship::drawer_name_for_relation_target(
+        let drawer_name = relationship::drawer_name_for_relation_target(
             &relation_target,
             &key,
             current_drawer_name,
         );
-        if let Some(idx) = current_drawer_name.rfind('/') {
-            let namespace = &current_drawer_name[..idx];
-            if !drawer_name.starts_with(namespace) {
-                drawer_name = format!("{namespace}/{drawer_name}");
-            }
-        }
+        let drawer_name = resolve_drawer_name(&drawer_name, current_drawer_name, context);
         let implicit_parent_field = relationship_constraints
             .get(&key)
             .and_then(relationship::implicit_parent_field_for_rule);
         let processed_value = decompose_relationship_value(
             &drawer_name,
+            current_drawer_name,
             value,
             relation_target,
             parent_pointer,
             implicit_parent_field,
             context,
+            true,
             &mut upsert_child,
         )?;
         continuous_map.insert(key, processed_value);
@@ -73,11 +103,13 @@ where
 
 fn decompose_relationship_value<F>(
     drawer_name: &str,
+    current_drawer_name: &str,
     value: Value,
     relation_target: RelationTarget,
     parent_pointer: &str,
     implicit_parent_field: Option<&str>,
     context: ExecutionContext<'_>,
+    direct_relationship_value: bool,
     upsert_child: &mut F,
 ) -> Result<Value>
 where
@@ -85,29 +117,27 @@ where
 {
     match value {
         Value::Object(mut child_map) => {
-            if let Some(reference_id) = id_only_reference(&child_map) {
-                let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
-                    drawer_name,
-                    reference_id,
-                    context.drawer_namespace,
-                );
-                if let Some(mapped_by) = implicit_parent_field {
-                    let mut child_link_map = Map::new();
-                    child_link_map.insert("_id".to_string(), Value::String(normalized_pointer));
-                    child_link_map.insert(
-                        mapped_by.to_string(),
-                        Value::String(parent_pointer.to_string()),
-                    );
-                    let child_pointer = upsert_child(
-                        drawer_name,
-                        Value::Object(child_link_map),
-                        context,
-                        implicit_parent_field,
-                    )?;
-                    return Ok(Value::String(child_pointer));
+            let relationship_identity =
+                child_map
+                    .get("_id")
+                    .and_then(Value::as_str)
+                    .and_then(|reference_id| {
+                        relationship_identity(
+                            reference_id,
+                            drawer_name,
+                            current_drawer_name,
+                            &relation_target,
+                            context,
+                            direct_relationship_value,
+                        )
+                    });
+
+            if let Some((target_drawer, normalized_pointer)) = relationship_identity {
+                if child_map.len() == 1 {
+                    return Ok(Value::String(normalized_pointer));
                 }
-                Ok(Value::String(normalized_pointer))
-            } else {
+
+                child_map.insert("_id".to_string(), Value::String(normalized_pointer));
                 if let Some(mapped_by) = implicit_parent_field {
                     child_map.insert(
                         mapped_by.to_string(),
@@ -115,12 +145,29 @@ where
                     );
                 }
                 let child_pointer = upsert_child(
-                    drawer_name,
+                    &target_drawer,
                     Value::Object(child_map),
                     context,
                     implicit_parent_field,
                 )?;
                 Ok(Value::String(child_pointer))
+            } else {
+                let mut inline_map = Map::new();
+                for (key, value) in child_map {
+                    let processed_value = decompose_relationship_value(
+                        drawer_name,
+                        current_drawer_name,
+                        value,
+                        relation_target.clone(),
+                        parent_pointer,
+                        implicit_parent_field,
+                        context,
+                        false,
+                        upsert_child,
+                    )?;
+                    inline_map.insert(key, processed_value);
+                }
+                Ok(Value::Object(inline_map))
             }
         }
         Value::Array(values) => values
@@ -128,25 +175,30 @@ where
             .map(|item| {
                 decompose_relationship_value(
                     drawer_name,
+                    current_drawer_name,
                     item,
                     relation_target.clone(),
                     parent_pointer,
                     implicit_parent_field,
                     context,
+                    direct_relationship_value,
                     upsert_child,
                 )
             })
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
-        Value::String(pointer) if pointer::is_pointer(&pointer) => Ok(Value::String(
-            pointer::normalize_reference_pointer_for_namespace(
-                drawer_name,
-                &pointer,
-                context.drawer_namespace,
-            ),
-        )),
+        Value::String(reference) if pointer::is_pointer(&reference) => {
+            let (pointer_drawer, pointer_key) =
+                pointer::try_parse_pointer(&reference).ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidInput, "invalid relationship pointer")
+                })?;
+            let target_drawer = resolve_drawer_name(&pointer_drawer, current_drawer_name, context);
+            let normalized_pointer = pointer::format_pointer(&target_drawer, &pointer_key);
+            Ok(Value::String(normalized_pointer))
+        }
         Value::String(reference_id)
-            if relationship::should_normalize_plain_string(&relation_target) =>
+            if direct_relationship_value
+                && relationship::should_normalize_plain_string(&relation_target) =>
         {
             Ok(Value::String(
                 pointer::normalize_reference_pointer_for_namespace(
@@ -160,12 +212,70 @@ where
     }
 }
 
-fn id_only_reference(map: &Map<String, Value>) -> Option<&str> {
-    if map.len() == 1 {
-        map.get("_id").and_then(|value| value.as_str())
-    } else {
-        None
+fn relationship_identity(
+    reference_id: &str,
+    default_drawer_name: &str,
+    current_drawer_name: &str,
+    relation_target: &RelationTarget,
+    context: ExecutionContext<'_>,
+    direct_relationship_value: bool,
+) -> Option<(String, String)> {
+    let (target_drawer, normalized_pointer) =
+        if let Some((pointer_drawer, pointer_key)) = pointer::try_parse_pointer(reference_id) {
+            let target_drawer = resolve_drawer_name(&pointer_drawer, current_drawer_name, context);
+            let normalized_pointer = pointer::format_pointer(&target_drawer, &pointer_key);
+            (target_drawer, normalized_pointer)
+        } else if direct_relationship_value
+            && relationship::should_normalize_plain_string(relation_target)
+        {
+            let target_drawer = default_drawer_name.to_string();
+            let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
+                &target_drawer,
+                reference_id,
+                context.drawer_namespace,
+            );
+            (target_drawer, normalized_pointer)
+        } else {
+            return None;
+        };
+    Some((target_drawer, normalized_pointer))
+}
+
+fn allowed_target_drawers(
+    rule: &Value,
+    current_drawer_name: &str,
+    context: ExecutionContext<'_>,
+) -> Vec<String> {
+    let mut targets = relationship::relationship_target_drawer(rule)
+        .into_iter()
+        .map(|target| resolve_drawer_name(target, current_drawer_name, context))
+        .collect::<Vec<_>>();
+    if let Some(polymorphic_targets) = rule.get("target_drawers").and_then(Value::as_array) {
+        targets.extend(
+            polymorphic_targets
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|target| resolve_drawer_name(target, current_drawer_name, context)),
+        );
     }
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn resolve_drawer_name(
+    drawer_name: &str,
+    current_drawer_name: &str,
+    context: ExecutionContext<'_>,
+) -> String {
+    let slash_scoped = if drawer_name.contains('/') {
+        drawer_name.to_string()
+    } else if let Some(idx) = current_drawer_name.rfind('/') {
+        format!("{}/{}", &current_drawer_name[..idx], drawer_name)
+    } else {
+        drawer_name.to_string()
+    };
+    pointer::scoped_drawer_name(&slash_scoped, context.drawer_namespace)
 }
 
 #[cfg(test)]
@@ -212,7 +322,7 @@ mod tests {
         )
         .expect("decomposition should succeed");
 
-        assert_eq!(decomposed["gems"], "@gem:fire");
+        assert_eq!(decomposed["gems"], json!({"_id": "fire"}));
         assert_eq!(upsert_count, 0);
     }
 
@@ -234,10 +344,8 @@ mod tests {
         )
         .expect("decomposition should succeed");
 
-        assert_eq!(decomposed["gem"], "@gem:generated");
-        assert_eq!(upserted_drawers.len(), 1);
-        assert_eq!(upserted_drawers[0].0, "gem");
-        assert_eq!(upserted_drawers[0].1["name"], "Ruby");
+        assert_eq!(decomposed["gem"], json!({"name": "Ruby"}));
+        assert!(upserted_drawers.is_empty());
     }
 
     #[test]
@@ -246,7 +354,7 @@ mod tests {
             "gems".to_string(),
             json!([
                 {"_id": "fire"},
-                {"name": "Water"},
+                {"_id": "@gem:water", "name": "Water"},
                 "@gem:air"
             ]),
         )]);
@@ -263,7 +371,7 @@ mod tests {
 
         assert_eq!(
             decomposed["gems"],
-            json!(["@gem:fire", "@gem:generated", "@gem:air"])
+            json!([{"_id": "fire"}, "@gem:generated", "@gem:air"])
         );
     }
 
@@ -292,7 +400,10 @@ mod tests {
 
     #[test]
     fn decompose_nested_object_propagates_slash_namespace() {
-        let map = Map::from_iter([("gem".to_string(), json!({"name": "Ruby"}))]);
+        let map = Map::from_iter([(
+            "gem".to_string(),
+            json!({"_id": "@gem:ruby", "name": "Ruby"}),
+        )]);
         let mut upserted_drawers = Vec::new();
 
         let decomposed = decompose_nested_objects(
@@ -311,5 +422,67 @@ mod tests {
         assert_eq!(decomposed["gem"], "@db/schema/gem:generated");
         assert_eq!(upserted_drawers.len(), 1);
         assert_eq!(upserted_drawers[0].0, "db/schema/gem");
+    }
+
+    #[test]
+    fn map_entries_are_classified_independently_and_keys_are_preserved() {
+        let map = Map::from_iter([(
+            "item_map".to_string(),
+            json!({
+                "main_hand": {"_id": "@item:sword"},
+                "off_hand": {"_id": "@item:shield", "name": "Shield"},
+                "notes": {"quality": "rare"}
+            }),
+        )]);
+        let mut upserted = Vec::new();
+
+        let decomposed = decompose_nested_objects(
+            map,
+            "character",
+            "@character:hero",
+            &BTreeMap::new(),
+            ExecutionContext::root(),
+            |drawer_name, value, _, _| {
+                upserted.push((drawer_name.to_string(), value));
+                Ok("@item:shield".to_string())
+            },
+        )
+        .expect("decomposition should succeed");
+
+        assert_eq!(
+            decomposed["item_map"],
+            json!({
+                "main_hand": "@item:sword",
+                "off_hand": "@item:shield",
+                "notes": {"quality": "rare"}
+            })
+        );
+        assert_eq!(upserted.len(), 1);
+        assert_eq!(upserted[0].0, "item");
+        assert_eq!(upserted[0].1["name"], "Shield");
+    }
+
+    #[test]
+    fn declared_relationship_rejects_conflicting_pointer_target() {
+        let map = Map::from_iter([(
+            "item_map".to_string(),
+            json!({"main_hand": {"_id": "@spell:fireball"}}),
+        )]);
+        let constraints = BTreeMap::from([(
+            "item_map".to_string(),
+            json!({"type": "M:1", "target_drawer": "item"}),
+        )]);
+
+        let error = validate_declared_relationship_targets(
+            &map,
+            "character",
+            &constraints,
+            ExecutionContext::root(),
+        )
+        .expect_err("conflicting pointer should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("item_map"));
+        assert!(error.to_string().contains("spell"));
     }
 }

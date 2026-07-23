@@ -12,6 +12,7 @@ path = "src/main.rs"
 mongodb = { version = "2.8.2", default-features = false, features = ["sync"] }
 mysql = { version = "25.0", default-features = false, features = ["buffer-pool", "minimal", "native-tls"] }
 neo4rs = "0.8.0"
+redb = "4.1.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"

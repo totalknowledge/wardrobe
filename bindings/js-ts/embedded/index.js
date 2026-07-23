@@ -4,6 +4,21 @@ const fs = require('fs');
 const PACKAGE_NAME = '@wardrobe/embedded';
 const PACKAGE_VERSION = '0.26.723';
 
+function relationshipRequest(drawerName, fieldName, targetDrawer) {
+  return {
+    SchemaRule: {
+      drawer_name: drawerName,
+      action: 'add',
+      kind: 'relationship',
+      field_name: fieldName,
+      payload: {
+        type: 'M:1',
+        target_drawer: targetDrawer
+      }
+    }
+  };
+}
+
 // Determine native addon library name based on platform
 const libName = process.platform === 'win32' ? 'wardrobe_js_ts.dll' : process.platform === 'darwin' ? 'libwardrobe_js_ts.dylib' : 'libwardrobe_js_ts.so';
 
@@ -272,4 +287,4 @@ function normalizeOrderDirection(orderDirection) {
   return directions[orderDirection.toLowerCase()] || orderDirection;
 }
 
-module.exports = { PACKAGE_NAME, PACKAGE_VERSION, WardrobeClient };
+module.exports = { PACKAGE_NAME, PACKAGE_VERSION, WardrobeClient, relationshipRequest };

@@ -1108,7 +1108,9 @@ mod tests {
         assert!(Drawer::normalize_schema_kind("unknown").is_err());
 
         assert!(Drawer::validate_schema_field("field").is_ok());
+        assert!(Drawer::validate_schema_field("attributes.strength").is_ok());
         assert!(Drawer::validate_schema_field("  ").is_err());
+        assert!(Drawer::validate_schema_field("attributes..strength").is_err());
         assert_eq!(
             Drawer::constraint_type(&json!({"constraint": "unique"})).unwrap(),
             "unique"

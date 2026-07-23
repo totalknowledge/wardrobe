@@ -56,7 +56,7 @@ Embedded mode is a good fit for:
 
 ## Shared Contract
 
-All bindings use the shared serialized `Command` and `CommandResult` model. Database, schema, and drawer status requests return raw arrays directly; result payloads are not wrapped in `Databases`, `Schemas`, or `Drawers` objects.
+All bindings use the shared serialized `Command` and `CommandResult` model. Rust uses `AlterRequest::relationship`, JavaScript and TypeScript use `relationshipRequest`, Python uses `relationship_request`, and C uses `wardrobe_cabi_relationship_command` to construct the same relationship declaration. Database, schema, and drawer status requests return raw arrays directly; result payloads are not wrapped in `Databases`, `Schemas`, or `Drawers` objects.
 
 ## C ABI Binding
 
@@ -67,7 +67,7 @@ The binding keeps the same high-level deployment split as the rest of the bindin
 - embedded/local targets through direct filesystem paths
 - network targets through Wardrobe URI connection strings
 
-The C ABI remains a single native package. Its current exports cover version reporting, database status counts, serialized command execution, path duplication, and string release.
+The C ABI remains a single native package. Its current exports cover version reporting, database status counts, relationship command construction, serialized command execution, path duplication, and string release.
 
 ## JavaScript/TypeScript Binding
 

@@ -49,17 +49,23 @@ pub(crate) fn filter_map(filter: &Value) -> Result<&Map<String, Value>> {
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object"))
 }
 
+pub(crate) fn resolve_field_path<'a>(value: &'a Value, field_path: &str) -> Option<&'a Value> {
+    field_path
+        .split('.')
+        .try_fold(value, |current, segment| current.as_object()?.get(segment))
+}
+
 pub(crate) fn record_matches_filter(
     record: &Value,
     filter_map: &Map<String, Value>,
     drawer_namespace: Option<&str>,
 ) -> bool {
-    let Value::Object(record_map) = record else {
+    let Value::Object(_) = record else {
         return false;
     };
 
     filter_map.iter().all(|(field_name, expected_value)| {
-        record_map.get(field_name).is_some_and(|actual_value| {
+        resolve_field_path(record, field_name).is_some_and(|actual_value| {
             field_matches_filter(field_name, actual_value, expected_value, drawer_namespace)
         })
     })
@@ -232,8 +238,8 @@ fn compare_records_by_field(
         return Ordering::Equal;
     };
 
-    let left_value = left.get(field_name);
-    let right_value = right.get(field_name);
+    let left_value = resolve_field_path(left, field_name);
+    let right_value = resolve_field_path(right, field_name);
 
     match (
         left_value.and_then(|value| sortable_value(value, sort_type)),
@@ -256,7 +262,7 @@ fn compare_records_by_field(
 
 fn sort_type_for_records(records: &[Value], field_name: &str) -> Option<SortableType> {
     records.iter().find_map(|record| {
-        record.get(field_name).and_then(|value| match value {
+        resolve_field_path(record, field_name).and_then(|value| match value {
             Value::Bool(_) => Some(SortableType::Bool),
             Value::Number(_) => Some(SortableType::Number),
             Value::String(_) => Some(SortableType::String),
@@ -295,4 +301,144 @@ fn relationship_drawer_name(field_name: &str) -> String {
     }
 
     field_name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fixed_field_paths_resolve_nested_objects_and_filters() {
+        let record = json!({
+            "_id": "hero",
+            "attributes": {"strength": 18}
+        });
+        let filter = json!({"attributes.strength": 18});
+
+        assert_eq!(
+            resolve_field_path(&record, "attributes.strength"),
+            Some(&json!(18))
+        );
+        assert!(resolve_field_path(&record, "attributes.dexterity").is_none());
+        assert!(record_matches_filter(
+            &record,
+            filter.as_object().expect("filter"),
+            None
+        ));
+    }
+
+    #[test]
+    fn query_modifiers_sort_by_fixed_field_paths() {
+        let mut records = vec![
+            json!({"_id": "weak", "attributes": {"strength": 8}}),
+            json!({"_id": "strong", "attributes": {"strength": 18}}),
+            json!({"_id": "missing", "attributes": {}}),
+        ];
+        let modifiers = QueryModifiers {
+            order_by: Some("attributes.strength".to_string()),
+            order_direction: Some(OrderDirection::Descending),
+            limit: None,
+            offset: None,
+        };
+
+        apply_query_modifiers(&mut records, Some(&modifiers));
+
+        assert_eq!(records[0]["_id"], "strong");
+        assert_eq!(records[1]["_id"], "weak");
+        assert_eq!(records[2]["_id"], "missing");
+    }
+
+    #[test]
+    fn filters_cover_nested_objects_arrays_references_and_scalar_operators() {
+        let record = json!({
+            "_id": "hero",
+            "name": "Bob the Brave",
+            "level": 7,
+            "guild": "@guild:heroes",
+            "attributes": {"strength": 18},
+            "tags": ["hero", "fighter"]
+        });
+
+        for filter in [
+            json!({"name": "Bob%"}),
+            json!({"name": "%Brave"}),
+            json!({"name": "%the%"}),
+            json!({"level": {"$gte": 7, "$lt": 8}}),
+            json!({"guild": {"_id": "heroes"}}),
+            json!({"attributes": {"strength": 18}}),
+            json!({"tags": ["hero", "fighter"]}),
+        ] {
+            assert!(record_matches_filter(
+                &record,
+                filter.as_object().expect("filter"),
+                None
+            ));
+        }
+
+        for filter in [
+            json!({"name": "Alice%"}),
+            json!({"level": {"$gt": 7}}),
+            json!({"level": {"$unknown": 7}}),
+            json!({"attributes": {"strength": 10}}),
+            json!({"tags": ["hero"]}),
+            json!({"missing": true}),
+        ] {
+            assert!(!record_matches_filter(
+                &record,
+                filter.as_object().expect("filter"),
+                None
+            ));
+        }
+        assert!(!record_matches_filter(
+            &json!("not an object"),
+            json!({}).as_object().expect("filter"),
+            None
+        ));
+    }
+
+    #[test]
+    fn query_modifiers_cover_bool_string_pagination_and_empty_results() {
+        let mut bool_records = vec![
+            json!({"_id": "false", "active": false}),
+            json!({"_id": "true", "active": true}),
+        ];
+        apply_query_modifiers(
+            &mut bool_records,
+            Some(&QueryModifiers {
+                order_by: Some("active".to_string()),
+                order_direction: None,
+                limit: Some(1),
+                offset: Some(1),
+            }),
+        );
+        assert_eq!(bool_records, vec![json!({"_id": "true", "active": true})]);
+
+        let mut string_records = vec![
+            json!({"_id": "b", "name": "Beta"}),
+            json!({"_id": "a", "name": "Alpha"}),
+        ];
+        apply_query_modifiers(
+            &mut string_records,
+            Some(&QueryModifiers {
+                order_by: Some("name".to_string()),
+                order_direction: None,
+                limit: None,
+                offset: None,
+            }),
+        );
+        assert_eq!(string_records[0]["_id"], "a");
+
+        apply_query_modifiers(
+            &mut string_records,
+            Some(&QueryModifiers {
+                order_by: None,
+                order_direction: None,
+                limit: None,
+                offset: Some(10),
+            }),
+        );
+        assert!(string_records.is_empty());
+        apply_query_modifiers(&mut string_records, None);
+    }
 }

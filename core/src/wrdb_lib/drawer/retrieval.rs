@@ -62,8 +62,7 @@ impl Drawer {
 
         let mut matching_records = Vec::new();
         for record in self.find_all_records_with_migration()? {
-            if record
-                .get(field)
+            if query::resolve_field_path(&record, field)
                 .and_then(Self::secondary_index_key)
                 .is_some_and(|index_key| index_keys.contains(&index_key))
             {

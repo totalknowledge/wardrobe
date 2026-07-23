@@ -79,8 +79,7 @@ impl Drawer {
             data_block_index.insert(data_offset, block_entry);
 
             for indexed_field in &indexed_fields {
-                if let Some(field_value) = record
-                    .get(indexed_field)
+                if let Some(field_value) = query::resolve_field_path(record, indexed_field)
                     .and_then(Self::secondary_index_key)
                 {
                     secondary_memory_index

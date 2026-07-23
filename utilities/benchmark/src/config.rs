@@ -384,7 +384,7 @@ impl LibraryProfile {
 pub fn print_help() {
     println!("wardrobe-benchmark");
     println!(
-        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,mongodb,mysql,neo4j"
+        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,neo4j"
     );
     println!(
         "  --work-dir <path>               Benchmark run directory root, default {DEFAULT_WORK_DIR}"
@@ -460,6 +460,7 @@ pub(crate) fn parse_targets(raw: &str) -> io::Result<Vec<TargetSpec>> {
             "wardrobe-embedded" | "embedded" => Ok(TargetSpec::WardrobeEmbedded),
             "wardrobe-remote" | "remote" | "wardrobe-tcp" => Ok(TargetSpec::WardrobeRemote),
             "sqlite" => Ok(TargetSpec::Sqlite),
+            "redb" => Ok(TargetSpec::Redb),
             "mongodb" | "mongo" => Ok(TargetSpec::MongoDb),
             "mysql" | "mariadb" => Ok(TargetSpec::MySql),
             "neo4j" | "neo" => Ok(TargetSpec::Neo4j),

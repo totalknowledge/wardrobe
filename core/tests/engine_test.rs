@@ -775,6 +775,25 @@ fn us_018_id_only_subobject_normalizes_raw_ids_and_preserves_child_record() {
     let database_directory = database.path.to_string_lossy().into_owned();
     let application_gem_id = "existing_gem";
     let wardrobe_gem_id = "@gem:lnk_existing_gem";
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "gem": {
+                    "type": "M:1",
+                    "target_drawer": "gem"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
 
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
@@ -1305,6 +1324,25 @@ fn us_019_pointer_arrays_are_hydrated_in_order() {
 fn us_019_id_only_object_arrays_are_normalized_to_references() {
     let database = TempDatabase::new("us_019_id_only_object_arrays");
     let database_directory = database.path.to_string_lossy().into_owned();
+    fs::create_dir_all(&database.path).expect("temp dir should create");
+    write_drawer_metadata(
+        &database,
+        "weapon",
+        json!({
+            "format_version": 1,
+            "primary_key": "_id",
+            "record_count": 0,
+            "unique_constraints": [],
+            "relationship_constraints": {
+                "gems": {
+                    "type": "M:M",
+                    "target_drawer": "gem"
+                }
+            },
+            "delete_rules": {},
+            "cascade_delete_rules": {}
+        }),
+    );
 
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
     engine
@@ -3368,7 +3406,7 @@ fn us_037_relationship_constraints_reject_wrong_target_drawer_pointers() {
         )
         .expect_err("wrong target drawer should fail validation");
 
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(
         error
             .to_string()
@@ -3620,7 +3658,7 @@ fn us_038_many_to_many_pointer_arrays_validate_targets_and_hydrate() {
             None::<OperationOptions>,
         )
         .expect_err("wrong many-to-many pointer target should fail");
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(error.to_string().contains("expected target drawer 'skill'"));
 
     let characters = read_records(&engine, OperationFilter::drawer("character"))
@@ -6143,4 +6181,327 @@ fn us_102_engine_transactions_flush_dirty_metadata_on_commit() {
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_contents).expect("metadata should parse after delete");
     assert_eq!(metadata["record_count"], 1);
+}
+
+#[test]
+fn us_141_plain_maps_and_nested_arrays_round_trip_inline() {
+    let database = TempDatabase::new("us_141_inline_maps");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+    let attributes = json!({
+        "strength": 18,
+        "dexterity": 14,
+        "details": {
+            "proficiencies": ["athletics", "arcana"],
+            "modifiers": [{"source": "ancestry", "amount": 2}]
+        }
+    });
+
+    engine
+        .upsert(
+            json!({
+                "_id": "hero",
+                "name": "Bob",
+                "attributes": attributes
+            }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect("character should upsert");
+
+    let hydrated = read_record(&engine, OperationFilter::pointer("@character:hero"))
+        .expect("hydrated read should succeed")
+        .expect("character should exist");
+    let unhydrated = read_record(
+        &engine,
+        (
+            OperationFilter::pointer("@character:hero"),
+            OperationOptions::new()
+                .hydrate(false)
+                .return_shape(ReturnShape::Record),
+        ),
+    )
+    .expect("unhydrated read should succeed")
+    .expect("character should exist");
+
+    assert_eq!(hydrated["attributes"], attributes);
+    assert_eq!(unhydrated["attributes"], attributes);
+    assert!(!database.path.join("attributes.drw").exists());
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(database.path.join("character_meta.drw"))
+            .expect("metadata should read"),
+    )
+    .expect("metadata should parse");
+    assert!(metadata["relationship_constraints"]["attributes"].is_null());
+}
+
+#[test]
+fn us_141_reference_maps_preserve_keys_and_apply_strict_and_cascade_semantics() {
+    let database = TempDatabase::new("us_141_reference_maps");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({"_id": "sword", "name": "Original Sword", "damage": 6}),
+            OperationFilter::drawer("item"),
+            None::<OperationOptions>,
+        )
+        .expect("strict target should seed");
+    engine
+        .upsert(
+            json!({
+                "_id": "hero",
+                "item_map": {
+                    "main_hand": {"_id": "@item:sword"},
+                    "off_hand": {
+                        "_id": "@item:shield",
+                        "name": "Shield",
+                        "armor": 2
+                    },
+                    "future": {"_id": "@item:missing"}
+                }
+            }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect("relationship map should upsert");
+
+    let raw = drawer_records_from_disk(&database.path.join("character.drw"))
+        .into_iter()
+        .find(|record| record["_id"] == "hero")
+        .expect("raw parent should exist");
+    assert_eq!(
+        raw["item_map"],
+        json!({
+            "main_hand": "@item:sword",
+            "off_hand": "@item:shield",
+            "future": "@item:missing"
+        })
+    );
+
+    let sword = read_record(&engine, OperationFilter::pointer("@item:sword"))
+        .expect("strict target should read")
+        .expect("strict target should exist");
+    assert_eq!(sword["name"], "Original Sword");
+    assert_eq!(sword["damage"], 6);
+    let shield = read_record(&engine, OperationFilter::pointer("@item:shield"))
+        .expect("cascade target should read")
+        .expect("cascade target should exist");
+    assert_eq!(shield["name"], "Shield");
+    assert_eq!(shield["armor"], 2);
+    assert!(
+        read_record(&engine, OperationFilter::pointer("@item:missing"))
+            .expect("missing strict target lookup should succeed")
+            .is_none()
+    );
+}
+
+#[test]
+fn us_141_declared_relationship_resolves_ids_and_rejects_conflicts_before_mutation() {
+    let database = TempDatabase::new("us_141_declared_relationship");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({"_id": "seed", "name": "Seed"}),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect("character drawer should seed");
+    engine
+        .alter(AlterRequest::relationship(
+            "character",
+            "favorite_item",
+            "item",
+        ))
+        .expect("relationship should declare");
+    engine
+        .upsert(
+            json!({"_id": "sword", "name": "Sword"}),
+            OperationFilter::drawer("item"),
+            None::<OperationOptions>,
+        )
+        .expect("item should seed");
+    engine
+        .upsert(
+            json!({
+                "_id": "hero",
+                "favorite_item": {"_id": "sword"}
+            }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect("unqualified relationship should resolve");
+
+    let raw = drawer_records_from_disk(&database.path.join("character.drw"))
+        .into_iter()
+        .find(|record| record["_id"] == "hero")
+        .expect("raw parent should exist");
+    assert_eq!(raw["favorite_item"], "@item:sword");
+
+    let metadata_before =
+        fs::read(database.path.join("character_meta.drw")).expect("metadata should read");
+    let error = engine
+        .upsert(
+            json!({
+                "_id": "villain",
+                "favorite_item": {
+                    "_id": "@spell:fireball",
+                    "name": "Fireball"
+                }
+            }),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect_err("conflicting pointer target should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("favorite_item"));
+    assert!(
+        read_record(&engine, OperationFilter::pointer("@character:villain"))
+            .expect("parent lookup should succeed")
+            .is_none()
+    );
+    assert!(!database.path.join("spell.drw").exists());
+    assert_eq!(
+        fs::read(database.path.join("character_meta.drw")).expect("metadata should read"),
+        metadata_before
+    );
+}
+
+#[test]
+fn us_141_nested_indexes_and_constraints_resolve_fixed_inline_paths() {
+    let database = TempDatabase::new("us_141_nested_indexes_constraints");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    upsert_batch(
+        &engine,
+        "character",
+        vec![
+            json!({"_id": "hero", "attributes": {"strength": 18}}),
+            json!({"_id": "rogue", "attributes": {"strength": 14}}),
+        ],
+    )
+    .expect("characters should seed");
+    engine
+        .alter(AlterRequest::schema_rule(
+            "character",
+            "add",
+            "index",
+            "attributes.strength",
+            json!({"kind": "index"}),
+        ))
+        .expect("nested index should declare");
+
+    assert_eq!(
+        engine
+            .count(
+                OperationFilter::query_in("character", json!({"attributes.strength": 18})),
+                None::<OperationOptions>
+            )
+            .expect("nested indexed count should succeed"),
+        1
+    );
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(database.path.join("character_meta.drw"))
+            .expect("metadata should read"),
+    )
+    .expect("metadata should parse");
+    assert!(
+        metadata["materialized_secondary_indexes"]["attributes.strength"]
+            .as_u64()
+            .is_some()
+    );
+
+    engine
+        .upsert(
+            json!({"_id": "hero", "attributes": {"strength": 20}}),
+            OperationFilter::drawer("character"),
+            None::<OperationOptions>,
+        )
+        .expect("indexed nested value should update");
+    assert_eq!(
+        engine
+            .count(
+                OperationFilter::query_in("character", json!({"attributes.strength": 18})),
+                None::<OperationOptions>
+            )
+            .expect("old nested value count should succeed"),
+        0
+    );
+    assert_eq!(
+        engine
+            .delete(
+                OperationFilter::query_in("character", json!({"attributes.strength": 20})),
+                None::<OperationOptions>
+            )
+            .expect("nested indexed delete should succeed"),
+        1
+    );
+    assert_eq!(
+        engine
+            .count(
+                OperationFilter::query_in("character", json!({"attributes.strength": 20})),
+                None::<OperationOptions>
+            )
+            .expect("deleted nested value count should succeed"),
+        0
+    );
+
+    engine
+        .upsert(
+            json!({"_id": "first", "attributes": {"strength": 12}}),
+            OperationFilter::drawer("profile"),
+            None::<OperationOptions>,
+        )
+        .expect("profile should seed");
+    engine
+        .alter(AlterRequest::schema_rule(
+            "profile",
+            "add",
+            "constraint",
+            "attributes.strength",
+            json!({"constraint": "unique"}),
+        ))
+        .expect("nested unique constraint should declare");
+    let unique_error = engine
+        .upsert(
+            json!({"_id": "second", "attributes": {"strength": 12}}),
+            OperationFilter::drawer("profile"),
+            None::<OperationOptions>,
+        )
+        .expect_err("duplicate nested value should fail");
+    assert_eq!(unique_error.kind(), std::io::ErrorKind::InvalidData);
+
+    engine
+        .alter(AlterRequest::schema_rule(
+            "profile",
+            "add",
+            "constraint",
+            "attributes.constitution",
+            json!({"constraint": "non-null"}),
+        ))
+        .expect("nested non-null constraint should declare");
+    let missing_error = engine
+        .upsert(
+            json!({"_id": "missing", "attributes": {"strength": 13}}),
+            OperationFilter::drawer("profile"),
+            None::<OperationOptions>,
+        )
+        .expect_err("missing nested value should fail");
+    assert_eq!(missing_error.kind(), std::io::ErrorKind::InvalidData);
+    let null_error = engine
+        .upsert(
+            json!({
+                "_id": "null",
+                "attributes": {"strength": 13, "constitution": null}
+            }),
+            OperationFilter::drawer("profile"),
+            None::<OperationOptions>,
+        )
+        .expect_err("null nested value should fail");
+    assert_eq!(null_error.kind(), std::io::ErrorKind::InvalidData);
 }

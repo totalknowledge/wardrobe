@@ -176,6 +176,16 @@ impl WardrobeEngine {
             target_primary_key,
             Vec::new(),
         )?;
+        let declared_relationship_constraints =
+            Self::read_lock(&drawer_handle)?.relationship_constraints();
+        for (_, map, _) in &prepared_records {
+            nested_decomposition::validate_declared_relationship_targets(
+                map,
+                &physical_drawer_name,
+                &declared_relationship_constraints,
+                context,
+            )?;
+        }
         let mut full_records = Vec::with_capacity(prepared_records.len());
         let mut reverse_records = Vec::with_capacity(prepared_records.len());
 
@@ -310,6 +320,12 @@ impl WardrobeEngine {
             )?;
             let mut relationship_constraints =
                 Self::read_lock(&drawer_handle)?.relationship_constraints();
+            nested_decomposition::validate_declared_relationship_targets(
+                &map,
+                &physical_drawer_name,
+                &relationship_constraints,
+                context,
+            )?;
             nested_decomposition::register_inline_relationship_aliases(
                 &map,
                 &mut relationship_constraints,
