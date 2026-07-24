@@ -2346,6 +2346,7 @@ fn us_033_find_by_filter_applies_sorting_before_offset_and_limit() {
                 order_direction: Some(OrderDirection::Descending),
                 offset: Some(1),
                 limit: Some(2),
+                ..QueryModifiers::default()
             }),
         ),
     )
@@ -2401,6 +2402,7 @@ fn us_033_sorting_pushes_missing_and_mixed_type_fields_to_the_end() {
                 order_direction: Some(OrderDirection::Descending),
                 offset: None,
                 limit: None,
+                ..QueryModifiers::default()
             }),
         ),
     )
@@ -2418,7 +2420,7 @@ fn us_033_sorting_pushes_missing_and_mixed_type_fields_to_the_end() {
 }
 
 #[test]
-fn us_033_count_ignores_query_pagination_modifiers() {
+fn us_033_count_applies_query_pagination_modifiers() {
     let database = TempDatabase::new("us_033_count_ignores_modifiers");
     let database_directory = database.path.to_string_lossy().into_owned();
     let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
@@ -2445,11 +2447,89 @@ fn us_033_count_ignores_query_pagination_modifiers() {
                 order_direction: Some(OrderDirection::Descending),
                 offset: Some(1),
                 limit: Some(1),
+                ..QueryModifiers::default()
             }),
         )
         .expect("count should succeed");
 
-    assert_eq!(count, 3);
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn us_145_cursor_and_page_pagination_are_deterministic() {
+    let database = TempDatabase::new("us_145_cursor_and_page_pagination");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    for (id, rank) in [("beta", 10), ("alpha", 10), ("gamma", 20)] {
+        engine
+            .upsert(
+                json!({"_id": format!("@book:{id}"), "rank": rank}),
+                OperationFilter::drawer("book"),
+                None::<OperationOptions>,
+            )
+            .expect("book should upsert");
+    }
+
+    let first_page = engine
+        .read(
+            OperationFilter::drawer("book"),
+            OperationOptions::new()
+                .order_by("rank")
+                .page(1)
+                .page_size(2),
+        )
+        .expect("first page should succeed");
+    let ReadResult::Page(first_page) = first_page else {
+        panic!("page options should return pagination metadata");
+    };
+    assert_eq!(
+        first_page.records.iter().map(|record| record["_id"].as_str()).collect::<Vec<_>>(),
+        vec![Some("alpha"), Some("beta")]
+    );
+    assert_eq!(first_page.pagination.page, Some(1));
+    assert_eq!(first_page.pagination.page_size, 2);
+    assert!(first_page.pagination.has_more);
+    let cursor = first_page
+        .pagination
+        .next_cursor
+        .expect("first page should provide a continuation cursor");
+
+    let second_page = engine
+        .read(
+            OperationFilter::drawer("book"),
+            OperationOptions::new()
+                .order_by("rank")
+                .cursor(cursor)
+                .page_size(2),
+        )
+        .expect("cursor continuation should succeed");
+    let ReadResult::Page(second_page) = second_page else {
+        panic!("cursor options should return pagination metadata");
+    };
+    assert_eq!(second_page.records, vec![json!({"_id": "gamma", "rank": 20})]);
+    assert_eq!(second_page.pagination.page, None);
+    assert!(!second_page.pagination.has_more);
+    assert_eq!(second_page.pagination.next_cursor, None);
+
+    let count = engine
+        .count(
+            OperationFilter::drawer("book"),
+            OperationOptions::new()
+                .order_by("rank")
+                .page(1)
+                .page_size(2),
+        )
+        .expect("page-aware count should succeed");
+    assert_eq!(count, 2);
+
+    let error = engine
+        .read(
+            OperationFilter::drawer("book"),
+            OperationOptions::new().page(1).page_size(2),
+        )
+        .expect_err("pagination without explicit ordering should fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]

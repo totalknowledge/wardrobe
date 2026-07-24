@@ -11,10 +11,11 @@ pub use engine::{
     AlterRequest, BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command,
     CommandResult, CompactMode, CompactRequest, CreateRequest, CreateResult, DeleteResult,
     DrawerInspectionMetrics, DropRequest, InspectResult, OperationFilter, OperationOptions,
-    OrderDirection, PermissionRequest, PermissionScopeDescriptor, QueryModifiers, ReadResult,
-    RestoreReport, ReturnShape, StatusRequest, StatusRequestOutput, StorageCoordinate,
-    StorageDiagnosis, StorageInventory, StorageLocator, StorageScope, TypedStatusRequest,
-    UpsertResult, WardrobeEngine, WardrobeEngineBuilder,
+    OrderDirection, PaginatedReadResult, PaginationMetadata, PermissionRequest,
+    PermissionScopeDescriptor, QueryModifiers, ReadResult, RestoreReport, ReturnShape,
+    StatusRequest, StatusRequestOutput, StorageCoordinate, StorageDiagnosis, StorageInventory,
+    StorageLocator, StorageScope, TypedStatusRequest, UpsertResult, WardrobeEngine,
+    WardrobeEngineBuilder,
 };
 pub use wrdb_lib::application_logging::{
     ApplicationLogDestination, ApplicationLogEvent, ApplicationLogFormat, ApplicationLogLevel,

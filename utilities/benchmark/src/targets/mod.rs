@@ -1,6 +1,7 @@
 pub(crate) mod mongodb;
 pub(crate) mod mysql;
 pub(crate) mod neo4j;
+pub(crate) mod postgres;
 pub(crate) mod redb;
 pub(crate) mod sqlite;
 pub(crate) mod wardrobe_embedded;
@@ -9,6 +10,7 @@ pub(crate) mod wardrobe_remote;
 pub(crate) use mongodb::MongoTarget;
 pub(crate) use mysql::MySqlTarget;
 pub(crate) use neo4j::Neo4jTarget;
+pub(crate) use postgres::PostgresTarget;
 pub(crate) use redb::RedbTarget;
 pub(crate) use sqlite::SqliteTarget;
 pub(crate) use wardrobe_embedded::WardrobeTarget;
@@ -16,6 +18,7 @@ pub(crate) use wardrobe_embedded::WardrobeTarget;
 use crate::config::{
     DEFAULT_MYSQL_CREDENTIALS_FILE, DEFAULT_MYSQL_PASSWORD_ENV, DEFAULT_MYSQL_USER_ENV,
     DEFAULT_NEO4J_CREDENTIALS_FILE, DEFAULT_NEO4J_PASSWORD_ENV, DEFAULT_NEO4J_USER_ENV,
+    DEFAULT_POSTGRES_CREDENTIALS_FILE, DEFAULT_POSTGRES_PASSWORD_ENV, DEFAULT_POSTGRES_USER_ENV,
     LibraryProfile,
 };
 use crate::engine::{PhaseRecorder, ProgressReporter};
@@ -112,6 +115,14 @@ pub(crate) fn read_default_neo4j_credentials() -> io::Result<ServiceCredentials>
     )
 }
 
+pub(crate) fn read_default_postgres_credentials() -> io::Result<ServiceCredentials> {
+    read_credentials_file(
+        DEFAULT_POSTGRES_CREDENTIALS_FILE,
+        DEFAULT_POSTGRES_USER_ENV,
+        DEFAULT_POSTGRES_PASSWORD_ENV,
+    )
+}
+
 pub(crate) fn read_credentials_file(
     path: &str,
     user_env: &str,
@@ -166,6 +177,7 @@ pub(crate) fn expect_pointers(result: CommandResult) -> io::Result<()> {
 pub(crate) fn expect_records(result: CommandResult) -> io::Result<Vec<Value>> {
     match result {
         CommandResult::Read(ReadResult::Records(records)) => Ok(records),
+        CommandResult::Read(ReadResult::Page(page)) => Ok(page.records),
         other => unexpected_wardrobe_result("records", other),
     }
 }
@@ -176,6 +188,9 @@ pub(crate) fn expect_record(result: CommandResult) -> io::Result<Value> {
         CommandResult::Read(ReadResult::Records(records)) if records.len() == 1 => {
             Ok(records.into_iter().next().unwrap_or(Value::Null))
         }
+        CommandResult::Read(ReadResult::Page(page)) if page.records.len() == 1 => {
+            Ok(page.records.into_iter().next().unwrap_or(Value::Null))
+        }
         other => unexpected_wardrobe_result("single record", other),
     }
 }
@@ -184,6 +199,7 @@ pub(crate) fn expect_missing_record(result: CommandResult) -> io::Result<()> {
     match result {
         CommandResult::Read(ReadResult::Record(None)) => Ok(()),
         CommandResult::Read(ReadResult::Records(records)) if records.is_empty() => Ok(()),
+        CommandResult::Read(ReadResult::Page(page)) if page.records.is_empty() => Ok(()),
         other => unexpected_wardrobe_result("missing record", other),
     }
 }

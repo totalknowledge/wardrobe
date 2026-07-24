@@ -30,6 +30,7 @@ The benchmark directory includes helper scripts for starting the server-backed c
 
 ```bash
 bash utilities/benchmark/start-mysql-docker.sh
+bash utilities/benchmark/start-postgres-docker.sh
 bash utilities/benchmark/start-mongodb-docker.sh
 bash utilities/benchmark/start-neo4j-docker.sh
 bash utilities/benchmark/start-wardrobe-docker.sh
@@ -42,6 +43,11 @@ Useful examples:
 ```bash
 WARDROBE_BENCH_INIT_SCHEMA=1 bash utilities/benchmark/start-mysql-docker.sh
 cargo run -p wardrobe-benchmark -- --targets mysql
+```
+
+```bash
+bash utilities/benchmark/start-postgres-docker.sh
+cargo run -p wardrobe-benchmark -- --targets postgres
 ```
 
 ```bash
@@ -70,11 +76,14 @@ Targets:
 - `redb` uses the in-process pure Rust embedded key-value database with typed tables and native multimap secondary indexes.
 - `mongodb` uses a persistent native MongoDB Rust client against `--mongo-uri` and `--mongo-database`.
 - `mysql` uses a persistent native MySQL Rust connection against `--mysql-host`, `--mysql-port`, and `--mysql-database`.
+- `postgres` uses a persistent native PostgreSQL Rust connection against `--postgres-host`, `--postgres-port`, and `--postgres-database`.
 - `neo4j` uses a persistent native Neo4j Rust driver against `--neo4j-uri`, `--neo4j-database`, `--neo4j-user`, and `--neo4j-password-env`.
 
 The MySQL helper creates a dedicated `wardrobe_benchmark` user and writes `target/wardrobe-benchmark/mysql-credentials.env`, which the benchmark reads by default. If neither the env vars nor the credentials file exists, the benchmark still sends the standard helper password `wardrobe_benchmark`. For custom credentials, set `WARDROBE_BENCH_MYSQL_USER` and `WARDROBE_BENCH_MYSQL_PASSWORD`, or pass `--mysql-user` and `--mysql-password-env <VAR>`. Use `--mysql-no-password` only for intentionally unauthenticated MySQL targets.
 
 The Rust MySQL dependency is built with only its runtime compression, native TLS, and connection-pool features. Unused derive macros and their future-incompatible transitive dependency are intentionally disabled.
+
+The PostgreSQL helper creates the configured database/user at container initialization and writes `target/wardrobe-benchmark/postgres-credentials.env`, which the benchmark reads by default. For custom credentials, set `WARDROBE_BENCH_POSTGRES_USER` and `WARDROBE_BENCH_POSTGRES_PASSWORD`, or pass `--postgres-user` and `--postgres-password-env <VAR>`.
 
 The Neo4j helper writes `target/wardrobe-benchmark/neo4j-credentials.env`, which the benchmark reads by default. If neither the env vars nor the credentials file exists, the benchmark still sends the standard helper password `wardrobe_benchmark`. For custom credentials, set `WARDROBE_BENCH_NEO4J_USER` and `WARDROBE_BENCH_NEO4J_PASSWORD`, or pass `--neo4j-user` and `--neo4j-password-env <VAR>`.
 

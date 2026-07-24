@@ -204,6 +204,7 @@ mod tests {
                         offset: None,
                         order_by: None,
                         order_direction: None,
+                        ..QueryModifiers::default()
                     }),
                 )
                 .expect("count should work"),

@@ -1031,6 +1031,10 @@ fn run_read_command(client: &WardrobeClient, parts: &[String], pretty: bool) -> 
             pub_normalize_record_ids(&mut records);
             print_json(&records, pretty)
         }
+        ReadResult::Page(mut page) => {
+            pub_normalize_record_ids(&mut page.records);
+            print_json(&page, pretty)
+        }
         ReadResult::Record(Some(record)) => {
             let mut records = vec![record];
             pub_normalize_record_ids(&mut records);
@@ -2146,12 +2150,15 @@ mod tests {
             "read".to_string(),
             "armory/public/gem".to_string(),
             "{}".to_string(),
-            r#"{"limit":2,"offset":1,"order_by":"power","order_direction":"desc"}"#.to_string(),
+            r#"{"limit":2,"offset":1,"order_by":"power","order_direction":"desc","cursor":"next","page":3,"page_size":5}"#.to_string(),
         ];
         let options = operation_options(&parts, 3, "read options").expect("options parse");
         assert_eq!(options.limit, Some(2));
         assert_eq!(options.offset, Some(1));
         assert_eq!(options.order_by.as_deref(), Some("power"));
+        assert_eq!(options.cursor.as_deref(), Some("next"));
+        assert_eq!(options.page, Some(3));
+        assert_eq!(options.page_size, Some(5));
         assert_eq!(
             options.order_direction,
             Some(wardrobe_core::OrderDirection::Descending)

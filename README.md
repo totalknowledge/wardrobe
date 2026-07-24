@@ -167,10 +167,10 @@ fn query(client: &WardrobeClient) -> std::io::Result<()> {
         OperationOptions::new()
             .order_by("name")
             .order_direction(OrderDirection::Ascending)
-            .offset(0)
-            .limit(25),
+          .page(1)
+          .page_size(25),
     )? {
-        ReadResult::Records(records) => records,
+        ReadResult::Page(page) => page.records,
         _ => Vec::new(),
     };
 

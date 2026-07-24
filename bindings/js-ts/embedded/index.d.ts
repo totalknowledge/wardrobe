@@ -8,7 +8,22 @@ export interface OperationOptions {
   offset?: number;
   orderBy?: string;
   orderDirection?: string;
+  cursor?: string;
+  page?: number;
+  pageSize?: number;
   includeDiagnostics?: boolean;
+}
+
+export interface PaginationMetadata {
+  next_cursor: string | null;
+  has_more: boolean;
+  page: number | null;
+  page_size: number;
+}
+
+export interface PaginatedReadResult {
+  records: any[];
+  pagination: PaginationMetadata;
 }
 
 export type OperationFilter =

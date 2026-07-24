@@ -13,6 +13,7 @@ fn read_records(client: &WardrobeClient, filter: OperationFilter) -> Vec<serde_j
         .expect("read should succeed")
     {
         ReadResult::Records(records) => records,
+        ReadResult::Page(page) => page.records,
         other => panic!("expected records, got {other:?}"),
     }
 }

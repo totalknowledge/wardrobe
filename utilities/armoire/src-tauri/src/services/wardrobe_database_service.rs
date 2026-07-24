@@ -160,6 +160,7 @@ impl WardrobeDatabaseService {
             let options = OperationOptions::default().hydrate(true);
             match client.read(filter, options) {
                 Ok(ReadResult::Records(records)) => Ok(records),
+                Ok(ReadResult::Page(page)) => Ok(page.records),
                 Ok(ReadResult::Record(Some(record))) => Ok(vec![record]),
                 Ok(_) => Ok(vec![]),
                 Err(error) => Err(io::Error::new(io::ErrorKind::Other, error.to_string())),
@@ -318,6 +319,7 @@ impl WardrobeDatabaseService {
         let options = OperationOptions::default().hydrate(true);
         match engine.read(filter, options) {
             Ok(ReadResult::Records(records)) => Ok(records),
+            Ok(ReadResult::Page(page)) => Ok(page.records),
             Ok(ReadResult::Record(Some(record))) => Ok(vec![record]),
             Ok(_) => Ok(vec![]),
             Err(error) => Err(io::Error::new(io::ErrorKind::Other, error.to_string())),
@@ -413,6 +415,7 @@ impl WardrobeDatabaseService {
             OperationOptions::default().hydrate(true),
         ) {
             Ok(ReadResult::Records(records)) => records,
+            Ok(ReadResult::Page(page)) => page.records,
             Ok(ReadResult::Record(Some(record))) => vec![record],
             _ => vec![],
         };

@@ -59,6 +59,9 @@ def normalize_options(options=None):
         "order_direction": normalize_order_direction(
             options.get("order_direction", options.get("orderDirection"))
         ),
+        "cursor": options.get("cursor"),
+        "page": options.get("page"),
+        "page_size": options.get("page_size", options.get("pageSize")),
         "include_diagnostics": options.get(
             "include_diagnostics", options.get("includeDiagnostics")
         ),

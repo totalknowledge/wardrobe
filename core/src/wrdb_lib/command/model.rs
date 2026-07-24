@@ -232,6 +232,9 @@ pub struct OperationOptions {
     pub offset: Option<usize>,
     pub order_by: Option<String>,
     pub order_direction: Option<OrderDirection>,
+    pub cursor: Option<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
     pub include_diagnostics: Option<bool>,
 }
 
@@ -285,6 +288,21 @@ impl OperationOptions {
         self
     }
 
+    pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    pub fn page(mut self, page: usize) -> Self {
+        self.page = Some(page);
+        self
+    }
+
+    pub fn page_size(mut self, page_size: usize) -> Self {
+        self.page_size = Some(page_size);
+        self
+    }
+
     pub fn include_diagnostics(mut self, include_diagnostics: bool) -> Self {
         self.include_diagnostics = Some(include_diagnostics);
         self
@@ -335,6 +353,9 @@ impl OperationOptions {
                         }
                     })
                 }
+                "cursor" => options.cursor = Some(expect_string(&key, &value)?),
+                "page" => options.page = Some(expect_usize(&key, &value)?),
+                "page_size" => options.page_size = Some(expect_usize(&key, &value)?),
                 "include_diagnostics" => {
                     options.include_diagnostics = Some(expect_bool(&key, &value)?)
                 }
@@ -354,6 +375,9 @@ impl OperationOptions {
             && self.offset.is_none()
             && self.order_by.is_none()
             && self.order_direction.is_none()
+            && self.cursor.is_none()
+            && self.page.is_none()
+            && self.page_size.is_none()
         {
             return None;
         }
@@ -362,6 +386,9 @@ impl OperationOptions {
             offset: self.offset,
             order_by: self.order_by.clone(),
             order_direction: self.order_direction,
+            cursor: self.cursor.clone(),
+            page: self.page,
+            page_size: self.page_size,
         })
     }
 
@@ -377,6 +404,9 @@ impl From<QueryModifiers> for OperationOptions {
             offset: modifiers.offset,
             order_by: modifiers.order_by,
             order_direction: modifiers.order_direction,
+            cursor: modifiers.cursor,
+            page: modifiers.page,
+            page_size: modifiers.page_size,
             ..Self::default()
         }
     }
@@ -472,8 +502,23 @@ pub enum InspectResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaginationMetadata {
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub page: Option<usize>,
+    pub page_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaginatedReadResult {
+    pub records: Vec<Value>,
+    pub pagination: PaginationMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReadResult {
     Records(Vec<Value>),
+    Page(PaginatedReadResult),
     Record(Option<Value>),
     Pointers(Vec<String>),
     Exists(bool),
@@ -1167,6 +1212,7 @@ mod tests {
             offset: Some(0),
             order_by: Some("name".to_string()),
             order_direction: Some(OrderDirection::Ascending),
+            ..QueryModifiers::default()
         });
         assert_eq!(from_modifiers.limit, Some(1));
         assert_eq!(OperationOptions::from(()), OperationOptions::default());

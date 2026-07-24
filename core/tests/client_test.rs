@@ -437,6 +437,7 @@ fn client_network_driver_sends_commands_and_unpacks_results() {
         order_direction: Some(OrderDirection::Ascending),
         limit: Some(10),
         offset: Some(0),
+        ..QueryModifiers::default()
     };
     let (connection, handle) = spawn_tcp_protocol_server(vec![
         (

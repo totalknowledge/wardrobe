@@ -1,5 +1,9 @@
 use std::io::{Cursor, ErrorKind, Write};
-use wardrobe_core::{PROTOCOL_MAGIC, ProtocolFrame, ProtocolOpcode};
+use serde_json::json;
+use wardrobe_core::{
+    Command, CommandResult, OperationFilter, OperationOptions, PaginatedReadResult,
+    PaginationMetadata, PROTOCOL_MAGIC, ProtocolFrame, ProtocolOpcode, ReadResult,
+};
 
 #[derive(Default)]
 struct RecordingWriter {
@@ -102,4 +106,32 @@ fn protocol_frame_reports_truncated_payload() {
         ProtocolFrame::read_from_stream(&mut stream).expect_err("short payload should reject");
 
     assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn cursor_page_options_and_metadata_round_trip_through_protocol_payloads() {
+    let command = Command::Read {
+        filter: OperationFilter::drawer("book"),
+        options: OperationOptions::new()
+            .order_by("rank")
+            .page(2)
+            .page_size(25)
+            .cursor("cursor-token"),
+    };
+    let command_json = serde_json::to_vec(&command).expect("command should serialize");
+    let decoded_command: Command = serde_json::from_slice(&command_json).expect("command should deserialize");
+    assert_eq!(decoded_command, command);
+
+    let result = CommandResult::Read(ReadResult::Page(PaginatedReadResult {
+        records: vec![json!({"_id": "book-25", "rank": 25})],
+        pagination: PaginationMetadata {
+            next_cursor: Some("cursor-next".to_string()),
+            has_more: true,
+            page: Some(2),
+            page_size: 25,
+        },
+    }));
+    let result_json = serde_json::to_vec(&result).expect("result should serialize");
+    let decoded_result: CommandResult = serde_json::from_slice(&result_json).expect("result should deserialize");
+    assert_eq!(decoded_result, result);
 }

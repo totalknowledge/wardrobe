@@ -443,7 +443,7 @@ impl WardrobeEngine {
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
         hydrate: bool,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<query::QueryRecords> {
         let filter_map = query::filter_map(&filter)?;
         let physical_drawer_name =
             routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
@@ -467,7 +467,7 @@ impl WardrobeEngine {
         records.retain(|record| {
             query::record_matches_filter(record, filter_map, context.drawer_namespace)
         });
-        query::apply_query_modifiers(&mut records, modifiers.as_ref());
+        let pagination = query::apply_query_modifiers(&mut records, modifiers.as_ref())?;
         if hydrate {
             let mut hydration_cache = RequestHydrationCache::default();
             hydration::hydrate_records_with_cache(
@@ -493,56 +493,54 @@ impl WardrobeEngine {
             &mut records,
         )?;
 
-        Ok(records)
+        Ok(query::QueryRecords {
+            records,
+            pagination,
+        })
     }
 
     pub(super) fn count_in_database(
         database_core: &RwLock<Database>,
         drawer_name: &str,
         filter: Option<Value>,
-        _modifiers: Option<QueryModifiers>,
+        modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
     ) -> Result<usize> {
         let physical_drawer_name =
             routing::scoped_drawer_name(drawer_name, context.drawer_namespace);
-        let Some(filter) = filter else {
-            let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+        let mut records = if let Some(filter) = filter {
+            let filter_map = query::filter_map(&filter)?;
+            if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
                 database_core,
                 &physical_drawer_name,
                 "_id",
                 Vec::new(),
-            )?
-            else {
-                return Ok(0);
-            };
-
-            return Ok(Self::read_lock(&drawer)?.record_count());
-        };
-
-        let filter_map = query::filter_map(&filter)?;
-        let count = if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
+            )? {
+                let mut drawer = Self::write_lock(&drawer)?;
+                let mut records = if let Some(offsets) = drawer.indexed_candidate_offsets(filter_map)? {
+                    drawer.records_at_offsets_with_migration(offsets)?
+                } else {
+                    drawer.find_all_records_with_migration()?
+                };
+                records.retain(|record| {
+                    query::record_matches_filter(record, filter_map, context.drawer_namespace)
+                });
+                records
+            } else {
+                Vec::new()
+            }
+        } else if let Some(drawer) = Self::active_drawer_handle_or_load_from_disk(
             database_core,
             &physical_drawer_name,
             "_id",
             Vec::new(),
         )? {
-            let mut drawer = Self::write_lock(&drawer)?;
-            if let Some(offsets) = drawer.indexed_candidate_offsets(filter_map)? {
-                offsets.len()
-            } else {
-                drawer
-                    .find_all_records_with_migration()?
-                    .into_iter()
-                    .filter(|record| {
-                        query::record_matches_filter(record, filter_map, context.drawer_namespace)
-                    })
-                    .count()
-            }
+            Self::write_lock(&drawer)?.find_all_records_with_migration()?
         } else {
-            0
+            Vec::new()
         };
-
-        Ok(count)
+        query::apply_query_modifiers(&mut records, modifiers.as_ref())?;
+        Ok(records.len())
     }
 
     pub(super) fn vacuum_drawer_in_database(
@@ -1343,7 +1341,7 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
         hydrate: bool,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<query::QueryRecords> {
         WardrobeEngine::find_by_filter_in_database(
             database,
             drawer_name,

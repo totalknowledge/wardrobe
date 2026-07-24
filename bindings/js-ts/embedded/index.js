@@ -199,8 +199,14 @@ function unwrapReadResult(readResult) {
   if (Object.prototype.hasOwnProperty.call(readResult, 'Records')) {
     return readResult.Records;
   }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'Page')) {
+    return readResult.Page;
+  }
   if (Object.prototype.hasOwnProperty.call(readResult, 'records')) {
     return readResult.records;
+  }
+  if (Object.prototype.hasOwnProperty.call(readResult, 'page')) {
+    return readResult.page;
   }
   if (Object.prototype.hasOwnProperty.call(readResult, 'Record')) {
     return readResult.Record;
@@ -261,6 +267,9 @@ function normalizeOptions(options) {
     offset: options.offset !== undefined ? options.offset : null,
     order_by: options.orderBy !== undefined ? options.orderBy : null,
     order_direction: options.orderDirection !== undefined ? normalizeOrderDirection(options.orderDirection) : null,
+    cursor: options.cursor !== undefined ? options.cursor : null,
+    page: options.page !== undefined ? options.page : null,
+    page_size: options.pageSize !== undefined ? options.pageSize : null,
     include_diagnostics: options.includeDiagnostics !== undefined ? options.includeDiagnostics : null
   };
 }

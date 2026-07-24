@@ -278,6 +278,9 @@ pub limit: Option<usize>,
 pub offset: Option<usize>,
 pub order_by: Option<String>,
 pub order_direction: Option<OrderDirection>,
+pub cursor: Option<String>,
+pub page: Option<usize>,
+pub page_size: Option<usize>,
 pub include_diagnostics: Option<bool>,
 }
 ```
@@ -295,6 +298,9 @@ Serialized JSON equivalent:
 "offset": 0,
 "order_by": "name",
 "order_direction": "asc",
+"cursor": null,
+"page": 1,
+"page_size": 25,
 "include_diagnostics": false
 }
 ```
@@ -304,6 +310,9 @@ Rules:
 - Missing options use documented defaults.
 - Unknown options should produce a clear invalid input error.
 - Options must be normalized before execution reaches drawer-level operations.
+- Cursor and page pagination require `order_by` so ordering is deterministic; `_id` is the stable tie-breaker.
+- `page` is one-based and `page_size` defaults to `100` when either cursor or page pagination is requested.
+- Cursor/page pagination cannot be combined with `limit` or `offset`.
 
 ## Read
 
@@ -333,16 +342,31 @@ OperationOptions::new()
 )?;
 ```
 
+Page-based navigation:
+
+```rust
+let page = client.read(
+OperationFilter::query_in("book", json!({"author": "Tolkien"})),
+OperationOptions::new()
+.order_by("title")
+.page(1)
+.page_size(25),
+)?;
+```
+
 Current result shape:
 
 ```rust
 pub enum ReadResult {
 Records(Vec<Value>),
+Page(PaginatedReadResult),
 Record(Option<Value>),
 Pointers(Vec<String>),
 Exists(bool),
 }
 ```
+
+`PaginatedReadResult` contains `records` and `pagination`. The metadata includes `next_cursor`, `has_more`, the effective page when page navigation was used, and `page_size`. Pass `next_cursor` back with the same `order_by` and `order_direction` to continue a cursor traversal. `count` applies the same query modifiers and returns the number of records in the selected page.
 
 Rules:
 

@@ -1,8 +1,8 @@
 use super::{
     AlterRequest, BackupArchive, CheckReport, Command, CommandResult, CompactMode, CompactRequest,
     CreateRequest, CreateResult, DeleteResult, DrawerInspectionMetrics, DropRequest, InspectResult,
-    OperationFilter, OperationOptions, ReadResult, RestoreReport, StatusRequest, StorageDiagnosis,
-    UpsertResult,
+    OperationFilter, OperationOptions, PaginatedReadResult, ReadResult, RestoreReport,
+    StatusRequest, StorageDiagnosis, UpsertResult,
 };
 use crate::engine::{
     OperationSelection, ReturnShapeResolution, UpsertContext, merge_payload_into_record,
@@ -11,7 +11,7 @@ use crate::engine::{
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{VacuumReport, hydration};
 use crate::wrdb_lib::pointer;
-use crate::wrdb_lib::query::QueryModifiers;
+use crate::wrdb_lib::query::{QueryModifiers, QueryRecords};
 use crate::wrdb_lib::registry::CatalogRegistry;
 use crate::wrdb_lib::routing::ExecutionContext;
 use crate::wrdb_lib::storage::{StorageCoordinate, StorageInventory, StorageLocator, StorageScope};
@@ -111,7 +111,7 @@ pub(crate) trait DatabaseCommandExecutor {
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
         hydrate: bool,
-    ) -> Result<Vec<Value>>;
+    ) -> Result<QueryRecords>;
 
     fn count_in_database(
         database: &RwLock<Database>,
@@ -497,7 +497,7 @@ where
         )
     })?;
     let matched_records =
-        E::find_by_filter_in_database(database, drawer_name, query, None, context, false)?;
+        E::find_by_filter_in_database(database, drawer_name, query, None, context, false)?.records;
     if matched_records.is_empty() {
         if options.create_if_missing == Some(false) {
             return Ok(Vec::new());
@@ -548,18 +548,21 @@ where
 {
     let selection = OperationSelection::from_filter(filter)?;
     let hydrate = options.hydrate.unwrap_or(true);
-    let mut records = if !selection.pointers.is_empty() {
+    let query_records = if !selection.pointers.is_empty() {
         let mut records = Vec::new();
         for pointer in selection.resolved_pointers()? {
             if let Some(record) = E::find_by_id_in_database(database, &pointer, context, hydrate)? {
                 records.push(record);
             }
         }
-        crate::wrdb_lib::query::apply_query_modifiers(
+        let pagination = crate::wrdb_lib::query::apply_query_modifiers(
             &mut records,
             options.query_modifiers().as_ref(),
-        );
-        records
+        )?;
+        QueryRecords {
+            records,
+            pagination,
+        }
     } else {
         let drawer_name = selection.required_drawer("read")?;
         if let Some(query) = selection.query.clone() {
@@ -573,15 +576,27 @@ where
             )?
         } else {
             let mut records = E::find_all_in_database(database, &drawer_name, context, hydrate)?;
-            crate::wrdb_lib::query::apply_query_modifiers(
+            let pagination = crate::wrdb_lib::query::apply_query_modifiers(
                 &mut records,
                 options.query_modifiers().as_ref(),
-            );
-            records
+            )?;
+            QueryRecords {
+                records,
+                pagination,
+            }
         }
     };
 
+    let mut records = query_records.records;
+    let pagination = query_records.pagination;
+
     let read_shape = resolve_read_shape(options.return_shape, &selection);
+    if pagination.is_some() && !matches!(&read_shape, ReturnShapeResolution::Records) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cursor and page pagination require the records return shape",
+        ));
+    }
     if hydrate && selection.pointers.is_empty() {
         match read_shape {
             ReturnShapeResolution::Record | ReturnShapeResolution::Records => {
@@ -593,7 +608,13 @@ where
 
     let result = match read_shape {
         ReturnShapeResolution::Record => ReadResult::Record(records.into_iter().next()),
-        ReturnShapeResolution::Records => ReadResult::Records(records),
+        ReturnShapeResolution::Records => match pagination {
+            Some(pagination) => ReadResult::Page(PaginatedReadResult {
+                records,
+                pagination,
+            }),
+            None => ReadResult::Records(records),
+        },
         ReturnShapeResolution::Pointers => ReadResult::Pointers(
             records
                 .iter()
@@ -631,13 +652,15 @@ where
 {
     let selection = OperationSelection::from_filter(filter)?;
     if !selection.pointers.is_empty() {
-        let mut count = 0;
+        let modifiers = options.query_modifiers();
+        let mut records = Vec::new();
         for pointer in selection.resolved_pointers()? {
-            if E::find_by_id_in_database(database, &pointer, context, false)?.is_some() {
-                count += 1;
+            if let Some(record) = E::find_by_id_in_database(database, &pointer, context, false)? {
+                records.push(record);
             }
         }
-        return Ok(CommandResult::Count(count));
+        crate::wrdb_lib::query::apply_query_modifiers(&mut records, modifiers.as_ref())?;
+        return Ok(CommandResult::Count(records.len()));
     }
     let drawer_name = selection.required_drawer("count")?;
     E::count_in_database(
@@ -1168,12 +1191,15 @@ mod tests {
             modifiers: Option<QueryModifiers>,
             _context: ExecutionContext<'_>,
             _hydrate: bool,
-        ) -> Result<Vec<Value>> {
-            Ok(vec![json!({
-                "drawer": drawer_name,
-                "filter": filter,
-                "has_modifiers": modifiers.is_some()
-            })])
+        ) -> Result<QueryRecords> {
+            Ok(QueryRecords {
+                records: vec![json!({
+                    "drawer": drawer_name,
+                    "filter": filter,
+                    "has_modifiers": modifiers.is_some()
+                })],
+                pagination: None,
+            })
         }
 
         fn count_in_database(

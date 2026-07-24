@@ -30,6 +30,12 @@ pub(crate) const DEFAULT_NEO4J_USER_ENV: &str = "WARDROBE_BENCH_NEO4J_USER";
 pub(crate) const DEFAULT_NEO4J_PASSWORD_ENV: &str = "WARDROBE_BENCH_NEO4J_PASSWORD";
 pub(crate) const DEFAULT_NEO4J_CREDENTIALS_FILE: &str =
     "target/wardrobe-benchmark/neo4j-credentials.env";
+pub(crate) const DEFAULT_POSTGRES_USER: &str = "wardrobe_benchmark";
+pub(crate) const DEFAULT_POSTGRES_PASSWORD: &str = "wardrobe_benchmark";
+pub(crate) const DEFAULT_POSTGRES_USER_ENV: &str = "WARDROBE_BENCH_POSTGRES_USER";
+pub(crate) const DEFAULT_POSTGRES_PASSWORD_ENV: &str = "WARDROBE_BENCH_POSTGRES_PASSWORD";
+pub(crate) const DEFAULT_POSTGRES_CREDENTIALS_FILE: &str =
+    "target/wardrobe-benchmark/postgres-credentials.env";
 pub(crate) const DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS: u64 = 5;
 pub(crate) const DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH: usize = 128;
 
@@ -64,6 +70,11 @@ pub struct BenchmarkConfig {
     pub neo4j_database: String,
     pub neo4j_user: String,
     pub neo4j_password_env: String,
+    pub postgres_host: String,
+    pub postgres_port: u16,
+    pub postgres_database: String,
+    pub postgres_user: Option<String>,
+    pub postgres_password_env: Option<String>,
 }
 
 impl Default for BenchmarkConfig {
@@ -92,6 +103,11 @@ impl Default for BenchmarkConfig {
             neo4j_database: "neo4j".to_string(),
             neo4j_user: DEFAULT_NEO4J_USER.to_string(),
             neo4j_password_env: DEFAULT_NEO4J_PASSWORD_ENV.to_string(),
+            postgres_host: "127.0.0.1".to_string(),
+            postgres_port: 5432,
+            postgres_database: "wardrobe_benchmark".to_string(),
+            postgres_user: None,
+            postgres_password_env: Some(DEFAULT_POSTGRES_PASSWORD_ENV.to_string()),
         }
     }
 }
@@ -211,6 +227,25 @@ impl BenchmarkConfig {
                 "--neo4j-password-env" => {
                     config.neo4j_password_env = required_value(&mut args, &arg)?;
                 }
+                "--postgres-host" => config.postgres_host = required_value(&mut args, &arg)?,
+                "--postgres-port" => {
+                    config.postgres_port = required_value(&mut args, &arg)?
+                        .parse::<u16>()
+                        .map_err(|error| {
+                            Error::new(
+                                ErrorKind::InvalidInput,
+                                format!("Invalid --postgres-port value: {error}"),
+                            )
+                        })?;
+                }
+                "--postgres-database" => {
+                    config.postgres_database = required_value(&mut args, &arg)?
+                }
+                "--postgres-user" => config.postgres_user = Some(required_value(&mut args, &arg)?),
+                "--postgres-password-env" => {
+                    config.postgres_password_env = Some(required_value(&mut args, &arg)?)
+                }
+                "--postgres-no-password" => config.postgres_password_env = None,
                 unknown => {
                     return Err(Error::new(
                         ErrorKind::InvalidInput,
@@ -384,7 +419,7 @@ impl LibraryProfile {
 pub fn print_help() {
     println!("wardrobe-benchmark");
     println!(
-        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,neo4j"
+        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,postgres,neo4j"
     );
     println!(
         "  --work-dir <path>               Benchmark run directory root, default {DEFAULT_WORK_DIR}"
@@ -443,6 +478,12 @@ pub fn print_help() {
         "  --mysql-password-env <var>      Env var containing the MySQL password, default WARDROBE_BENCH_MYSQL_PASSWORD"
     );
     println!("  --mysql-no-password             Connect to MySQL without a password");
+    println!("  --postgres-host <host>          PostgreSQL host, default 127.0.0.1");
+    println!("  --postgres-port <port>          PostgreSQL port, default 5432");
+    println!("  --postgres-database <name>      PostgreSQL database, default wardrobe_benchmark");
+    println!("  --postgres-user <user>          Optional PostgreSQL username, default wardrobe_benchmark");
+    println!("  --postgres-password-env <var>   Env var containing the PostgreSQL password, default WARDROBE_BENCH_POSTGRES_PASSWORD");
+    println!("  --postgres-no-password          Connect to PostgreSQL without a password");
     println!("  --neo4j-uri <host:port>         Neo4j Bolt endpoint, default 127.0.0.1:7687");
     println!("  --neo4j-database <name>         Neo4j database name, default neo4j");
     println!("  --neo4j-user <user>             Neo4j username, default neo4j");
@@ -463,6 +504,7 @@ pub(crate) fn parse_targets(raw: &str) -> io::Result<Vec<TargetSpec>> {
             "redb" => Ok(TargetSpec::Redb),
             "mongodb" | "mongo" => Ok(TargetSpec::MongoDb),
             "mysql" | "mariadb" => Ok(TargetSpec::MySql),
+            "postgres" | "postgresql" => Ok(TargetSpec::Postgres),
             "neo4j" | "neo" => Ok(TargetSpec::Neo4j),
             "" => Err(Error::new(
                 ErrorKind::InvalidInput,

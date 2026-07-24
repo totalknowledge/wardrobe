@@ -275,7 +275,7 @@ mod tests {
     fn benchmark_config_parses_full_option_matrix() {
         let ParseOutcome::Run(config) = BenchmarkConfig::from_args([
             "--targets".to_string(),
-            "wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,neo4j".to_string(),
+            "wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,postgres,neo4j".to_string(),
             "--work-dir".to_string(),
             "target/custom-bench".to_string(),
             "--output".to_string(),
@@ -329,6 +329,16 @@ mod tests {
             "benchmark_user".to_string(),
             "--mysql-password-env".to_string(),
             "BENCH_PASSWORD".to_string(),
+            "--postgres-host".to_string(),
+            "postgres.local".to_string(),
+            "--postgres-port".to_string(),
+            "5433".to_string(),
+            "--postgres-database".to_string(),
+            "postgres_suite".to_string(),
+            "--postgres-user".to_string(),
+            "postgres_user".to_string(),
+            "--postgres-password-env".to_string(),
+            "POSTGRES_PASSWORD".to_string(),
             "--neo4j-uri".to_string(),
             "127.0.0.1:8687".to_string(),
             "--neo4j-database".to_string(),
@@ -393,6 +403,14 @@ mod tests {
         assert_eq!(
             config.mysql_password_env,
             Some("BENCH_PASSWORD".to_string())
+        );
+        assert_eq!(config.postgres_host, "postgres.local");
+        assert_eq!(config.postgres_port, 5433);
+        assert_eq!(config.postgres_database, "postgres_suite");
+        assert_eq!(config.postgres_user, Some("postgres_user".to_string()));
+        assert_eq!(
+            config.postgres_password_env,
+            Some("POSTGRES_PASSWORD".to_string())
         );
         assert_eq!(config.neo4j_uri, "127.0.0.1:8687");
         assert_eq!(config.neo4j_database, "neo_suite");

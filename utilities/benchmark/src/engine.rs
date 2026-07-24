@@ -4,8 +4,8 @@ use crate::config::{
 };
 use crate::report::{BenchmarkReport, PhaseMetrics, TargetReport};
 use crate::targets::{
-    BenchmarkTarget, MongoTarget, MySqlTarget, Neo4jTarget, RedbTarget, SqliteTarget,
-    WardrobeTarget,
+    BenchmarkTarget, MongoTarget, MySqlTarget, Neo4jTarget, PostgresTarget, RedbTarget,
+    SqliteTarget, WardrobeTarget,
 };
 use crate::utils::unix_timestamp_micros;
 use std::fs;
@@ -21,6 +21,7 @@ pub enum TargetSpec {
     Redb,
     MongoDb,
     MySql,
+    Postgres,
     Neo4j,
 }
 
@@ -33,6 +34,7 @@ impl TargetSpec {
             Self::Redb,
             Self::MongoDb,
             Self::MySql,
+            Self::Postgres,
             Self::Neo4j,
         ]
     }
@@ -45,6 +47,7 @@ impl TargetSpec {
             Self::Redb => "redb (Pure Rust Embedded Key-Value Mode)",
             Self::MongoDb => "MongoDB (Document Store Base Comparison)",
             Self::MySql => "MySQL / MariaDB (Relational Pointer Base Comparison)",
+            Self::Postgres => "PostgreSQL (Relational Pointer Base Comparison)",
             Self::Neo4j => "Neo4j (Graph Database Base Comparison)",
         }
     }
@@ -498,6 +501,22 @@ pub(crate) fn build_target(
                 config.mysql_database.clone(),
                 config.mysql_user.clone(),
                 config.mysql_password_env.clone(),
+            )?))
+        }
+        TargetSpec::Postgres => {
+            progress.log(format!(
+                "{}: opening persistent PostgreSQL connection for {}:{} / database {}",
+                spec.label(),
+                config.postgres_host,
+                config.postgres_port,
+                config.postgres_database
+            ));
+            Ok(Box::new(PostgresTarget::new(
+                config.postgres_host.clone(),
+                config.postgres_port,
+                config.postgres_database.clone(),
+                config.postgres_user.clone(),
+                config.postgres_password_env.clone(),
             )?))
         }
         TargetSpec::Neo4j => {

@@ -27,8 +27,9 @@ pub use crate::wrdb_lib::command::{
     AlterRequest, BackupArchive, BackupArchiveFile, CheckEntry, CheckReport, Command,
     CommandResult, CompactMode, CompactRequest, CreateRequest, CreateResult, DeleteResult,
     DrawerInspectionMetrics, DropRequest, InspectResult, OperationFilter, OperationOptions,
-    PermissionRequest, PermissionScopeDescriptor, ReadResult, RestoreReport, ReturnShape,
-    StatusRequest, StatusRequestOutput, StorageDiagnosis, TypedStatusRequest, UpsertResult,
+    PaginatedReadResult, PaginationMetadata, PermissionRequest, PermissionScopeDescriptor,
+    ReadResult, RestoreReport, ReturnShape, StatusRequest, StatusRequestOutput, StorageDiagnosis,
+    TypedStatusRequest, UpsertResult,
 };
 pub use crate::wrdb_lib::query::{OrderDirection, QueryModifiers};
 pub use crate::wrdb_lib::storage::{
@@ -618,10 +619,28 @@ impl WardrobeEngine {
     {
         let options = options.into();
         let selection = OperationSelection::from_filter(filter.into())?;
-        let records = self.read_selection_records(&selection, &options)?;
-        match resolve_read_shape(options.return_shape, &selection) {
+        let query_records = self.read_selection_records(&selection, &options)?;
+        let read_shape = resolve_read_shape(options.return_shape, &selection);
+        if query_records.pagination.is_some()
+            && !matches!(&read_shape, ReturnShapeResolution::Records)
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cursor and page pagination require the records return shape",
+            ));
+        }
+        let records = query_records.records;
+        match read_shape {
             ReturnShapeResolution::Record => Ok(ReadResult::Record(records.into_iter().next())),
-            ReturnShapeResolution::Records => Ok(ReadResult::Records(records)),
+            ReturnShapeResolution::Records => match query_records.pagination {
+                Some(pagination) => Ok(ReadResult::Page(
+                    crate::wrdb_lib::command::PaginatedReadResult {
+                        records,
+                        pagination,
+                    },
+                )),
+                None => Ok(ReadResult::Records(records)),
+            },
             ReturnShapeResolution::Pointers => Ok(ReadResult::Pointers(
                 records
                     .iter()
@@ -640,7 +659,23 @@ impl WardrobeEngine {
         let options = options.into();
         let selection = OperationSelection::from_filter(filter.into())?;
         if !selection.pointers.is_empty() {
-            return self.count_existing_pointers(&selection);
+            let modifiers = options.query_modifiers();
+            if modifiers.is_none() {
+                return self.count_existing_pointers(&selection);
+            }
+            let mut records = Vec::new();
+            for pointer in selection.resolved_pointers()? {
+                if let Some(record) = Self::find_by_id_in_database(
+                    &self.database_core,
+                    &pointer,
+                    ExecutionContext::root(),
+                    false,
+                )? {
+                    records.push(record);
+                }
+            }
+            crate::wrdb_lib::query::apply_query_modifiers(&mut records, modifiers.as_ref())?;
+            return Ok(records.len());
         }
         let drawer_name = selection.required_drawer("count")?;
         Self::count_in_database(
@@ -837,7 +872,8 @@ impl WardrobeEngine {
             None,
             ExecutionContext::root(),
             false,
-        )?;
+        )?
+        .records;
         if matched_records.is_empty() {
             if options.create_if_missing == Some(false) {
                 return Ok(Vec::new());
@@ -883,13 +919,16 @@ impl WardrobeEngine {
         &self,
         selection: &OperationSelection,
         options: &OperationOptions,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<crate::wrdb_lib::query::QueryRecords> {
         if let Some(mut records) = self.read_structural_records(selection)? {
-            crate::wrdb_lib::query::apply_query_modifiers(
+            let pagination = crate::wrdb_lib::query::apply_query_modifiers(
                 &mut records,
                 options.query_modifiers().as_ref(),
-            );
-            return Ok(records);
+            )?;
+            return Ok(crate::wrdb_lib::query::QueryRecords {
+                records,
+                pagination,
+            });
         }
 
         if !selection.pointers.is_empty() {
@@ -904,11 +943,14 @@ impl WardrobeEngine {
                     records.push(record);
                 }
             }
-            crate::wrdb_lib::query::apply_query_modifiers(
+            let pagination = crate::wrdb_lib::query::apply_query_modifiers(
                 &mut records,
                 options.query_modifiers().as_ref(),
-            );
-            return Ok(records);
+            )?;
+            return Ok(crate::wrdb_lib::query::QueryRecords {
+                records,
+                pagination,
+            });
         }
 
         let drawer_name = selection.required_drawer("read")?;
@@ -929,11 +971,14 @@ impl WardrobeEngine {
             ExecutionContext::root(),
             options.hydrate.unwrap_or(true),
         )?;
-        crate::wrdb_lib::query::apply_query_modifiers(
+        let pagination = crate::wrdb_lib::query::apply_query_modifiers(
             &mut records,
             options.query_modifiers().as_ref(),
-        );
-        Ok(records)
+        )?;
+        Ok(crate::wrdb_lib::query::QueryRecords {
+            records,
+            pagination,
+        })
     }
 
     pub(crate) fn read_structural_records(

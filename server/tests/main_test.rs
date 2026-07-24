@@ -51,6 +51,7 @@ fn read_records(client: &WardrobeClient, filter: OperationFilter) -> Vec<serde_j
         .expect("read should route")
     {
         ReadResult::Records(records) => records,
+        ReadResult::Page(page) => page.records,
         other => panic!("expected records, got {other:?}"),
     }
 }
@@ -61,6 +62,7 @@ fn engine_read_records(engine: &WardrobeEngine, filter: OperationFilter) -> Vec<
         .expect("read should succeed")
     {
         ReadResult::Records(records) => records,
+        ReadResult::Page(page) => page.records,
         other => panic!("expected records, got {other:?}"),
     }
 }

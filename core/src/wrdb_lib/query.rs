@@ -1,3 +1,4 @@
+use crate::wrdb_lib::command::PaginationMetadata;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
@@ -17,6 +18,24 @@ pub struct QueryModifiers {
     pub order_direction: Option<OrderDirection>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub cursor: Option<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+}
+
+pub(crate) const DEFAULT_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QueryRecords {
+    pub(crate) records: Vec<Value>,
+    pub(crate) pagination: Option<PaginationMetadata>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct QueryCursor {
+    order_by: String,
+    order_direction: OrderDirection,
+    id: String,
 }
 
 enum SortableValue<'a> {
@@ -198,9 +217,12 @@ pub(crate) fn matches_string_filter(actual_value: &str, expected_filter: &str) -
     filter_index == filter_bytes.len()
 }
 
-pub(crate) fn apply_query_modifiers(records: &mut Vec<Value>, modifiers: Option<&QueryModifiers>) {
+pub(crate) fn apply_query_modifiers(
+    records: &mut Vec<Value>,
+    modifiers: Option<&QueryModifiers>,
+) -> Result<Option<PaginationMetadata>> {
     let Some(modifiers) = modifiers else {
-        return;
+        return Ok(None);
     };
 
     if let Some(order_by) = modifiers.order_by.as_deref() {
@@ -211,6 +233,10 @@ pub(crate) fn apply_query_modifiers(records: &mut Vec<Value>, modifiers: Option<
         records.sort_by(|left, right| {
             compare_records_by_field(left, right, order_by, direction, sort_type)
         });
+    }
+
+    if modifiers.cursor.is_some() || modifiers.page.is_some() || modifiers.page_size.is_some() {
+        return apply_cursor_or_page_pagination(records, modifiers);
     }
 
     let offset = modifiers.offset.unwrap_or(0);
@@ -225,6 +251,132 @@ pub(crate) fn apply_query_modifiers(records: &mut Vec<Value>, modifiers: Option<
     if let Some(limit) = modifiers.limit {
         records.truncate(limit);
     }
+
+    Ok(None)
+}
+
+fn apply_cursor_or_page_pagination(
+    records: &mut Vec<Value>,
+    modifiers: &QueryModifiers,
+) -> Result<Option<PaginationMetadata>> {
+    if modifiers.limit.is_some() || modifiers.offset.is_some() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cursor and page pagination cannot be combined with limit or offset",
+        ));
+    }
+
+    let order_by = modifiers.order_by.as_deref().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cursor and page pagination require an order_by option",
+        )
+    })?;
+    let order_direction = modifiers
+        .order_direction
+        .unwrap_or(OrderDirection::Ascending);
+    let page_size = modifiers.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
+    if page_size == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "page_size must be greater than zero",
+        ));
+    }
+
+    let (start, page) = if let Some(raw_cursor) = modifiers.cursor.as_deref() {
+        if modifiers.page.is_some() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cursor pagination cannot be combined with page",
+            ));
+        }
+        let cursor = serde_json::from_str::<QueryCursor>(raw_cursor).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "cursor must be a valid Wardrobe pagination cursor",
+            )
+        })?;
+        if cursor.order_by != order_by || cursor.order_direction != order_direction {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cursor ordering does not match the requested order_by and order_direction",
+            ));
+        }
+        let cursor_index = records
+            .iter()
+            .position(|record| record_id(record).is_some_and(|id| id == cursor.id))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "cursor record is not present in the query result",
+                )
+            })?;
+        (cursor_index + 1, None)
+    } else {
+        let page = modifiers.page.unwrap_or(1);
+        if page == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "page must be greater than zero",
+            ));
+        }
+        let start = page
+            .checked_sub(1)
+            .and_then(|page_index| page_index.checked_mul(page_size))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "page and page_size exceed the supported range",
+                )
+            })?;
+        (start, Some(page))
+    };
+
+    let mut page_records = if start >= records.len() {
+        Vec::new()
+    } else {
+        records.drain(start..).collect()
+    };
+    let has_more = page_records.len() > page_size;
+    page_records.truncate(page_size);
+    let next_cursor = if has_more {
+        let last_record = page_records.last().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "pagination produced no record for a non-empty page",
+            )
+        })?;
+        Some(encode_cursor(last_record, order_by, order_direction)?)
+    } else {
+        None
+    };
+    *records = page_records;
+
+    Ok(Some(PaginationMetadata {
+        next_cursor,
+        has_more,
+        page,
+        page_size,
+    }))
+}
+
+fn encode_cursor(record: &Value, order_by: &str, order_direction: OrderDirection) -> Result<String> {
+    let id = record_id(record).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "cursor pagination requires every record to have a string _id",
+        )
+    })?;
+    serde_json::to_string(&QueryCursor {
+        order_by: order_by.to_string(),
+        order_direction,
+        id: id.to_string(),
+    })
+    .map_err(|_| Error::new(ErrorKind::InvalidData, "failed to encode pagination cursor"))
+}
+
+fn record_id(record: &Value) -> Option<&str> {
+    record.get("_id").and_then(Value::as_str)
 }
 
 fn compare_records_by_field(
@@ -234,17 +386,12 @@ fn compare_records_by_field(
     direction: OrderDirection,
     sort_type: Option<SortableType>,
 ) -> Ordering {
-    let Some(sort_type) = sort_type else {
-        return Ordering::Equal;
-    };
-
-    let left_value = resolve_field_path(left, field_name);
-    let right_value = resolve_field_path(right, field_name);
-
-    match (
-        left_value.and_then(|value| sortable_value(value, sort_type)),
-        right_value.and_then(|value| sortable_value(value, sort_type)),
-    ) {
+    let field_ordering = match sort_type {
+        Some(sort_type) => match (
+            resolve_field_path(left, field_name).and_then(|value| sortable_value(value, sort_type)),
+            resolve_field_path(right, field_name)
+                .and_then(|value| sortable_value(value, sort_type)),
+        ) {
         (Some(left_sortable), Some(right_sortable)) => {
             match left_sortable.compare_same_type(right_sortable) {
                 Some(ordering) => match direction {
@@ -257,6 +404,27 @@ fn compare_records_by_field(
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
+        },
+        None => Ordering::Equal,
+    };
+
+    if field_ordering == Ordering::Equal {
+        compare_records_by_id(left, right, direction)
+    } else {
+        field_ordering
+    }
+}
+
+fn compare_records_by_id(left: &Value, right: &Value, direction: OrderDirection) -> Ordering {
+    let ordering = match (record_id(left), record_id(right)) {
+        (Some(left_id), Some(right_id)) => left_id.cmp(right_id),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    };
+    match direction {
+        OrderDirection::Ascending => ordering,
+        OrderDirection::Descending => ordering.reverse(),
     }
 }
 
@@ -340,9 +508,11 @@ mod tests {
             order_direction: Some(OrderDirection::Descending),
             limit: None,
             offset: None,
+            ..QueryModifiers::default()
         };
 
-        apply_query_modifiers(&mut records, Some(&modifiers));
+        apply_query_modifiers(&mut records, Some(&modifiers))
+            .expect("modifiers should apply");
 
         assert_eq!(records[0]["_id"], "strong");
         assert_eq!(records[1]["_id"], "weak");
@@ -410,8 +580,10 @@ mod tests {
                 order_direction: None,
                 limit: Some(1),
                 offset: Some(1),
+                ..QueryModifiers::default()
             }),
-        );
+        )
+        .expect("modifiers should apply");
         assert_eq!(bool_records, vec![json!({"_id": "true", "active": true})]);
 
         let mut string_records = vec![
@@ -425,8 +597,10 @@ mod tests {
                 order_direction: None,
                 limit: None,
                 offset: None,
+                ..QueryModifiers::default()
             }),
-        );
+        )
+        .expect("modifiers should apply");
         assert_eq!(string_records[0]["_id"], "a");
 
         apply_query_modifiers(
@@ -436,9 +610,11 @@ mod tests {
                 order_direction: None,
                 limit: None,
                 offset: Some(10),
+                ..QueryModifiers::default()
             }),
-        );
+        )
+        .expect("modifiers should apply");
         assert!(string_records.is_empty());
-        apply_query_modifiers(&mut string_records, None);
+        apply_query_modifiers(&mut string_records, None).expect("no modifiers should apply");
     }
 }

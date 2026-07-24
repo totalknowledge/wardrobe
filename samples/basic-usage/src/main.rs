@@ -25,6 +25,7 @@ fn read_records(
 ) -> io::Result<Vec<serde_json::Value>> {
     match client.read(filter, options.into())? {
         ReadResult::Records(records) => Ok(records),
+        ReadResult::Page(page) => Ok(page.records),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Expected record list, got {other:?}"),
@@ -162,6 +163,7 @@ fn main() -> io::Result<()> {
         order_direction: Some(OrderDirection::Ascending),
         offset: Some(0),
         limit: Some(10),
+        ..QueryModifiers::default()
     };
 
     let matching_personnel = read_records(
