@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+pub use crate as wardrobe_embedded;
+
 #[path = "wrdb_lib/mod.rs"]
 pub mod wrdb_lib;
 

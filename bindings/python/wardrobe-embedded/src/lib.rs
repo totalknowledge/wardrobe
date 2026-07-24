@@ -1,6 +1,6 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use wardrobe_core::{Command, WardrobeEngine};
+use wardrobe_embedded::{Command, WardrobeEngine};
 
 #[pyclass]
 struct WardrobeEmbeddedEngine {

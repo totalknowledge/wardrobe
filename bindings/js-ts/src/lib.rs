@@ -1,4 +1,4 @@
-use wardrobe_core::{Command, WardrobeEngine};
+use wardrobe_embedded::{Command, WardrobeEngine};
 
 pub const NPM_PACKAGE_NAMES: &[&str] = &["@wardrobe/client", "@wardrobe/embedded"];
 pub const CRATE_NAME: &str = "wardrobe-js-ts";
@@ -175,7 +175,7 @@ mod tests {
             metadata.npm_package_names,
             &["@wardrobe/client", "@wardrobe/embedded"]
         );
-        assert_eq!(metadata.version, "0.26.724");
+        assert_eq!(metadata.version, "0.26.725");
         assert_eq!(metadata.default_network_port, 24842);
         assert_eq!(
             metadata.operations,

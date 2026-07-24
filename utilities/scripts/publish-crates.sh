@@ -8,12 +8,12 @@ usage() {
     cat <<EOF
 Usage: utilities/scripts/publish-crates.sh [options]
 
-Publishes the foundational engine (wardrobe-embedded) and network client (wardrobe-client)
-to crates.io using cargo publish in the exact sequence required.
+Publishes network client (wardrobe-client) and embedded engine (wardrobe-embedded)
+to crates.io using cargo publish in the required dependency sequence.
 
 Publish sequence:
-  1. cargo publish -p wardrobe-embedded
-  2. cargo publish -p wardrobe-client
+  1. cargo publish -p wardrobe-client
+  2. cargo publish -p wardrobe-embedded
 
 Options:
   --dry-run        Run cargo publish with --dry-run
@@ -86,10 +86,10 @@ if [ -n "$CARGO_TOKEN" ]; then
     CARGO_FLAGS+=("--token" "$CARGO_TOKEN")
 fi
 
-log_step "Step 1: Publishing foundational engine crate (wardrobe-embedded) to crates.io"
-(cd "$REPO_ROOT" && cargo publish -p wardrobe-embedded "${CARGO_FLAGS[@]}")
-
-log_step "Step 2: Publishing network client crate (wardrobe-client) to crates.io"
+log_step "Step 1: Publishing network client crate (wardrobe-client) to crates.io"
 (cd "$REPO_ROOT" && cargo publish -p wardrobe-client "${CARGO_FLAGS[@]}")
+
+log_step "Step 2: Publishing embedded engine crate (wardrobe-embedded) to crates.io"
+(cd "$REPO_ROOT" && cargo publish -p wardrobe-embedded "${CARGO_FLAGS[@]}")
 
 log_step "Publish sequence finished successfully!"

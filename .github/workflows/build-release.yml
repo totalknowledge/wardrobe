@@ -1,0 +1,81 @@
+name: Build Release Artifacts
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Wardrobe CLI & Server (.deb & .tar.gz)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binaries
+        run: |
+          cargo build --release -p wardrobe-cli -p wardrobe-server
+
+      - name: Build Debian Packages (.deb)
+        run: |
+          bash ./utilities/scripts/build-debs.sh
+
+      - name: Create Tarball Archives (.tar.gz)
+        run: |
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' cli/Cargo.toml | head -n 1)
+          ARCH=$(dpkg --print-architecture)
+          DIST_DIR="target/dist"
+          mkdir -p "$DIST_DIR"
+
+          # CLI Tarball (wardrobe binary)
+          CLI_STAGE=$(mktemp -d)
+          cp target/release/wardrobe "$CLI_STAGE/"
+          cp cli/README.md "$CLI_STAGE/" 2>/dev/null || true
+          cp LICENSE "$CLI_STAGE/" 2>/dev/null || true
+          tar -czvf "$DIST_DIR/wardrobe-cli_${VERSION}_${ARCH}.tar.gz" -C "$CLI_STAGE" .
+
+          # Server Tarball (wardrobe-server binary)
+          SERVER_STAGE=$(mktemp -d)
+          cp target/release/wardrobe-server "$SERVER_STAGE/"
+          cp server/README.md "$SERVER_STAGE/" 2>/dev/null || true
+          cp LICENSE "$SERVER_STAGE/" 2>/dev/null || true
+          tar -czvf "$DIST_DIR/wardrobe-server_${VERSION}_${ARCH}.tar.gz" -C "$SERVER_STAGE" .
+
+          # Copy deb packages to target/dist
+          cp target/debian/*.deb "$DIST_DIR/"
+
+          echo "Generated artifacts in $DIST_DIR:"
+          ls -lh "$DIST_DIR"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wardrobe-artifacts-amd64
+          path: |
+            target/dist/*.deb
+            target/dist/*.tar.gz
+          if-no-files-found: error
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/dist/*.deb
+            target/dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

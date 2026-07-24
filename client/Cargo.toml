@@ -1,6 +1,6 @@
 [package]
 name = "wardrobe-client"
-version = "0.26.724"
+version = "0.26.725"
 edition = "2024"
 license = "MIT"
 description = "Pure network client library crate for server-backed Wardrobe connections."

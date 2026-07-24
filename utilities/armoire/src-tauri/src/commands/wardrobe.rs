@@ -1,5 +1,5 @@
 use crate::services::wardrobe_database_service::WardrobeDatabaseService;
-use wardrobe_core::StorageInventory;
+use wardrobe_embedded::StorageInventory;
 
 #[tauri::command]
 pub async fn wardrobe_test_database_access(database_directory: String) -> Result<(), String> {

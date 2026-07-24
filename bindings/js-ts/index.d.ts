@@ -37,7 +37,7 @@ export type WardrobeOperation =
 
 export declare const DEFAULT_NETWORK_PORT: 24842;
 export declare const PACKAGE_NAMES: readonly ['@wardrobe/client', '@wardrobe/embedded'];
-export declare const PACKAGE_VERSION: '0.26.724';
+export declare const PACKAGE_VERSION: '0.26.725';
 export declare const SUPPORTED_OPERATIONS: readonly WardrobeOperation[];
 
 export declare function classifyConnectionTarget(

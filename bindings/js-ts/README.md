@@ -9,7 +9,7 @@ The package is intentionally validated with `npm publish --dry-run` only. Do not
 - server package: `@wardrobe/client`
 - embedded package: `@wardrobe/embedded`
 - Rust crate: `wardrobe-js-ts`
-- version: `0.26.724`
+- version: `0.26.725`
 - license: see `LICENSE`
 - repository: `https://github.com/totalknowledge/wardrobe`
 - TypeScript declarations: `index.d.ts`

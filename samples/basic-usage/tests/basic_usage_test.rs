@@ -3,7 +3,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe_core::{
+use wardrobe_embedded::{
     OperationFilter, OperationOptions, ReadResult, StatusRequest, StorageInventory, WardrobeClient,
 };
 

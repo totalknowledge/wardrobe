@@ -71,7 +71,7 @@ export interface RelationshipRequest {
 }
 
 export declare const PACKAGE_NAME: '@wardrobe/embedded';
-export declare const PACKAGE_VERSION: '0.26.724';
+export declare const PACKAGE_VERSION: '0.26.725';
 export declare function relationshipRequest(
   drawerName: string,
   fieldName: string,

@@ -3,7 +3,7 @@ use crate::utils::{deterministic_range_bounds, repeated_shuffled_indices, shuffl
 use serde_json::{Value, json};
 use std::io::{self, Error, ErrorKind};
 use std::path::PathBuf;
-use wardrobe_core::DurabilityPolicy;
+use wardrobe_embedded::DurabilityPolicy;
 
 pub(crate) const DEFAULT_WARDROBE_DATABASE_PREFIX: &str = "wardrobe_benchmark";
 pub(crate) const DEFAULT_WARDROBE_SCHEMA_NAME: &str = "library";

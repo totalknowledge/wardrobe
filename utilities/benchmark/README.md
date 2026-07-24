@@ -1,6 +1,6 @@
 # Wardrobe Benchmark
 
-`wardrobe-benchmark` version `0.26.724` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
+`wardrobe-benchmark` version `0.26.725` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
 
 The default run uses only embedded Wardrobe so it works without external database services:
 

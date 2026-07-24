@@ -5,7 +5,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use wardrobe_core::{
+use wardrobe_embedded::{
     AlterRequest, Command, CommandResult, CompactRequest, CreateRequest, CreateResult,
     DurabilityPolicy, InspectResult, OperationFilter, OperationOptions, PermissionRequest,
     ProtocolFrame, ProtocolOpcode, ReadResult, StatusRequest, StorageCoordinate, WardrobeClient,
@@ -67,13 +67,13 @@ fn engine_read_records(engine: &WardrobeEngine, filter: OperationFilter) -> Vec<
     }
 }
 
-fn status_storage(client: &WardrobeClient) -> wardrobe_core::StorageDiagnosis {
+fn status_storage(client: &WardrobeClient) -> wardrobe_embedded::StorageDiagnosis {
     client
         .status(StatusRequest::storage())
         .expect("status storage")
 }
 
-fn status_check(client: &WardrobeClient, path: &str) -> wardrobe_core::CheckReport {
+fn status_check(client: &WardrobeClient, path: &str) -> wardrobe_embedded::CheckReport {
     client
         .status(StatusRequest::path(path))
         .expect("status path")
@@ -648,8 +648,8 @@ fn run_returns_error_when_no_listeners_enabled() {
         wal_checkpoint_ops: 1000,
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
-        logging: wardrobe_core::ApplicationLoggingConfig::default(),
-        security: wardrobe_core::SecurityConfig::default(),
+        logging: wardrobe_embedded::ApplicationLoggingConfig::default(),
+        security: wardrobe_embedded::SecurityConfig::default(),
     };
     let res = wardrobe_server::run(cfg);
     assert!(res.is_err());
@@ -720,8 +720,8 @@ fn run_execution_with_check_only_flag() {
         wal_checkpoint_ops: 1000,
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
-        logging: wardrobe_core::ApplicationLoggingConfig::default(),
-        security: wardrobe_core::SecurityConfig::default(),
+        logging: wardrobe_embedded::ApplicationLoggingConfig::default(),
+        security: wardrobe_embedded::SecurityConfig::default(),
     };
     assert!(wardrobe_server::run(cfg).is_ok());
     let _ = std::fs::remove_dir_all(storage_directory);
@@ -741,8 +741,8 @@ fn run_execution_unsupported_unix_platform_guard() {
         wal_checkpoint_ops: 1000,
         durability_policy: DurabilityPolicy::Strict,
         profile_commands: false,
-        logging: wardrobe_core::ApplicationLoggingConfig::default(),
-        security: wardrobe_core::SecurityConfig::default(),
+        logging: wardrobe_embedded::ApplicationLoggingConfig::default(),
+        security: wardrobe_embedded::SecurityConfig::default(),
     };
     assert!(wardrobe_server::run(cfg).is_err());
 }

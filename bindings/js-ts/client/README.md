@@ -1,6 +1,6 @@
 # @wardrobe/client
 
-MIT-licensed JavaScript and TypeScript client for Wardrobe servers over TCP or Unix sockets. Current version: `0.26.724`; Node.js 24 or newer is required.
+MIT-licensed JavaScript and TypeScript client for Wardrobe servers over TCP or Unix sockets. Current version: `0.26.725`; Node.js 24 or newer is required.
 
 ```js
 const { WardrobeClient, relationshipRequest } = require('@wardrobe/client');

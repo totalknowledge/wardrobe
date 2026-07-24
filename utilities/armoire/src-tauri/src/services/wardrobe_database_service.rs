@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use wardrobe_core::{
+use wardrobe_embedded::{
     CreateRequest, OperationFilter, OperationOptions, ReadResult, StatusRequest, StorageInventory,
     WardrobeClient, WardrobeEngine,
 };

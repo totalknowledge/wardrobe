@@ -3,6 +3,24 @@ use serde_json::Value;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct QueryModifiers {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_direction: Option<OrderDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationFilter {
     pub database: String,
@@ -22,6 +40,33 @@ impl OperationFilter {
             drawer: drawer.into(),
             id: None,
             query: None,
+        }
+    }
+
+    pub fn drawer(drawer: impl Into<String>) -> Self {
+        Self::new("", "", drawer)
+    }
+
+    pub fn pointer(pointer: impl AsRef<str>) -> Self {
+        let raw = pointer.as_ref();
+        let id = raw.trim_start_matches('@');
+        let (drawer, id) = id.split_once(':').unwrap_or(("", id));
+        Self {
+            database: String::new(),
+            schema: String::new(),
+            drawer: drawer.to_string(),
+            id: Some(id.to_string()),
+            query: None,
+        }
+    }
+
+    pub fn query_in(drawer: impl Into<String>, query: impl Into<Value>) -> Self {
+        Self {
+            database: String::new(),
+            schema: String::new(),
+            drawer: drawer.into(),
+            id: None,
+            query: Some(query.into()),
         }
     }
 
@@ -61,6 +106,24 @@ pub struct OperationOptions {
     pub offset: Option<usize>,
 }
 
+impl OperationOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl From<QueryModifiers> for OperationOptions {
+    fn from(modifiers: QueryModifiers) -> Self {
+        Self {
+            hydrate: None,
+            fields: None,
+            exclude_fields: None,
+            limit: modifiers.limit,
+            offset: modifiers.offset,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadResult {
     pub records: Vec<Value>,
@@ -71,6 +134,28 @@ pub struct ReadResult {
 pub struct UpsertResult {
     pub record: Value,
     pub created: bool,
+    #[serde(default)]
+    pub pointers: Vec<String>,
+}
+
+impl UpsertResult {
+    pub fn into_pointers(self) -> Vec<String> {
+        if self.pointers.is_empty() {
+            if let Some(id) = self.record.get("_id").and_then(Value::as_str) {
+                vec![format!("@{id}")]
+            } else {
+                vec![]
+            }
+        } else {
+            self.pointers
+        }
+    }
+
+    pub fn fmt_pointer(&self) -> Option<String> {
+        self.pointers.first().cloned().or_else(|| {
+            self.record.get("_id").and_then(Value::as_str).map(|id| format!("@{id}"))
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +182,35 @@ pub struct CreateRequest {
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+}
+
+impl CreateRequest {
+    pub fn database(name: impl Into<String>) -> Self {
+        Self {
+            kind: "database".to_string(),
+            name: name.into(),
+            database: None,
+            schema: None,
+        }
+    }
+
+    pub fn schema(database: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            kind: "schema".to_string(),
+            name: name.into(),
+            database: Some(database.into()),
+            schema: None,
+        }
+    }
+
+    pub fn drawer(database: impl Into<String>, schema: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            kind: "drawer".to_string(),
+            name: name.into(),
+            database: Some(database.into()),
+            schema: Some(schema.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,6 +269,49 @@ pub struct PermissionRequest {
 pub struct StatusRequestOutput {
     pub status: String,
     pub details: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StorageInventory {
+    pub name: String,
+    pub record_count: usize,
+    pub disk_size_bytes: u64,
+    pub register_file_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusRequest {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
+impl StatusRequest {
+    pub fn databases() -> Self {
+        Self {
+            kind: "databases".to_string(),
+            database: None,
+            schema: None,
+        }
+    }
+
+    pub fn schemas(database: impl Into<String>) -> Self {
+        Self {
+            kind: "schemas".to_string(),
+            database: Some(database.into()),
+            schema: None,
+        }
+    }
+
+    pub fn drawers(database: impl Into<String>, schema: impl Into<String>) -> Self {
+        Self {
+            kind: "drawers".to_string(),
+            database: Some(database.into()),
+            schema: Some(schema.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

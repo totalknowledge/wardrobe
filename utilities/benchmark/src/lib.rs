@@ -37,7 +37,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
-    use wardrobe_core::{
+    use ::wardrobe_embedded::{
         Command, CommandResult, CreateRequest, DurabilityPolicy, OperationFilter, ReadResult,
         SecurityConfig, SecurityMode, StatusRequest, StorageDiagnosis, StorageInventory,
         WardrobeEngine, initialize_managed_pki, issue_managed_client_certificate,
@@ -1073,7 +1073,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
             ErrorKind::InvalidData
         );
         assert_eq!(
-            expect_pointers(CommandResult::Delete(wardrobe_core::DeleteResult {
+            expect_pointers(CommandResult::Delete(::wardrobe_embedded::DeleteResult {
                 deleted: 0,
             }))
             .expect_err("pointers mismatch")
@@ -1463,12 +1463,12 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                         "wardrobe_benchmark_test/library/book".to_string(),
                     ],
                 })),
-                CommandResult::Status(json!(wardrobe_core::WalVerification {
+                CommandResult::Status(json!(::wardrobe_embedded::WalVerification {
                     path: "/data/wardrobe/.wal".to_string(),
                     entry_count: 4,
                     last_sequence: Some(4),
                 })),
-                CommandResult::Status(json!(wardrobe_core::WalVerification {
+                CommandResult::Status(json!(::wardrobe_embedded::WalVerification {
                     path: "/data/wardrobe/wardrobe/.wal".to_string(),
                     entry_count: 3,
                     last_sequence: Some(3),
@@ -1652,7 +1652,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
         let delete_ids = profile.delete_by_id_book_ids();
         let mut responses = VecDeque::new();
         for _ in &delete_ids {
-            responses.push_back(CommandResult::Delete(wardrobe_core::DeleteResult {
+            responses.push_back(CommandResult::Delete(::wardrobe_embedded::DeleteResult {
                 deleted: 1,
             }));
             responses.push_back(CommandResult::Read(ReadResult::Record(None)));
@@ -1709,7 +1709,7 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
     fn wardrobe_purge_uses_single_delete_by_filter_command() {
         let state = Rc::new(RefCell::new(MockRunnerState {
             commands: Vec::new(),
-            responses: VecDeque::from(vec![CommandResult::Delete(wardrobe_core::DeleteResult {
+            responses: VecDeque::from(vec![CommandResult::Delete(::wardrobe_embedded::DeleteResult {
                 deleted: 2,
             })]),
         }));

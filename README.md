@@ -2,7 +2,7 @@
 
 [![coverage](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml/badge.svg)](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml)
 
-Current workspace release: `0.26.724`.
+Current workspace release: `0.26.725`.
 
 Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
 
@@ -90,7 +90,7 @@ The two main application entry points are:
 ```rust
 use serde_json::json;
 use std::io::{Error, ErrorKind};
-use wardrobe_core::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
+use wardrobe_embedded::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
 
 fn main() -> std::io::Result<()> {
     let client = WardrobeClient::open("./wardrobe")?;
@@ -127,7 +127,7 @@ fn main() -> std::io::Result<()> {
 ### Driver-Selecting Client
 
 ```rust
-use wardrobe_core::WardrobeClient;
+use wardrobe_embedded::WardrobeClient;
 
 fn connect() -> std::io::Result<()> {
     let embedded = WardrobeClient::open("./data")?;
@@ -156,7 +156,7 @@ Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{
+use wardrobe_embedded::{
     OperationFilter, OperationOptions, OrderDirection, ReadResult, WardrobeClient,
 };
 
@@ -186,7 +186,7 @@ fn query(client: &WardrobeClient) -> std::io::Result<()> {
 Rust status constructors encode their output type, so inventory calls return direct values without a result enum or variant wrapper:
 
 ```rust
-use wardrobe_core::{StatusRequest, WardrobeClient};
+use wardrobe_embedded::{StatusRequest, WardrobeClient};
 
 fn inventory(client: &WardrobeClient) -> std::io::Result<()> {
     let databases = client.status(StatusRequest::databases())?;
@@ -229,7 +229,7 @@ The license file within each component is authoritative.
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{Command, OperationFilter, OperationOptions, StorageCoordinate, WardrobeEngine};
+use wardrobe_embedded::{Command, OperationFilter, OperationOptions, StorageCoordinate, WardrobeEngine};
 
 fn routed(engine: &WardrobeEngine) -> std::io::Result<()> {
     let scope = StorageCoordinate::new("tenant_a", "production", "public");
@@ -456,7 +456,7 @@ Mount data and security as persistent volumes:
 ```yaml
 services:
   wardrobe:
-    image: wardrobe-server:0.26.724
+    image: wardrobe-server:0.26.725
     command: ["/config/wardrobe.toml"]
     volumes:
       - wardrobe-data:/data

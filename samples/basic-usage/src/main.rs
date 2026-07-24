@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::io;
-use wardrobe_core::{
+use wardrobe_embedded::{
     Command, CommandResult, CreateRequest, OperationFilter, OperationOptions, OrderDirection,
     QueryModifiers, ReadResult, StatusRequest, StorageScope, WardrobeClient, WardrobeEngine,
 };

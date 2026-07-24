@@ -1,6 +1,6 @@
 {
   "name": "wardrobe-js-ts-bindings",
-  "version": "0.26.724",
+  "version": "0.26.725",
   "description": "Workspace for the Wardrobe client and embedded JavaScript/TypeScript bindings.",
   "private": true,
   "license": "MIT",
@@ -30,7 +30,11 @@
     "fmt": "cargo fmt --manifest-path Cargo.toml --package wardrobe-js-ts -- --check",
     "clippy": "cargo clippy --manifest-path Cargo.toml --all-targets --all-features --no-deps -- -D warnings",
     "test": "cargo test --manifest-path Cargo.toml --all-targets --all-features",
-    "publish:client:dry-run": "npm publish --dry-run --workspace @wardrobe/client",
-    "publish:embedded:dry-run": "npm publish --dry-run --workspace @wardrobe/embedded"
+    "pack:client:dry-run": "npm pack --dry-run --workspace=@wardrobe/client",
+    "pack:embedded:dry-run": "npm pack --dry-run --workspace=@wardrobe/embedded",
+    "publish:client:dry-run": "npm publish --dry-run --access public --workspace=@wardrobe/client",
+    "publish:embedded:dry-run": "npm publish --dry-run --access public --workspace=@wardrobe/embedded",
+    "publish:client": "npm publish --access public --workspace=@wardrobe/client",
+    "publish:embedded": "npm publish --access public --workspace=@wardrobe/embedded"
   }
 }

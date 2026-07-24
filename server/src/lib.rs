@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use wardrobe_core::{
+use wardrobe_embedded::{
     ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig, Command, CreateRequest,
     DurabilityPolicy, ProtocolFrame, ProtocolOpcode, SecurityConfig, SecurityMode, WardrobeConfig,
     WardrobeEngine, certificate_identity_from_der, certificate_identity_from_pem,
@@ -200,7 +200,7 @@ impl ServerConfig {
                         )
                     })?;
                     wardrobe_config.logging.format =
-                        wardrobe_core::ApplicationLogFormat::parse(&raw)?;
+                        wardrobe_embedded::ApplicationLogFormat::parse(&raw)?;
                 }
                 "--log-destination" => {
                     let raw = args.next().ok_or_else(|| {
@@ -210,7 +210,7 @@ impl ServerConfig {
                         )
                     })?;
                     wardrobe_config.logging.destination =
-                        wardrobe_core::ApplicationLogDestination::parse(&raw)?;
+                        wardrobe_embedded::ApplicationLogDestination::parse(&raw)?;
                 }
                 "--log-file" => {
                     wardrobe_config.logging.file =
@@ -1716,7 +1716,7 @@ mod tests {
     use std::io::Cursor;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use wardrobe_core::{
+    use wardrobe_embedded::{
         AlterRequest, ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel,
         BackupArchive, BackupArchiveFile, CompactRequest, CreateRequest, DropRequest,
         OperationFilter, OperationOptions, PermissionRequest, StatusRequest, StorageCoordinate,
@@ -1920,7 +1920,7 @@ mod tests {
         assert!(tenants.is_empty());
         drop(client);
 
-        wardrobe_core::revoke_managed_certificate(&security_dir, &certificate.serial)
+        wardrobe_embedded::revoke_managed_certificate(&security_dir, &certificate.serial)
             .expect("certificate should revoke");
         let revoked_client = WardrobeClient::open_with_profile(
             format!("wardrobe://{address}"),

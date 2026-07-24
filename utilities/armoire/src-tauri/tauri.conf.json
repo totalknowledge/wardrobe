@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "armoire",
-  "version": "0.26.724",
+  "version": "0.26.725",
   "identifier": "com.wardrobe.armoire",
   "build": {
     "frontendDist": "../dist/armoire/browser",

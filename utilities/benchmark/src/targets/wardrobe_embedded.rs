@@ -14,7 +14,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use wardrobe_core::{
+use wardrobe_embedded::{
     AlterRequest, Command, CommandResult, CompactRequest, CreateRequest, DurabilityPolicy,
     OperationFilter, OperationOptions, ReturnShape, SecurityConfig, SecurityMode, StatusRequest,
     StorageDiagnosis, StorageInventory, StorageScope, WardrobeEngine, initialize_managed_pki,
@@ -396,7 +396,7 @@ impl WardrobeTarget {
             StatusRequest::wal(database_name.map(str::to_string)).into_request(),
         ))? {
             CommandResult::Status(payload) => {
-                let report: wardrobe_core::WalVerification = serde_json::from_value(payload)
+                let report: ::wardrobe_embedded::WalVerification = serde_json::from_value(payload)
                     .map_err(|error| {
                         Error::new(
                             ErrorKind::InvalidData,

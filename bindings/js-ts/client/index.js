@@ -1,7 +1,7 @@
 const net = require('net');
 
 const PACKAGE_NAME = '@wardrobe/client';
-const PACKAGE_VERSION = '0.26.724';
+const PACKAGE_VERSION = '0.26.725';
 
 function relationshipRequest(drawerName, fieldName, targetDrawer) {
   return {

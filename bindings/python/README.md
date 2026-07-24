@@ -2,7 +2,7 @@
 
 This directory contains the Python binding packages for Wardrobe.
 
-Both packages are at version `0.26.724`, require Python 3.10 or newer, and use the MIT license.
+Both packages are at version `0.26.725`, require Python 3.14 or newer, and use the MIT license.
 
 These packages are binding scaffolds only. Do not publish them until a release story explicitly approves PyPI publication.
 

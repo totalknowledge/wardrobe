@@ -3,6 +3,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+
   tasks:
     - name: Create the Wardrobe system group
       ansible.builtin.group:
@@ -29,9 +30,7 @@
     - name: Restrict the server binary permissions
       ansible.builtin.file:
         path: /usr/local/bin/wardrobe-server
-        state: touch
-        modification_time: preserve
-        access_time: preserve
+        state: file
         owner: root
         group: root
         mode: "0755"

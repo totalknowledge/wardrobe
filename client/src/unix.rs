@@ -15,7 +15,7 @@ pub struct UnixSocketTransport {
 }
 
 impl UnixSocketTransport {
-    pub(crate) fn connect(path: PathBuf) -> Result<Self> {
+    pub fn connect(path: PathBuf) -> Result<Self> {
         #[cfg(unix)]
         {
             let stream = UnixStream::connect(&path)?;
@@ -37,7 +37,7 @@ impl UnixSocketTransport {
         }
     }
 
-    pub(crate) fn execute(&self, command: &Value) -> Result<Value> {
+    pub fn execute(&self, command: &Value) -> Result<Value> {
         #[cfg(unix)]
         {
             let payload = serde_json::to_vec(command).map_err(|error| {

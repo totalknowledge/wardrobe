@@ -6,7 +6,7 @@ use std::io::{self, BufReader, Error, ErrorKind};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
-use wardrobe_core::{
+use wardrobe_embedded::{
     ClientTlsConfig, Command, CommandResult, ConnectionTarget, ProtocolFrame, ProtocolOpcode,
 };
 

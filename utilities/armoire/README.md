@@ -2,7 +2,7 @@
 
 Armoire is the Wardrobe database administration desktop utility. It lives under `utilities/armoire`, not `samples`, and its Angular frontend communicates with `wardrobe-core` through a Tauri Rust backend.
 
-Current version: `0.26.724`.
+Current version: `0.26.725`.
 
 ## Capabilities
 

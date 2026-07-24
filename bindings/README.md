@@ -1,6 +1,6 @@
 # Wardrobe Language Bindings
 
-Current binding version: `0.26.724`.
+Current binding version: `0.26.725`.
 
 Wardrobe provides separate network and embedded packages where the host ecosystem benefits from keeping native storage artifacts out of server-only applications.
 

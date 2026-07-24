@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wardrobe-client"
-version = "0.26.724"
+version = "0.26.725"
 description = "Pure Python client bindings for server-backed Wardrobe connections."
 readme = "README.md"
 requires-python = ">=3.10"

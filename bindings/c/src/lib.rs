@@ -1,7 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
-use wardrobe_core::{AlterRequest, Command, StatusRequest, WardrobeClient, WardrobeEngine};
+use wardrobe_embedded::{AlterRequest, Command, StatusRequest, WardrobeClient, WardrobeEngine};
 
 #[repr(C)]
 pub struct WardrobeCStatus {
@@ -11,7 +11,7 @@ pub struct WardrobeCStatus {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn wardrobe_cabi_version() -> *const c_char {
-    static VERSION: &[u8] = b"wardrobe-cabi-0.26.724\0";
+    static VERSION: &[u8] = b"wardrobe-cabi-0.26.725\0";
     VERSION.as_ptr().cast()
 }
 
@@ -223,7 +223,7 @@ mod tests {
         let version = unsafe { CStr::from_ptr(wardrobe_cabi_version()) }
             .to_str()
             .expect("version");
-        assert_eq!(version, "wardrobe-cabi-0.26.724");
+        assert_eq!(version, "wardrobe-cabi-0.26.725");
         assert!(wardrobe_cabi_duplicate_path(ptr::null()).is_null());
         wardrobe_cabi_free_string(ptr::null_mut());
 

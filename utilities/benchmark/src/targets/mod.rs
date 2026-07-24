@@ -30,7 +30,7 @@ use crate::engine::{PhaseRecorder, ProgressReporter};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Error, ErrorKind};
-use wardrobe_core::{Command, CommandResult, ReadResult, UpsertResult};
+use ::wardrobe_embedded::{Command, CommandResult, ReadResult, UpsertResult};
 
 pub(crate) trait BenchmarkTarget {
     fn name(&self) -> &str;
@@ -175,7 +175,7 @@ pub(crate) fn parse_credentials(
 
 pub(crate) fn expect_inventory(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::Create(wardrobe_core::CreateResult::StorageInventory(_)) => Ok(()),
+        CommandResult::Create(::wardrobe_embedded::CreateResult::StorageInventory(_)) => Ok(()),
         other => unexpected_wardrobe_result("storage inventory", other),
     }
 }
@@ -291,7 +291,7 @@ pub(crate) fn verify_deleted_count(deleted: usize, expected_id: &str) -> io::Res
 
 pub(crate) fn expect_admin(result: CommandResult) -> io::Result<()> {
     match result {
-        CommandResult::Create(wardrobe_core::CreateResult::Admin(_))
+        CommandResult::Create(::wardrobe_embedded::CreateResult::Admin(_))
         | CommandResult::Alter(_)
         | CommandResult::Drop(_)
         | CommandResult::Grant(_)

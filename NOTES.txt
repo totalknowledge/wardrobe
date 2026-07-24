@@ -1,7 +1,7 @@
-Wardrobe 0.26.724
+Wardrobe 0.26.725
 
 Current release highlights:
-  - Rust, JavaScript/TypeScript, Python, C ABI, CLI, server, samples, benchmark, and Armoire versions are aligned at 0.26.724.
+  - Rust, JavaScript/TypeScript, Python, C ABI, CLI, server, samples, benchmark, and Armoire versions are aligned at 0.26.725.
   - Database, schema, and drawer status payloads return raw arrays without result-side variant wrappers.
   - JavaScript/TypeScript packages are @wardrobe/client and @wardrobe/embedded.
   - Python packages are wardrobe-client and wardrobe-embedded.

@@ -96,7 +96,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "armoire"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "log",
  "serde",
@@ -447,7 +447,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "basic-usage"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "serde_json",
  "wardrobe-embedded",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "c-abi-sample"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "libloading 0.8.9",
 ]
@@ -6562,7 +6562,7 @@ dependencies = [
 
 [[package]]
 name = "wardrobe-benchmark"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "mongodb",
  "mysql",
@@ -6582,7 +6582,7 @@ dependencies = [
 
 [[package]]
 name = "wardrobe-c"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "serde_json",
  "wardrobe-embedded",
@@ -6590,7 +6590,7 @@ dependencies = [
 
 [[package]]
 name = "wardrobe-cli"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "atty",
  "serde",
@@ -6600,7 +6600,7 @@ dependencies = [
 
 [[package]]
 name = "wardrobe-client"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "rcgen",
  "rustls 0.23.41",
@@ -6614,7 +6614,7 @@ dependencies = [
 
 [[package]]
 name = "wardrobe-embedded"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "bson",
  "rand 0.10.1",
@@ -6626,12 +6626,13 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "uuid",
+ "wardrobe-client",
  "x509-parser",
 ]
 
 [[package]]
 name = "wardrobe-js-ts"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "napi",
  "napi-derive",
@@ -6641,7 +6642,7 @@ dependencies = [
 
 [[package]]
 name = "wardrobe-server"
-version = "0.26.724"
+version = "0.26.725"
 dependencies = [
  "rustls 0.23.41",
  "rustls-pemfile 2.2.0",

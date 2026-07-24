@@ -4,7 +4,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wardrobe_core::{
+use wardrobe_embedded::{
     ApplicationLogDestination, ApplicationLogFormat, ApplicationLogLevel, DurabilityPolicy,
     ProtocolFrame, ProtocolOpcode,
 };

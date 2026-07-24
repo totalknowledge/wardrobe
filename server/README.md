@@ -1,6 +1,6 @@
 # Wardrobe Server
 
-`wardrobe-server` is the standalone Wardrobe daemon at version `0.26.724`. It hosts a shared `WardrobeEngine` behind a protocol boundary so multiple clients can connect to the same storage root over TCP or Unix sockets.
+`wardrobe-server` is the standalone Wardrobe daemon at version `0.26.725`. It hosts a shared `WardrobeEngine` behind a protocol boundary so multiple clients can connect to the same storage root over TCP or Unix sockets.
 
 The server is licensed under Business Source License 1.1. Its change date is July 22, 2030, and its change license is GPL version 2 or later. See `server/LICENSE` for the authoritative terms.
 
@@ -108,7 +108,7 @@ The simplest client entry point is `WardrobeClient`.
 
 ```rust
 use serde_json::json;
-use wardrobe_core::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
+use wardrobe_embedded::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
 
 fn main() -> std::io::Result<()> {
     let client = WardrobeClient::open("wardrobe://127.0.0.1:24842")?;

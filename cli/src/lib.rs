@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use wardrobe_core::{
+use wardrobe_embedded::{
     AlterRequest, ApplicationLogEvent, ApplicationLogLevel, ApplicationLoggingConfig,
     CompactRequest, ConnectionTarget, CreateRequest, CreateResult, Database, DropRequest,
     InspectResult, OperationFilter, OperationOptions, PermissionRequest, ReadResult, StatusRequest,
@@ -423,7 +423,7 @@ fn status_storage(client: &WardrobeClient) -> io::Result<StorageDiagnosis> {
         .map_err(client_error)
 }
 
-fn status_check(client: &WardrobeClient, path: &str) -> io::Result<wardrobe_core::CheckReport> {
+fn status_check(client: &WardrobeClient, path: &str) -> io::Result<wardrobe_embedded::CheckReport> {
     client
         .status(StatusRequest::path(path))
         .map_err(client_error)
@@ -1676,10 +1676,10 @@ fn run_restore_command(client: &WardrobeClient, parts: &[String], pretty: bool) 
     )
 }
 
-fn read_backup_archive(path: &Path) -> io::Result<wardrobe_core::BackupArchive> {
+fn read_backup_archive(path: &Path) -> io::Result<wardrobe_embedded::BackupArchive> {
     let bytes = fs::read(path)?;
     let archive =
-        serde_json::from_slice::<wardrobe_core::BackupArchive>(&bytes).map_err(|error| {
+        serde_json::from_slice::<wardrobe_embedded::BackupArchive>(&bytes).map_err(|error| {
             Error::new(
                 ErrorKind::InvalidData,
                 format!("Invalid backup archive JSON: {error}"),
@@ -2180,7 +2180,7 @@ mod tests {
         assert_eq!(options.page_size, Some(5));
         assert_eq!(
             options.order_direction,
-            Some(wardrobe_core::OrderDirection::Descending)
+            Some(wardrobe_embedded::OrderDirection::Descending)
         );
         assert!(operation_options(&parts, 99, "missing options").is_ok());
 
@@ -2443,7 +2443,7 @@ mod tests {
     #[test]
     fn local_identity_commands_delegate_to_managed_pki() {
         let root = temp_dir("managed_identity");
-        wardrobe_core::initialize_managed_pki(
+        wardrobe_embedded::initialize_managed_pki(
             &root,
             &["localhost".to_string()],
             &["127.0.0.1".parse().expect("IP should parse")],
@@ -2487,7 +2487,7 @@ mod tests {
     #[test]
     fn local_identity_and_certificate_commands_cover_lifecycle_and_validation() {
         let root = temp_dir("managed_commands");
-        wardrobe_core::initialize_managed_pki(
+        wardrobe_embedded::initialize_managed_pki(
             &root,
             &["localhost".to_string()],
             &["127.0.0.1".parse().expect("IP should parse")],

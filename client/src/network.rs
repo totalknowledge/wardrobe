@@ -21,7 +21,7 @@ enum NetworkStream {
 }
 
 impl NetworkTransport {
-    pub(crate) fn connect(host: String, port: u16, tls: Option<&ClientTlsConfig>) -> Result<Self> {
+    pub fn connect(host: String, port: u16, tls: Option<&ClientTlsConfig>) -> Result<Self> {
         let stream = TcpStream::connect((host.as_str(), port))?;
         stream.set_nodelay(true)?;
         let stream = match tls {
@@ -35,7 +35,7 @@ impl NetworkTransport {
         })
     }
 
-    pub(crate) fn execute(&self, command: &Value) -> Result<Value> {
+    pub fn execute(&self, command: &Value) -> Result<Value> {
         let payload = serde_json::to_vec(command).map_err(|error| {
             Error::new(
                 ErrorKind::InvalidInput,
