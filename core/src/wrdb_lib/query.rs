@@ -63,9 +63,38 @@ impl SortableValue<'_> {
 }
 
 pub(crate) fn filter_map(filter: &Value) -> Result<&Map<String, Value>> {
-    filter
+    let map = filter
         .as_object()
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object"))
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Filter root must be a JSON object"))?;
+    validate_filter_map(map)?;
+    Ok(map)
+}
+
+fn validate_filter_map(map: &Map<String, Value>) -> Result<()> {
+    for (key, val) in map {
+        if key == "$in" {
+            if !val.is_array() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "$in operator requires a JSON array payload",
+                ));
+            }
+        } else if key.starts_with('$') {
+            match key.as_str() {
+                "$gt" | "$gte" | "$lt" | "$lte" | "$eq" | "$ne" | "$in" => {}
+                _ => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("Unknown query operator: {key}"),
+                    ));
+                }
+            }
+        }
+        if let Value::Object(nested) = val {
+            validate_filter_map(nested)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_field_path<'a>(value: &'a Value, field_path: &str) -> Option<&'a Value> {
@@ -102,7 +131,12 @@ fn field_matches_filter(
             .is_some_and(|actual_string| matches_string_filter(actual_string, expected_string)),
         Value::Object(expected_map) => {
             if expected_map.keys().any(|key| key.starts_with('$')) {
-                return scalar_matches_operator_filter(actual_value, expected_map);
+                return scalar_matches_operator_filter(
+                    field_name,
+                    actual_value,
+                    expected_map,
+                    drawer_namespace,
+                );
             }
 
             if let Some(reference_id) = id_only_reference(expected_map) {
@@ -151,20 +185,96 @@ fn field_matches_filter(
     }
 }
 
-fn scalar_matches_operator_filter(actual_value: &Value, expected_map: &Map<String, Value>) -> bool {
+fn scalar_matches_operator_filter(
+    field_name: &str,
+    actual_value: &Value,
+    expected_map: &Map<String, Value>,
+    drawer_namespace: Option<&str>,
+) -> bool {
     expected_map.iter().all(|(operator, expected_value)| {
-        let Some(ordering) = compare_scalar_values(actual_value, expected_value) else {
-            return false;
-        };
         match operator.as_str() {
-            "$gt" => ordering == Ordering::Greater,
-            "$gte" => matches!(ordering, Ordering::Greater | Ordering::Equal),
-            "$lt" => ordering == Ordering::Less,
-            "$lte" => matches!(ordering, Ordering::Less | Ordering::Equal),
-            "$eq" => ordering == Ordering::Equal,
+            "$in" => {
+                let Value::Array(candidates) = expected_value else {
+                    return false;
+                };
+                candidates.iter().any(|candidate| {
+                    candidate_matches_value(field_name, actual_value, candidate, drawer_namespace)
+                })
+            }
+            "$ne" => compare_scalar_values(actual_value, expected_value)
+                .map_or(true, |ordering| ordering != Ordering::Equal),
+            "$gt" => compare_scalar_values(actual_value, expected_value)
+                .is_some_and(|ordering| ordering == Ordering::Greater),
+            "$gte" => compare_scalar_values(actual_value, expected_value)
+                .is_some_and(|ordering| matches!(ordering, Ordering::Greater | Ordering::Equal)),
+            "$lt" => compare_scalar_values(actual_value, expected_value)
+                .is_some_and(|ordering| ordering == Ordering::Less),
+            "$lte" => compare_scalar_values(actual_value, expected_value)
+                .is_some_and(|ordering| matches!(ordering, Ordering::Less | Ordering::Equal)),
+            "$eq" => compare_scalar_values(actual_value, expected_value)
+                .is_some_and(|ordering| ordering == Ordering::Equal),
             _ => false,
         }
     })
+}
+
+fn candidate_matches_value(
+    field_name: &str,
+    actual_value: &Value,
+    candidate: &Value,
+    drawer_namespace: Option<&str>,
+) -> bool {
+    if actual_value == candidate {
+        return true;
+    }
+
+    let target_drawer = if field_name == "_id" {
+        drawer_namespace.unwrap_or("").to_string()
+    } else {
+        relationship_drawer_name(field_name)
+    };
+
+    if let Value::Object(cand_map) = candidate {
+        if let Some(reference_id) = id_only_reference(cand_map) {
+            let normalized_pointer = pointer::normalize_reference_pointer_for_namespace(
+                &target_drawer,
+                reference_id,
+                drawer_namespace,
+            );
+            return actual_value.as_str() == Some(normalized_pointer.as_str());
+        }
+    }
+
+    if let (Value::String(actual_str), Value::String(cand_str)) = (actual_value, candidate) {
+        if matches_string_filter(actual_str, cand_str) {
+            return true;
+        }
+
+        let cand_clean_id = pointer::try_parse_pointer(cand_str)
+            .map(|(_, id)| id)
+            .unwrap_or_else(|| cand_str.clone());
+        let actual_clean_id = pointer::try_parse_pointer(actual_str)
+            .map(|(_, id)| id)
+            .unwrap_or_else(|| actual_str.clone());
+
+        if actual_clean_id == cand_clean_id {
+            return true;
+        }
+
+        let normalized_cand = pointer::normalize_reference_pointer_for_namespace(
+            &target_drawer,
+            cand_str,
+            drawer_namespace,
+        );
+        let normalized_actual = pointer::normalize_reference_pointer_for_namespace(
+            &target_drawer,
+            actual_str,
+            drawer_namespace,
+        );
+        return normalized_actual == normalized_cand;
+    }
+
+    compare_scalar_values(actual_value, candidate).is_some_and(|o| o == Ordering::Equal)
 }
 
 fn compare_scalar_values(actual_value: &Value, expected_value: &Value) -> Option<Ordering> {
@@ -448,7 +558,7 @@ fn sortable_value(value: &Value, sort_type: SortableType) -> Option<SortableValu
     }
 }
 
-fn id_only_reference(map: &Map<String, Value>) -> Option<&str> {
+pub(crate) fn id_only_reference(map: &Map<String, Value>) -> Option<&str> {
     if map.len() == 1 {
         map.get("_id").and_then(|value| value.as_str())
     } else {

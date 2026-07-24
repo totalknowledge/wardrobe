@@ -4,6 +4,7 @@ use std::ops::Bound;
 #[derive(Debug, Clone)]
 pub(super) enum SecondaryIndexPredicate {
     Equality(String),
+    In(Vec<String>),
     Range {
         lower: Option<(String, bool)>,
         upper: Option<(String, bool)>,
@@ -21,6 +22,9 @@ impl Drawer {
 
         let mut materialized_for_future_query = false;
         for (field_name, expected_value) in filter_map {
+            if field_name == &self.primary_key {
+                continue;
+            }
             if Self::secondary_index_predicate(expected_value).is_none() {
                 return Ok(None);
             }
@@ -61,13 +65,59 @@ impl Drawer {
 
         let mut candidate_offsets: Option<Vec<u64>> = None;
         for (field_name, expected_value) in filter_map {
-            let Some(field_map) = self.secondary_memory_index.get(field_name) else {
-                return Ok(None);
+            let mut offsets = if field_name == &self.primary_key {
+                let mut pk_keys = Vec::new();
+                match expected_value {
+                    Value::String(s) if !s.contains('%') => pk_keys.push(s.clone()),
+                    Value::Object(map) => {
+                        if let Some(Value::Array(cands)) = map.get("$in") {
+                            for cand in cands {
+                                if let Value::String(s) = cand {
+                                    if !s.contains('%') {
+                                        pk_keys.push(s.clone());
+                                    }
+                                } else if let Value::Object(cand_map) = cand {
+                                    if let Some(id) = query::id_only_reference(cand_map) {
+                                        pk_keys.push(id.to_string());
+                                    }
+                                }
+                            }
+                        } else if let Some(Value::String(s)) = map.get("$eq") {
+                            if !s.contains('%') {
+                                pk_keys.push(s.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if pk_keys.is_empty() {
+                    return Ok(None);
+                }
+                let mut found = Vec::new();
+                for key in pk_keys {
+                    let clean_id = crate::wrdb_lib::pointer::try_parse_pointer(&key)
+                        .map(|(_, id)| id.to_string())
+                        .unwrap_or_else(|| key.clone());
+                    let full_pointer = format!("@{}:{}", self.name, clean_id);
+
+                    if let Some(&off) = self.primary_memory_index.get(&key) {
+                        found.push(off);
+                    } else if let Some(&off) = self.primary_memory_index.get(&full_pointer) {
+                        found.push(off);
+                    } else if let Some(&off) = self.primary_memory_index.get(&clean_id) {
+                        found.push(off);
+                    }
+                }
+                found
+            } else {
+                let Some(field_map) = self.secondary_memory_index.get(field_name) else {
+                    return Ok(None);
+                };
+                let Some(predicate) = Self::secondary_index_predicate(expected_value) else {
+                    return Ok(None);
+                };
+                Self::secondary_index_offsets_for_predicate(field_map, &predicate)
             };
-            let Some(predicate) = Self::secondary_index_predicate(expected_value) else {
-                return Ok(None);
-            };
-            let mut offsets = Self::secondary_index_offsets_for_predicate(field_map, &predicate);
             offsets.sort_unstable();
             offsets.dedup();
 
@@ -383,6 +433,14 @@ impl Drawer {
     pub(super) fn secondary_index_predicate(value: &Value) -> Option<SecondaryIndexPredicate> {
         if let Value::Object(map) = value {
             if map.keys().any(|key| key.starts_with('$')) {
+                if let Some(Value::Array(candidates)) = map.get("$in") {
+                    let mut keys = Vec::new();
+                    for cand in candidates {
+                        let key = Self::equality_filter_index_key(cand)?;
+                        keys.push(key);
+                    }
+                    return Some(SecondaryIndexPredicate::In(keys));
+                }
                 return Self::range_filter_index_predicate(map);
             }
         }
@@ -444,6 +502,15 @@ impl Drawer {
         match predicate {
             SecondaryIndexPredicate::Equality(index_key) => {
                 field_map.get(index_key).cloned().unwrap_or_default()
+            }
+            SecondaryIndexPredicate::In(keys) => {
+                let mut offsets = Vec::new();
+                for key in keys {
+                    if let Some(matching) = field_map.get(key) {
+                        offsets.extend(matching.iter().copied());
+                    }
+                }
+                offsets
             }
             SecondaryIndexPredicate::Range { lower, upper } => {
                 if let (Some((lower_key, lower_inclusive)), Some((upper_key, upper_inclusive))) =

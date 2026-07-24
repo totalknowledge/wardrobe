@@ -2622,6 +2622,113 @@ fn us_146_automatic_record_timestamps() {
 }
 
 #[test]
+fn us_147_in_operator_filtering() {
+    let database = TempDatabase::new("us_147_in_operator_filtering");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({
+                "_id": "@book:b1",
+                "title": "Rust Programming",
+                "category": "tech",
+                "copies": 10,
+                "available": true,
+                "meta": { "format": "paperback", "rating": 5 }
+            }),
+            OperationFilter::drawer("book"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert b1");
+
+    engine
+        .upsert(
+            json!({
+                "_id": "@book:b2",
+                "title": "Ancient History",
+                "category": "history",
+                "copies": 5,
+                "available": false,
+                "meta": { "format": "hardcover", "rating": 4 }
+            }),
+            OperationFilter::drawer("book"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert b2");
+
+    engine
+        .upsert(
+            json!({
+                "_id": "@book:b3",
+                "title": "Cookbook Basics",
+                "category": "cooking",
+                "copies": 2,
+                "available": true,
+                "meta": { "format": "paperback", "rating": 3 }
+            }),
+            OperationFilter::drawer("book"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert b3");
+
+    let filter = OperationFilter::query_in(
+        "book",
+        json!({"category": {"$in": ["tech", "history"]}}),
+    );
+    let ReadResult::Records(records) = engine.read(filter, None::<OperationOptions>).unwrap() else {
+        panic!("expected records");
+    };
+    assert_eq!(records.len(), 2);
+
+    let filter_nested = OperationFilter::query_in(
+        "book",
+        json!({"meta.format": {"$in": ["hardcover"]}}),
+    );
+    let ReadResult::Records(records_nested) = engine.read(filter_nested, None::<OperationOptions>).unwrap() else {
+        panic!("expected records");
+    };
+    assert_eq!(records_nested.len(), 1);
+    assert_eq!(records_nested[0]["_id"], "b2");
+
+    let filter_pk = OperationFilter::query_in(
+        "book",
+        json!({"_id": {"$in": ["@book:b1", "@book:b3"]}}),
+    );
+    let ReadResult::Records(records_pk) = engine.read(filter_pk, None::<OperationOptions>).unwrap() else {
+        panic!("expected records");
+    };
+    assert_eq!(records_pk.len(), 2);
+
+    let invalid_filter = OperationFilter::query_in(
+        "book",
+        json!({"category": {"$in": "not_an_array"}}),
+    );
+    let err = engine.read(invalid_filter, None::<OperationOptions>).expect_err("non-array $in must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("$in operator requires a JSON array payload"));
+
+    engine
+        .alter(AlterRequest::schema_rule(
+            "book",
+            "add",
+            "index",
+            "category",
+            json!({}),
+        ))
+        .expect("add index on category");
+
+    let filter_indexed = OperationFilter::query_in(
+        "book",
+        json!({"category": {"$in": ["tech", "cooking"]}}),
+    );
+    let ReadResult::Records(records_indexed) = engine.read(filter_indexed, None::<OperationOptions>).unwrap() else {
+        panic!("expected records");
+    };
+    assert_eq!(records_indexed.len(), 2);
+}
+
+#[test]
 fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     let database = TempDatabase::new("us_034_execute_routes_nested_paths");
     let storage_pool = database.path.to_string_lossy().into_owned();
