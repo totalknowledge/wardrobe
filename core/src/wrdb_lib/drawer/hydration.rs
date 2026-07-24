@@ -9,6 +9,22 @@ pub(crate) struct HydrationCache {
     records: HashMap<String, Option<Value>>,
 }
 
+fn is_field_excluded(field_name: &str, prefix: &str, excluded_fields: &HashSet<String>) -> bool {
+    if excluded_fields.is_empty() {
+        return false;
+    }
+    if excluded_fields.contains(field_name) {
+        return true;
+    }
+    if !prefix.is_empty() {
+        let full_path = format!("{prefix}.{field_name}");
+        if excluded_fields.contains(&full_path) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 pub(crate) fn hydrate_records<F>(
     records: &mut [Value],
@@ -19,12 +35,14 @@ where
     F: FnMut(&str, &str) -> Result<Option<Value>>,
 {
     let mut cache = HydrationCache::default();
-    hydrate_records_with_cache(records, include_ids, &mut cache, fetch_record)
+    let excluded = HashSet::new();
+    hydrate_records_with_cache(records, include_ids, &excluded, &mut cache, fetch_record)
 }
 
 pub(crate) fn hydrate_records_with_cache<F>(
     records: &mut [Value],
     include_ids: bool,
+    excluded_fields: &HashSet<String>,
     cache: &mut HydrationCache,
     mut fetch_record: F,
 ) -> Result<()>
@@ -38,9 +56,11 @@ where
                 active_pointer_path.insert(pointer.to_string());
             }
         }
-        hydrate_value_with_cache(
+        hydrate_value_with_cache_internal(
             record,
             include_ids,
+            "",
+            excluded_fields,
             &mut active_pointer_path,
             cache,
             &mut fetch_record,
@@ -61,9 +81,12 @@ where
     F: FnMut(&str, &str) -> Result<Option<Value>>,
 {
     let mut cache = HydrationCache::default();
-    hydrate_value_with_cache(
+    let excluded = HashSet::new();
+    hydrate_value_with_cache_internal(
         current_value,
         include_ids,
+        "",
+        &excluded,
         active_pointer_path,
         &mut cache,
         fetch_record,
@@ -73,6 +96,30 @@ where
 pub(crate) fn hydrate_value_with_cache<F>(
     current_value: &mut Value,
     include_ids: bool,
+    excluded_fields: &HashSet<String>,
+    active_pointer_path: &mut HashSet<String>,
+    cache: &mut HydrationCache,
+    fetch_record: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&str, &str) -> Result<Option<Value>>,
+{
+    hydrate_value_with_cache_internal(
+        current_value,
+        include_ids,
+        "",
+        excluded_fields,
+        active_pointer_path,
+        cache,
+        fetch_record,
+    )
+}
+
+pub(crate) fn hydrate_value_with_cache_internal<F>(
+    current_value: &mut Value,
+    include_ids: bool,
+    prefix: &str,
+    excluded_fields: &HashSet<String>,
     active_pointer_path: &mut HashSet<String>,
     cache: &mut HydrationCache,
     fetch_record: &mut F,
@@ -85,7 +132,7 @@ where
             let pointer_updates = map
                 .iter()
                 .filter_map(|(field_name, field_value)| {
-                    if field_name == "_id" {
+                    if field_name == "_id" || is_field_excluded(field_name, prefix, excluded_fields) {
                         return None;
                     }
 
@@ -104,6 +151,7 @@ where
                 if let Some(resolved_value) = resolve_pointer(
                     &pointer,
                     include_ids,
+                    excluded_fields,
                     active_pointer_path,
                     cache,
                     fetch_record,
@@ -115,10 +163,20 @@ where
             }
 
             for (field_name, field_value) in map.iter_mut() {
-                if field_name != "_id" && !pointer_update_fields.contains(field_name) {
-                    hydrate_value_with_cache(
+                if field_name != "_id"
+                    && !pointer_update_fields.contains(field_name)
+                    && !is_field_excluded(field_name, prefix, excluded_fields)
+                {
+                    let next_prefix = if prefix.is_empty() {
+                        field_name.clone()
+                    } else {
+                        format!("{prefix}.{field_name}")
+                    };
+                    hydrate_value_with_cache_internal(
                         field_value,
                         include_ids,
+                        &next_prefix,
+                        excluded_fields,
                         active_pointer_path,
                         cache,
                         fetch_record,
@@ -136,6 +194,7 @@ where
                     if let Some(resolved_value) = resolve_pointer(
                         &pointer,
                         include_ids,
+                        excluded_fields,
                         active_pointer_path,
                         cache,
                         fetch_record,
@@ -145,9 +204,11 @@ where
                     }
                 }
 
-                hydrate_value_with_cache(
+                hydrate_value_with_cache_internal(
                     value,
                     include_ids,
+                    prefix,
+                    excluded_fields,
                     active_pointer_path,
                     cache,
                     fetch_record,
@@ -165,6 +226,7 @@ pub(crate) fn hydrate_virtual_relationships<F>(
     records: &mut [Value],
     virtual_relationships: &[VirtualRelationship],
     include_ids: bool,
+    excluded_fields: &HashSet<String>,
     mut load_children: F,
 ) -> Result<()>
 where
@@ -184,6 +246,9 @@ where
         let parent_pointer = pointer::format_pointer(drawer_name, parent_key);
 
         for relationship in virtual_relationships {
+            if excluded_fields.contains(&relationship.field_name) {
+                continue;
+            }
             let mut child_records = load_children(relationship, &parent_pointer, include_ids)?;
             if !include_ids {
                 remove_root_ids(&mut child_records);
@@ -198,6 +263,7 @@ where
 fn resolve_pointer<F>(
     pointer: &str,
     include_ids: bool,
+    excluded_fields: &HashSet<String>,
     active_pointer_path: &mut HashSet<String>,
     cache: &mut HydrationCache,
     fetch_record: &mut F,
@@ -224,9 +290,11 @@ where
 
     if let Some(ref mut record_value) = record {
         active_pointer_path.insert(canonical_pointer.clone());
-        hydrate_value_with_cache(
+        hydrate_value_with_cache_internal(
             record_value,
             include_ids,
+            "",
+            excluded_fields,
             active_pointer_path,
             cache,
             fetch_record,
@@ -388,12 +456,14 @@ mod tests {
         }];
         let mut records = vec![json!({"_id": "alice", "name": "Alice"})];
 
+        let excluded = HashSet::new();
         hydrate_virtual_relationships(
             "character",
             &mut records,
             &relationships,
             false,
-            |relationship, parent_pointer, _include_ids| {
+            &excluded,
+            |relationship: &VirtualRelationship, parent_pointer, _include_ids| {
                 assert_eq!(relationship.target_drawer, "weapon");
                 assert_eq!(parent_pointer, "@character:alice");
                 Ok(vec![json!({"_id": "@weapon:blade", "name": "Blade"})])

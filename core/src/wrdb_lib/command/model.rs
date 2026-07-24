@@ -228,6 +228,7 @@ pub struct OperationOptions {
     pub create_if_missing: Option<bool>,
     pub return_shape: Option<ReturnShape>,
     pub hydrate: Option<bool>,
+    pub exclude_hydration: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub order_by: Option<String>,
@@ -265,6 +266,15 @@ impl OperationOptions {
 
     pub fn hydrate(mut self, hydrate: bool) -> Self {
         self.hydrate = Some(hydrate);
+        self
+    }
+
+    pub fn exclude_hydration<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.exclude_hydration = Some(fields.into_iter().map(Into::into).collect());
         self
     }
 
@@ -338,6 +348,9 @@ impl OperationOptions {
                     })
                 }
                 "hydrate" => options.hydrate = Some(expect_bool(&key, &value)?),
+                "exclude_hydration" | "excludeHydration" => {
+                    options.exclude_hydration = Some(expect_string_array(&key, &value)?);
+                }
                 "limit" => options.limit = Some(expect_usize(&key, &value)?),
                 "offset" => options.offset = Some(expect_usize(&key, &value)?),
                 "order_by" => options.order_by = Some(expect_string(&key, &value)?),
@@ -555,6 +568,26 @@ fn expect_usize(key: &str, value: &Value) -> Result<usize> {
             format!("operation option '{key}' is too large for this platform"),
         )
     })
+}
+
+fn expect_string_array(key: &str, value: &Value) -> Result<Vec<String>> {
+    let Value::Array(items) = value else {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("operation option '{key}' must be an array of strings"),
+        ));
+    };
+    let mut strings = Vec::new();
+    for item in items {
+        let Some(s) = item.as_str() else {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("operation option '{key}' must contain only strings"),
+            ));
+        };
+        strings.push(s.to_string());
+    }
+    Ok(strings)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

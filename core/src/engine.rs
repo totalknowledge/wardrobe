@@ -669,6 +669,7 @@ impl WardrobeEngine {
                     &self.database_core,
                     &pointer,
                     ExecutionContext::root(),
+                    &OperationOptions::default(),
                     false,
                 )? {
                     records.push(record);
@@ -871,6 +872,7 @@ impl WardrobeEngine {
             query,
             None,
             ExecutionContext::root(),
+            options,
             false,
         )?
         .records;
@@ -938,6 +940,7 @@ impl WardrobeEngine {
                     &self.database_core,
                     &pointer,
                     ExecutionContext::root(),
+                    options,
                     options.hydrate.unwrap_or(true),
                 )? {
                     records.push(record);
@@ -961,6 +964,7 @@ impl WardrobeEngine {
                 query,
                 options.query_modifiers(),
                 ExecutionContext::root(),
+                options,
                 options.hydrate.unwrap_or(true),
             );
         }
@@ -969,6 +973,7 @@ impl WardrobeEngine {
             &self.database_core,
             &drawer_name,
             ExecutionContext::root(),
+            options,
             options.hydrate.unwrap_or(true),
         )?;
         let pagination = crate::wrdb_lib::query::apply_query_modifiers(
@@ -1029,6 +1034,7 @@ impl WardrobeEngine {
                 &self.database_core,
                 &pointer,
                 ExecutionContext::root(),
+                &OperationOptions::default(),
                 false,
             )?
             .is_some()

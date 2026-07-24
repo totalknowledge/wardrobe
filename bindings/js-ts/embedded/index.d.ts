@@ -4,6 +4,8 @@ export interface OperationOptions {
   createIfMissing?: boolean;
   returnShape?: string;
   hydrate?: boolean;
+  exclude_hydration?: string[];
+  excludeHydration?: string[];
   limit?: number;
   offset?: number;
   orderBy?: string;

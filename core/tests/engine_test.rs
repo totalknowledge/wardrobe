@@ -2729,6 +2729,77 @@ fn us_147_in_operator_filtering() {
 }
 
 #[test]
+fn us_149_conditional_relationship_hydration_control() {
+    let database = TempDatabase::new("us_149_conditional_hydration");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({"_id": "@thread:t1", "title": "Rust Forum Post"}),
+            OperationFilter::drawer("thread"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert thread t1");
+
+    engine
+        .upsert(
+            json!({"_id": "@author:a1", "name": "Alice Developer"}),
+            OperationFilter::drawer("author"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert author a1");
+
+    engine
+        .upsert(
+            json!({
+                "_id": "@post:p1",
+                "body": "First post content",
+                "thread": "@thread:t1",
+                "author": "@author:a1"
+            }),
+            OperationFilter::drawer("post"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert post p1");
+
+    let ReadResult::Record(Some(full_read)) = engine
+        .read(
+            OperationFilter::pointer("@post:p1"),
+            None::<OperationOptions>,
+        )
+        .unwrap()
+    else {
+        panic!("expected record");
+    };
+    assert_eq!(full_read["thread"]["title"], "Rust Forum Post");
+    assert_eq!(full_read["author"]["name"], "Alice Developer");
+
+    let ReadResult::Record(Some(excluded_thread)) = engine
+        .read(
+            OperationFilter::pointer("@post:p1"),
+            OperationOptions::new().exclude_hydration(["thread"]),
+        )
+        .unwrap()
+    else {
+        panic!("expected record");
+    };
+    assert_eq!(excluded_thread["thread"], "@thread:t1");
+    assert_eq!(excluded_thread["author"]["name"], "Alice Developer");
+
+    let options_json = json!({"exclude_hydration": ["thread", "author"]});
+    let options = OperationOptions::from_json(options_json).expect("parse options");
+    let ReadResult::Record(Some(excluded_both)) = engine
+        .read(OperationFilter::pointer("@post:p1"), options)
+        .unwrap()
+    else {
+        panic!("expected record");
+    };
+    assert_eq!(excluded_both["thread"], "@thread:t1");
+    assert_eq!(excluded_both["author"], "@author:a1");
+}
+
+#[test]
 fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     let database = TempDatabase::new("us_034_execute_routes_nested_paths");
     let storage_pool = database.path.to_string_lossy().into_owned();

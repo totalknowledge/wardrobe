@@ -1,5 +1,6 @@
 use super::{QueryModifiers, StorageLocator, WardrobeEngine};
 use crate::wrdb_lib::command::dispatch as command_dispatch;
+use crate::OperationOptions;
 use crate::wrdb_lib::database::Database;
 use crate::wrdb_lib::drawer::{
     Drawer, VacuumReport, delete_rules, hydration, nested_decomposition, relationship,
@@ -393,6 +394,7 @@ impl WardrobeEngine {
         database_core: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> std::io::Result<Vec<Value>> {
         let physical_drawer_name =
@@ -409,10 +411,16 @@ impl WardrobeEngine {
         };
 
         if hydrate {
+            let excluded_set: HashSet<String> = options
+                .exclude_hydration
+                .as_ref()
+                .map(|list| list.iter().cloned().collect())
+                .unwrap_or_default();
             let mut hydration_cache = RequestHydrationCache::default();
             hydration::hydrate_records_with_cache(
                 &mut records,
                 true,
+                &excluded_set,
                 &mut hydration_cache.records,
                 |drawer_name, record_key| {
                     Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
@@ -424,6 +432,7 @@ impl WardrobeEngine {
                 &mut records,
                 true,
                 context,
+                &excluded_set,
                 &mut hydration_cache,
             )?;
         }
@@ -442,6 +451,7 @@ impl WardrobeEngine {
         filter: Value,
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<query::QueryRecords> {
         let filter_map = query::filter_map(&filter)?;
@@ -469,10 +479,16 @@ impl WardrobeEngine {
         });
         let pagination = query::apply_query_modifiers(&mut records, modifiers.as_ref())?;
         if hydrate {
+            let excluded_set: HashSet<String> = options
+                .exclude_hydration
+                .as_ref()
+                .map(|list| list.iter().cloned().collect())
+                .unwrap_or_default();
             let mut hydration_cache = RequestHydrationCache::default();
             hydration::hydrate_records_with_cache(
                 &mut records,
                 true,
+                &excluded_set,
                 &mut hydration_cache.records,
                 |drawer_name, record_key| {
                     Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
@@ -484,6 +500,7 @@ impl WardrobeEngine {
                 &mut records,
                 true,
                 context,
+                &excluded_set,
                 &mut hydration_cache,
             )?;
         }
@@ -593,6 +610,7 @@ impl WardrobeEngine {
         database_core: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<Option<Value>> {
         let physical_pointer = routing::scoped_pointer(pointer, context.drawer_namespace);
@@ -608,25 +626,32 @@ impl WardrobeEngine {
                 Self::write_lock(&drawer)?.find_by_primary_key_with_migration(&record_key)?;
             if let Some(mut record) = found_record {
                 if hydrate {
-                let mut active_pointer_path = HashSet::from([physical_pointer]);
-                let mut hydration_cache = RequestHydrationCache::default();
-                hydration::hydrate_value_with_cache(
-                    &mut record,
-                    false,
-                    &mut active_pointer_path,
-                    &mut hydration_cache.records,
-                    &mut |drawer_name, record_key| {
-                        Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
-                    },
-                )?;
-                Self::attach_virtual_relationships(
-                    database_core,
-                    &drawer_name,
-                    std::slice::from_mut(&mut record),
-                    false,
-                    context,
-                    &mut hydration_cache,
-                )?;
+                    let excluded_set: HashSet<String> = options
+                        .exclude_hydration
+                        .as_ref()
+                        .map(|list| list.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let mut active_pointer_path = HashSet::from([physical_pointer]);
+                    let mut hydration_cache = RequestHydrationCache::default();
+                    hydration::hydrate_value_with_cache(
+                        &mut record,
+                        false,
+                        &excluded_set,
+                        &mut active_pointer_path,
+                        &mut hydration_cache.records,
+                        &mut |drawer_name, record_key| {
+                            Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
+                        },
+                    )?;
+                    Self::attach_virtual_relationships(
+                        database_core,
+                        &drawer_name,
+                        std::slice::from_mut(&mut record),
+                        false,
+                        context,
+                        &excluded_set,
+                        &mut hydration_cache,
+                    )?;
                 }
                 Self::remove_hidden_fields_from_value(database_core, &drawer_name, &mut record)?;
                 if let Value::Object(ref mut map) = record {
@@ -1147,6 +1172,7 @@ impl WardrobeEngine {
         records: &mut [Value],
         include_ids: bool,
         context: ExecutionContext<'_>,
+        excluded_fields: &HashSet<String>,
         hydration_cache: &mut RequestHydrationCache,
     ) -> Result<()> {
         let virtual_relationships = {
@@ -1170,6 +1196,7 @@ impl WardrobeEngine {
             records,
             &virtual_relationships,
             include_ids,
+            excluded_fields,
             |relationship, parent_pointer, include_ids| {
                 Self::virtual_relationship_children(
                     database_core,
@@ -1178,6 +1205,7 @@ impl WardrobeEngine {
                     parent_pointer,
                     include_ids,
                     context,
+                    excluded_fields,
                     hydration_cache,
                 )
             },
@@ -1191,6 +1219,7 @@ impl WardrobeEngine {
         parent_pointer: &str,
         include_ids: bool,
         context: ExecutionContext<'_>,
+        excluded_fields: &HashSet<String>,
         hydration_cache: &mut RequestHydrationCache,
     ) -> Result<Vec<Value>> {
         let physical_target_drawer =
@@ -1233,6 +1262,7 @@ impl WardrobeEngine {
         hydration::hydrate_records_with_cache(
             &mut child_records,
             include_ids,
+            excluded_fields,
             &mut hydration_cache.records,
             |drawer_name, record_key| {
                 Self::fetch_record_for_hydration(database_core, drawer_name, record_key)
@@ -1320,18 +1350,20 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         database: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<Vec<Value>> {
-        WardrobeEngine::find_all_in_database(database, drawer_name, context, hydrate)
+        WardrobeEngine::find_all_in_database(database, drawer_name, context, options, hydrate)
     }
 
     fn find_by_id_in_database(
         database: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<Option<Value>> {
-        WardrobeEngine::find_by_id_in_database(database, pointer, context, hydrate)
+        WardrobeEngine::find_by_id_in_database(database, pointer, context, options, hydrate)
     }
 
     fn find_by_filter_in_database(
@@ -1340,6 +1372,7 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
         filter: Value,
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<query::QueryRecords> {
         WardrobeEngine::find_by_filter_in_database(
@@ -1348,6 +1381,7 @@ impl command_dispatch::DatabaseCommandExecutor for WardrobeEngine {
             filter,
             modifiers,
             context,
+            options,
             hydrate,
         )
     }

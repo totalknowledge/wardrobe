@@ -17,6 +17,7 @@ use crate::wrdb_lib::routing::ExecutionContext;
 use crate::wrdb_lib::storage::{StorageCoordinate, StorageInventory, StorageLocator, StorageScope};
 use crate::wrdb_lib::wal::WalVerification;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::RwLock;
 
@@ -94,6 +95,7 @@ pub(crate) trait DatabaseCommandExecutor {
         database: &RwLock<Database>,
         drawer_name: &str,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<Vec<Value>>;
 
@@ -101,6 +103,7 @@ pub(crate) trait DatabaseCommandExecutor {
         database: &RwLock<Database>,
         pointer: &str,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<Option<Value>>;
 
@@ -110,6 +113,7 @@ pub(crate) trait DatabaseCommandExecutor {
         filter: Value,
         modifiers: Option<QueryModifiers>,
         context: ExecutionContext<'_>,
+        options: &OperationOptions,
         hydrate: bool,
     ) -> Result<QueryRecords>;
 
@@ -497,7 +501,7 @@ where
         )
     })?;
     let matched_records =
-        E::find_by_filter_in_database(database, drawer_name, query, None, context, false)?.records;
+        E::find_by_filter_in_database(database, drawer_name, query, None, context, &options, false)?.records;
     if matched_records.is_empty() {
         if options.create_if_missing == Some(false) {
             return Ok(Vec::new());
@@ -551,7 +555,7 @@ where
     let query_records = if !selection.pointers.is_empty() {
         let mut records = Vec::new();
         for pointer in selection.resolved_pointers()? {
-            if let Some(record) = E::find_by_id_in_database(database, &pointer, context, hydrate)? {
+            if let Some(record) = E::find_by_id_in_database(database, &pointer, context, &options, hydrate)? {
                 records.push(record);
             }
         }
@@ -572,10 +576,11 @@ where
                 query,
                 options.query_modifiers(),
                 context,
+                &options,
                 hydrate,
             )?
         } else {
-            let mut records = E::find_all_in_database(database, &drawer_name, context, hydrate)?;
+            let mut records = E::find_all_in_database(database, &drawer_name, context, &options, hydrate)?;
             let pagination = crate::wrdb_lib::query::apply_query_modifiers(
                 &mut records,
                 options.query_modifiers().as_ref(),
@@ -600,7 +605,7 @@ where
     if hydrate && selection.pointers.is_empty() {
         match read_shape {
             ReturnShapeResolution::Record | ReturnShapeResolution::Records => {
-                hydrate_read_records_in_database::<E>(database, &mut records, context)?;
+                hydrate_read_records_in_database::<E>(database, &mut records, &options, context)?;
             }
             ReturnShapeResolution::Pointers | ReturnShapeResolution::Exists => {}
         }
@@ -629,16 +634,28 @@ where
 fn hydrate_read_records_in_database<E>(
     database: &RwLock<Database>,
     records: &mut [Value],
+    options: &OperationOptions,
     context: ExecutionContext<'_>,
 ) -> Result<()>
 where
     E: DatabaseCommandExecutor,
 {
+    let excluded_set: HashSet<String> = options
+        .exclude_hydration
+        .as_ref()
+        .map(|list| list.iter().cloned().collect())
+        .unwrap_or_default();
     let mut cache = hydration::HydrationCache::default();
-    hydration::hydrate_records_with_cache(records, true, &mut cache, |drawer_name, record_key| {
-        let pointer = pointer::format_pointer(drawer_name, record_key);
-        E::find_by_id_in_database(database, &pointer, context, false)
-    })
+    hydration::hydrate_records_with_cache(
+        records,
+        true,
+        &excluded_set,
+        &mut cache,
+        |drawer_name, record_key| {
+            let pointer = pointer::format_pointer(drawer_name, record_key);
+            E::find_by_id_in_database(database, &pointer, context, options, false)
+        },
+    )
 }
 
 fn execute_count_in_database<E>(
@@ -655,7 +672,7 @@ where
         let modifiers = options.query_modifiers();
         let mut records = Vec::new();
         for pointer in selection.resolved_pointers()? {
-            if let Some(record) = E::find_by_id_in_database(database, &pointer, context, false)? {
+            if let Some(record) = E::find_by_id_in_database(database, &pointer, context, &options, false)? {
                 records.push(record);
             }
         }
@@ -1151,6 +1168,7 @@ mod tests {
             _database: &RwLock<Database>,
             drawer_name: &str,
             context: ExecutionContext<'_>,
+            _options: &OperationOptions,
             _hydrate: bool,
         ) -> Result<Vec<Value>> {
             if drawer_name == "nispuk/default/plants" {
@@ -1171,6 +1189,7 @@ mod tests {
             _database: &RwLock<Database>,
             pointer: &str,
             _context: ExecutionContext<'_>,
+            _options: &OperationOptions,
             _hydrate: bool,
         ) -> Result<Option<Value>> {
             if pointer == "@nispuk/default/plant_types:fab3d886c9094b61bd6cbd1806daac0e" {
@@ -1190,6 +1209,7 @@ mod tests {
             filter: Value,
             modifiers: Option<QueryModifiers>,
             _context: ExecutionContext<'_>,
+            _options: &OperationOptions,
             _hydrate: bool,
         ) -> Result<QueryRecords> {
             Ok(QueryRecords {
