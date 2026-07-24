@@ -68,6 +68,8 @@ pub(crate) struct DrawerMetadata {
     pub(crate) field_name_map: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) hidden_fields: Vec<String>,
+    #[serde(default)]
+    pub(crate) timestamps_enabled: bool,
 }
 
 impl DrawerMetadata {
@@ -99,6 +101,7 @@ impl DrawerMetadata {
         materialized_secondary_indexes: BTreeMap<String, u64>,
         field_name_map: BTreeMap<String, String>,
         hidden_fields: Vec<String>,
+        timestamps_enabled: bool,
     ) -> Self {
         Self {
             format_version: DRAWER_METADATA_FORMAT_VERSION,
@@ -113,6 +116,7 @@ impl DrawerMetadata {
             materialized_secondary_indexes,
             field_name_map,
             hidden_fields,
+            timestamps_enabled,
         }
     }
 
@@ -229,6 +233,7 @@ pub struct Drawer {
     metadata_format_version: u8,
     field_name_map: BTreeMap<String, String>,
     hidden_fields: HashSet<String>,
+    pub(crate) timestamps_enabled: bool,
     #[cfg(test)]
     data_file_path: PathBuf,
     index_file_path: PathBuf,
@@ -440,6 +445,7 @@ mod tests {
                 ("a".to_string(), "element".to_string()),
             ]),
             vec!["owner".to_string()],
+            false,
         );
         metadata.persist(&metadata_path).expect("metadata persists");
         let loaded = DrawerMetadata::load(&metadata_path)

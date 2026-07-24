@@ -28,7 +28,7 @@ impl Drawer {
 
     pub(super) fn upsert_record_internal(
         &mut self,
-        record: Value,
+        mut record: Value,
     ) -> std::io::Result<Result<bool, String>> {
         let primary_key_value = match record.get(&self.primary_key).and_then(|v| v.as_str()) {
             Some(val) => val.to_string(),
@@ -40,23 +40,44 @@ impl Drawer {
             }
         };
 
-        if let Err(validation_error) = self.validate_schema(&record) {
-            return Ok(Err(validation_error));
-        }
-
         let old_data_offset = self.primary_memory_index.get(&primary_key_value).copied();
-        if let Some(validation_error) =
-            self.validate_relationship_constraints(&record, &primary_key_value)?
-        {
-            return Ok(Err(validation_error));
-        }
-
         let is_new_record = old_data_offset.is_none();
         let old_record = if let Some(existing_offset) = old_data_offset {
             self.read_logical_record_at_offset(existing_offset)?
         } else {
             None
         };
+
+        if self.timestamps_enabled {
+            if let Some(map) = record.as_object_mut() {
+                let now = current_iso8601_timestamp();
+                if is_new_record || old_record.is_none() {
+                    map.entry("created_at".to_string())
+                        .or_insert_with(|| Value::String(now.clone()));
+                    map.entry("updated_at".to_string())
+                        .or_insert_with(|| Value::String(now));
+                } else {
+                    if !map.contains_key("created_at") {
+                        if let Some(created_at) = old_record.as_ref().and_then(|r| r.get("created_at")) {
+                            map.insert("created_at".to_string(), created_at.clone());
+                        } else {
+                            map.insert("created_at".to_string(), Value::String(now.clone()));
+                        }
+                    }
+                    map.insert("updated_at".to_string(), Value::String(now));
+                }
+            }
+        }
+
+        if let Err(validation_error) = self.validate_schema(&record) {
+            return Ok(Err(validation_error));
+        }
+
+        if let Some(validation_error) =
+            self.validate_relationship_constraints(&record, &primary_key_value)?
+        {
+            return Ok(Err(validation_error));
+        }
 
         let mut historical_tombstone_block: Option<(u64, DataBlockIndexEntry)> = None;
         if let Some(stale_offset) = old_data_offset {
@@ -271,4 +292,33 @@ impl Drawer {
 
         Ok(Ok(()))
     }
+}
+
+pub(crate) fn current_iso8601_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let millis = now.subsec_millis();
+
+    let days = (secs / 86400) as i64;
+    let rem_secs = (secs % 86400) as u32;
+    let hours = rem_secs / 3600;
+    let minutes = (rem_secs % 3600) / 60;
+    let seconds = rem_secs % 60;
+
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z")
 }

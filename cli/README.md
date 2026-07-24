@@ -40,12 +40,12 @@ create wardrobe <wardrobe>
 create bay <wardrobe>/<bay>
 create drawer <wardrobe>/<bay>/<drawer>
 create user <json_user_payload>
-alter <index|key|constraint|relationship|trigger|cascade-delete> <drawer_path> <field> <?extra_args>
+alter <index|key|constraint|relationship|trigger|cascade-delete|timestamp> <drawer_path> <?field> <?extra_args>
 drop wardrobe <wardrobe>
 drop bay <wardrobe>/<bay>
 drop drawer <wardrobe>/<bay>/<drawer>
 drop user <username>
-drop <index|key|constraint|relationship|trigger|cascade-delete> <drawer_path> <field> <?extra_args>
+drop <index|key|constraint|relationship|trigger|cascade-delete|timestamp> <drawer_path> <?field> <?extra_args>
 ```
 
 Maintenance commands:
@@ -83,6 +83,7 @@ Schema metadata examples:
 ```sh
 wardrobe ./my-db alter index catalog/public/book title
 wardrobe ./my-db alter relationship catalog/public/book author_id catalog/public/people M:1
+wardrobe ./my-db alter timestamp catalog/public/book
 wardrobe ./my-db drop index catalog/public/book title
 ```
 

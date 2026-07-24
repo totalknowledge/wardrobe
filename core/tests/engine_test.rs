@@ -2533,6 +2533,95 @@ fn us_145_cursor_and_page_pagination_are_deterministic() {
 }
 
 #[test]
+fn us_146_automatic_record_timestamps() {
+    let database = TempDatabase::new("us_146_automatic_record_timestamps");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({"_id": "@item:item1", "name": "Tool"}),
+            OperationFilter::drawer("item"),
+            None::<OperationOptions>,
+        )
+        .expect("initial upsert");
+
+    engine
+        .alter(AlterRequest::schema_rule(
+            "item",
+            "add",
+            "timestamp",
+            "timestamps",
+            json!({}),
+        ))
+        .expect("enable timestamp schema rule");
+
+    engine
+        .upsert(
+            json!({"_id": "@item:item2", "name": "Hammer"}),
+            OperationFilter::drawer("item"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert item2");
+
+    let read_res = engine
+        .read(
+            OperationFilter::pointer("@item:item2"),
+            None::<OperationOptions>,
+        )
+        .expect("read item2");
+
+    let ReadResult::Record(Some(item2)) = read_res else {
+        panic!("expected record for item2");
+    };
+
+    let created_at = item2["created_at"].as_str().expect("created_at should be a string").to_string();
+    let updated_at = item2["updated_at"].as_str().expect("updated_at should be a string").to_string();
+    assert_eq!(created_at, updated_at);
+    assert!(created_at.contains('T') && created_at.ends_with('Z'));
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    engine
+        .upsert(
+            json!({"_id": "@item:item2", "name": "Heavy Hammer"}),
+            OperationFilter::drawer("item"),
+            None::<OperationOptions>,
+        )
+        .expect("update item2");
+
+    let read_res2 = engine
+        .read(
+            OperationFilter::pointer("@item:item2"),
+            None::<OperationOptions>,
+        )
+        .expect("read updated item2");
+
+    let ReadResult::Record(Some(updated_item2)) = read_res2 else {
+        panic!("expected record for updated item2");
+    };
+
+    let new_created_at = updated_item2["created_at"].as_str().expect("created_at");
+    let new_updated_at = updated_item2["updated_at"].as_str().expect("updated_at");
+
+    assert_eq!(new_created_at, created_at, "created_at should be preserved on update");
+    assert_ne!(new_updated_at, updated_at, "updated_at should be refreshed on update");
+    assert_eq!(updated_item2["name"], "Heavy Hammer");
+
+    let read_all = engine
+        .read(
+            OperationFilter::drawer("item"),
+            OperationOptions::new().order_by("updated_at"),
+        )
+        .expect("query ordered by updated_at");
+
+    let ReadResult::Records(records) = read_all else {
+        panic!("expected records");
+    };
+    assert!(!records.is_empty());
+}
+
+#[test]
 fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     let database = TempDatabase::new("us_034_execute_routes_nested_paths");
     let storage_pool = database.path.to_string_lossy().into_owned();

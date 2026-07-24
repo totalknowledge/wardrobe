@@ -1178,11 +1178,11 @@ fn run_schema_management_command(
     parts: &[String],
     pretty: bool,
 ) -> io::Result<()> {
-    if parts.len() < 4 {
+    if parts.len() < 3 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!(
-                "{} requires <type> <path> <target_field> <?extra_args>",
+                "{} requires <type> <path> <?target_field> <?extra_args>",
                 parts[0]
             ),
         ));
@@ -1191,7 +1191,7 @@ fn run_schema_management_command(
     let action = parts[0].as_str();
     let kind = normalize_schema_command_type(&parts[1])?;
     let drawer_path = normalize_drawer_path(&parts[2], "schema command path")?;
-    let field_name = &parts[3];
+    let field_name = parts.get(3).map(String::as_str).unwrap_or("timestamps");
     let payload = schema_management_payload(action, &kind, field_name, parts)?;
     let response = alter_schema_rule(client, &drawer_path, action, &kind, field_name, payload)?;
     print_json(&response, pretty)
@@ -1211,6 +1211,7 @@ fn normalize_schema_command_type(kind: &str) -> io::Result<String> {
         "cascade-delete" | "cascade_delete" | "cascade" | "delete-rule" | "delete-rules" => {
             Ok("cascade-delete".to_string())
         }
+        "timestamp" | "timestamps" => Ok("timestamp".to_string()),
         _ => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("Unknown schema command type: {kind}"),
@@ -1245,8 +1246,12 @@ fn schema_management_payload(
     match kind {
         "index" => Ok(json!({ "kind": "index" })),
         "key" => {
-            let key_type = parts.get(4).map(String::as_str).unwrap_or("secondary");
-            if !matches!(key_type, "primary" | "secondary") {
+            let key_type = parts
+                .get(4)
+                .map(String::as_str)
+                .unwrap_or("secondary")
+                .to_ascii_lowercase();
+            if key_type != "primary" && key_type != "secondary" {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     "key requires primary or secondary as the optional key type",
@@ -1303,6 +1308,7 @@ fn schema_management_payload(
             Ok(payload)
         }
         "cascade-delete" => Ok(json!({ "action": "Cascade" })),
+        "timestamp" => Ok(json!({ "enabled": action == "alter" })),
         _ => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("Unknown schema command type: {kind}"),

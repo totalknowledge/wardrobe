@@ -335,6 +335,10 @@ impl Drawer {
             .as_ref()
             .map(|metadata| metadata.hidden_fields.iter().cloned().collect())
             .unwrap_or_default();
+        let timestamps_enabled = existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.timestamps_enabled)
+            .unwrap_or_default();
         let field_name_map_was_empty = field_name_map.is_empty();
         Self::ensure_reserved_id_field_mapping(&mut field_name_map);
         if field_name_map_was_empty {
@@ -529,6 +533,7 @@ impl Drawer {
             metadata_format_version,
             field_name_map,
             hidden_fields,
+            timestamps_enabled,
             #[cfg(test)]
             data_file_path,
             index_file_path,
@@ -585,6 +590,7 @@ impl Drawer {
             self.materialized_secondary_indexes.clone(),
             self.field_name_map.clone(),
             hidden_fields,
+            self.timestamps_enabled,
         );
         let serialized = serde_json::to_vec_pretty(&metadata)?;
         self.metadata_writer.rewrite_all(&serialized)?;

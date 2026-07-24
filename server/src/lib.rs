@@ -2230,4 +2230,120 @@ mod tests {
         }
         assert!(listener_is_idle(None, &mut idle_polls));
     }
+
+    #[test]
+    fn helper_functions_and_cli_parsing_coverage_paths() {
+        assert!(validate_bootstrap_username("admin_123.user-name").is_ok());
+        assert!(validate_bootstrap_username("").is_err());
+        assert!(validate_bootstrap_username("user name").is_err());
+        assert!(validate_bootstrap_username("user@name").is_err());
+
+        let mut idx = 0;
+        let args = vec!["--key".to_string(), "value".to_string()];
+        assert_eq!(command_value(&args, &mut idx).unwrap(), "value");
+        assert_eq!(idx, 1);
+        assert!(command_value(&args, &mut idx).is_err());
+
+        let err = io::Error::new(io::ErrorKind::AddrInUse, "port occupied");
+        let fields = server_error_fields(&err);
+        assert!(!fields.is_empty());
+
+        assert!(load_certificates(Path::new("/nonexistent/cert.crt")).is_err());
+        assert!(load_private_key(Path::new("/nonexistent/key.key")).is_err());
+
+        let mut iter = vec!["-10".to_string()].into_iter();
+        assert!(parse_positive_usize(&mut iter, "--flag").is_err());
+
+        let mut iter = vec!["abc".to_string()].into_iter();
+        assert!(parse_positive_u64(&mut iter, "--flag").is_err());
+
+        let mut iter = vec!["unknown".to_string()].into_iter();
+        assert!(parse_durability_policy(&mut iter, "--durability").is_err());
+
+        let pol = default_grouped_durability_policy();
+        let pol = update_group_commit_window(pol, 20);
+        let pol = update_group_commit_max_batch(pol, 50);
+        assert_eq!(
+            pol,
+            DurabilityPolicy::Grouped {
+                commit_window_ms: 20,
+                max_batch_size: 50
+            }
+        );
+
+        assert!(run_reissue_server_certificate_command(&["--unknown".to_string()]).is_err());
+        assert!(run_reissue_server_certificate_command(&["--server-ip".to_string(), "invalid-ip".to_string()]).is_err());
+
+        assert!(run_rotate_ca_command(&["--unknown".to_string()]).is_err());
+        assert!(run_rotate_ca_command(&["--server-ip".to_string(), "invalid-ip".to_string()]).is_err());
+
+        assert!(run_bootstrap_admin_command(&["--unknown".to_string()]).is_err());
+        assert!(run_bootstrap_admin_command(&[]).is_err());
+    }
+
+    #[test]
+    fn run_from_args_dispatch_paths() {
+        let root = security_test_directory("run_from_args_test");
+        let security_dir = root.join("security");
+
+        let init_args = vec![
+            "init".to_string(),
+            "--security-dir".to_string(),
+            security_dir.display().to_string(),
+        ];
+        run_from_args(init_args).expect("init should succeed");
+
+        let reissue_args = vec![
+            "reissue-server-certificate".to_string(),
+            "--security-dir".to_string(),
+            security_dir.display().to_string(),
+            "--server-name".to_string(),
+            "localhost".to_string(),
+        ];
+        run_from_args(reissue_args).expect("reissue should succeed");
+
+        let rotate_args = vec![
+            "rotate-ca".to_string(),
+            "--security-dir".to_string(),
+            security_dir.display().to_string(),
+            "--server-name".to_string(),
+            "localhost".to_string(),
+        ];
+        run_from_args(rotate_args).expect("rotate should succeed");
+
+        assert!(run_from_args(vec!["unknown-command".to_string()]).is_err());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn server_config_missing_flag_arguments_and_help_printing() {
+        print_help();
+
+        let missing_flags = vec![
+            "--data-dir",
+            "--tcp-bind",
+            "--unix-socket",
+            "--security-mode",
+            "--security-dir",
+            "--server-certificate",
+            "--server-private-key",
+            "--trusted-client-ca",
+            "--log-level",
+            "--log-format",
+            "--log-destination",
+            "--log-file",
+            "--max-cached-drawers",
+            "--wal-checkpoint-size-bytes",
+            "--wal-checkpoint-ops",
+            "--group-commit-window-ms",
+            "--group-commit-max-batch",
+            "--connection-pool-limit",
+        ];
+
+        for flag in missing_flags {
+            let res = ServerConfig::from_args(vec![flag.to_string()]);
+            assert!(res.is_err(), "flag {flag} should fail when missing value");
+        }
+    }
 }
