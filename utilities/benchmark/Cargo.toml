@@ -1,6 +1,6 @@
 [package]
 name = "wardrobe-benchmark"
-version = "0.26.723"
+version = "0.26.724"
 edition = "2024"
 license = "MIT"
 
@@ -15,9 +15,11 @@ neo4rs = "0.8.0"
 postgres = "0.19"
 redb = "4.1.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
+rocksdb = "0.23"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread"] }
-wardrobe-core = { path = "../../core" }
+wardrobe-core = { path = "../../core", package = "wardrobe-embedded" }
 wardrobe-server = { path = "../../server" }

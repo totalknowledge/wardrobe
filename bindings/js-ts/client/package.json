@@ -1,6 +1,6 @@
 {
   "name": "@wardrobe/client",
-  "version": "0.26.723",
+  "version": "0.26.724",
   "description": "Pure JavaScript/TypeScript network client for Wardrobe database.",
   "license": "MIT",
   "repository": {

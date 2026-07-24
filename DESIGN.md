@@ -1,6 +1,6 @@
 # Wardrobe Design
 
-This document reflects workspace release `0.26.723`.
+This document reflects workspace release `0.26.724`.
 
 ## Purpose
 

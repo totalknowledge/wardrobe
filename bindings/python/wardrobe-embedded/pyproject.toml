@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "wardrobe-embedded"
-version = "0.26.723"
+version = "0.26.724"
 description = "Native embedded Python bindings for Wardrobe."
 readme = "README.md"
 requires-python = ">=3.10"

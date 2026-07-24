@@ -1,6 +1,6 @@
 {
   "name": "armoire",
-  "version": "0.26.723",
+  "version": "0.26.724",
   "scripts": {
     "ng": "ng",
     "generate:version": "node tools/generate-version.mjs",

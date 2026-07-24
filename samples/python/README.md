@@ -1,6 +1,6 @@
 # Wardrobe Python Sample
 
-This MIT-licensed version `0.26.723` sample uses the native `wardrobe-embedded` binding to run the
+This MIT-licensed version `0.26.724` sample uses the native `wardrobe-embedded` binding to run the
 publishing-house workflow from the Rust basic-usage sample. It creates
 publisher, person, and book drawers, stores related publishing records, queries
 authors, verifies relationships, and runs a temporary-record cleanup cycle in

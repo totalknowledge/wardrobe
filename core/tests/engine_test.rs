@@ -2882,6 +2882,64 @@ fn us_150_field_projections_and_subdocument_selection() {
 }
 
 #[test]
+fn us_151_bay_level_hidden_non_replicated_relationships() {
+    let database = TempDatabase::new("us_151_inverse_tracking");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({"_id": "@actor:a1", "name": "Event System Bot"}),
+            OperationFilter::drawer("actor"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert actor a1");
+
+    engine
+        .upsert(
+            json!({
+                "_id": "@event:e1",
+                "type": "login",
+                "actor": "@actor:a1"
+            }),
+            OperationFilter::drawer("event"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert event e1");
+
+    engine
+        .alter(AlterRequest::relationship_with_options(
+            "event",
+            "actor",
+            "actor",
+            false,
+        ))
+        .expect("alter relationship with inverse_tracking false should succeed");
+
+    let ReadResult::Record(Some(event_read)) = engine
+        .read(
+            OperationFilter::pointer("@event:e1"),
+            None::<OperationOptions>,
+        )
+        .unwrap()
+    else {
+        panic!("expected event record");
+    };
+    assert_eq!(event_read["actor"]["name"], "Event System Bot");
+
+    let ReadResult::Record(Some(actor_read)) = engine
+        .read(
+            OperationFilter::pointer("@actor:a1"),
+            None::<OperationOptions>,
+        )
+        .unwrap()
+    else {
+        panic!("expected actor record");
+    };
+    assert_eq!(actor_read["name"], "Event System Bot");
+}
+
+#[test]
 fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     let database = TempDatabase::new("us_034_execute_routes_nested_paths");
     let storage_pool = database.path.to_string_lossy().into_owned();

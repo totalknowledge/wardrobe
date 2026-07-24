@@ -11,7 +11,7 @@ pub struct WardrobeCStatus {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn wardrobe_cabi_version() -> *const c_char {
-    static VERSION: &[u8] = b"wardrobe-cabi-0.26.723\0";
+    static VERSION: &[u8] = b"wardrobe-cabi-0.26.724\0";
     VERSION.as_ptr().cast()
 }
 
@@ -223,7 +223,7 @@ mod tests {
         let version = unsafe { CStr::from_ptr(wardrobe_cabi_version()) }
             .to_str()
             .expect("version");
-        assert_eq!(version, "wardrobe-cabi-0.26.723");
+        assert_eq!(version, "wardrobe-cabi-0.26.724");
         assert!(wardrobe_cabi_duplicate_path(ptr::null()).is_null());
         wardrobe_cabi_free_string(ptr::null_mut());
 

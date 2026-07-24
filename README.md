@@ -2,7 +2,7 @@
 
 [![coverage](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml/badge.svg)](https://github.com/totalknowledge/wardrobe/actions/workflows/coverage.yml)
 
-Current workspace release: `0.26.723`.
+Current workspace release: `0.26.724`.
 
 Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
 
@@ -456,7 +456,7 @@ Mount data and security as persistent volumes:
 ```yaml
 services:
   wardrobe:
-    image: wardrobe-server:0.26.723
+    image: wardrobe-server:0.26.724
     command: ["/config/wardrobe.toml"]
     volumes:
       - wardrobe-data:/data

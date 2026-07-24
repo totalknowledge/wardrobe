@@ -175,7 +175,7 @@ mod tests {
             metadata.npm_package_names,
             &["@wardrobe/client", "@wardrobe/embedded"]
         );
-        assert_eq!(metadata.version, "0.26.723");
+        assert_eq!(metadata.version, "0.26.724");
         assert_eq!(metadata.default_network_port, 24842);
         assert_eq!(
             metadata.operations,

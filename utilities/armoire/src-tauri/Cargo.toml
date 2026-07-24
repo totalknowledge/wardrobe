@@ -1,6 +1,6 @@
 [package]
 name = "armoire"
-version = "0.26.723"
+version = "0.26.724"
 description = "Wardrobe Database Administration Tool"
 authors = ["Bryan Patrick Coleman"]
 license-file = "../LICENSE"
@@ -22,7 +22,7 @@ path = "src/main.rs"
 tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
-wardrobe-core = { path = "../../../core" }
+wardrobe-core = { path = "../../../core", package = "wardrobe-embedded" }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"

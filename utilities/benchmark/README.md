@@ -1,6 +1,6 @@
 # Wardrobe Benchmark
 
-`wardrobe-benchmark` version `0.26.723` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
+`wardrobe-benchmark` version `0.26.724` runs the US-100 library transaction battery across a configured target matrix and prints a Markdown performance table.
 
 The default run uses only embedded Wardrobe so it works without external database services:
 
@@ -16,7 +16,7 @@ cargo run -p wardrobe-benchmark -- --entities 100 --books 500 --traversal-querie
 
 Progress messages are enabled by default and are written to stderr so the Markdown report remains clean on stdout or in `--output`. Pass `--quiet` or `--no-progress` to suppress them.
 
-Run the full seven-target matrix when the target drivers and services are available:
+Run the comparison target matrix when target drivers and services are available:
 
 ```bash
 cargo run -p wardrobe-benchmark -- --targets all --output target/wardrobe-benchmark/report.md
@@ -33,6 +33,7 @@ bash utilities/benchmark/start-mysql-docker.sh
 bash utilities/benchmark/start-postgres-docker.sh
 bash utilities/benchmark/start-mongodb-docker.sh
 bash utilities/benchmark/start-neo4j-docker.sh
+bash utilities/benchmark/start-surrealdb-docker.sh
 bash utilities/benchmark/start-wardrobe-docker.sh
 ```
 

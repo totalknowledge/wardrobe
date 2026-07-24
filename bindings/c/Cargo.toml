@@ -1,6 +1,6 @@
 [package]
 name = "wardrobe-c"
-version = "0.26.723"
+version = "0.26.724"
 edition = "2024"
 license = "MIT"
 
@@ -9,5 +9,5 @@ name = "wardrobe_c"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-wardrobe-core = { path = "../../core" }
+wardrobe-core = { path = "../../core", package = "wardrobe-embedded", version = "0.26.724" }
 serde_json = "1.0"

@@ -1305,6 +1305,19 @@ fn schema_management_payload(
                 };
                 payload["mapped_by"] = Value::String(mapped_by.clone());
             }
+            for extra in parts.iter().skip(5) {
+                if extra == "inverse_tracking:false"
+                    || extra == "inverse_tracking=false"
+                    || extra == "inverseTracking:false"
+                {
+                    payload["inverse_tracking"] = Value::Bool(false);
+                } else if extra == "inverse_tracking:true"
+                    || extra == "inverse_tracking=true"
+                    || extra == "inverseTracking:true"
+                {
+                    payload["inverse_tracking"] = Value::Bool(true);
+                }
+            }
             Ok(payload)
         }
         "cascade-delete" => Ok(json!({ "action": "Cascade" })),

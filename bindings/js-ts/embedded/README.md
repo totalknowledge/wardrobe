@@ -1,6 +1,6 @@
 # @wardrobe/embedded
 
-MIT-licensed native JavaScript and TypeScript binding for local Wardrobe storage. Current version: `0.26.723`; Node.js 24 or newer is required.
+MIT-licensed native JavaScript and TypeScript binding for local Wardrobe storage. Current version: `0.26.724`; Node.js 24 or newer is required.
 
 ```js
 const { WardrobeClient, relationshipRequest } = require('@wardrobe/embedded');

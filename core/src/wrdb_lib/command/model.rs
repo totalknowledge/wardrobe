@@ -762,6 +762,25 @@ impl AlterRequest {
             }),
         )
     }
+
+    pub fn relationship_with_options(
+        drawer_name: impl Into<String>,
+        field_name: impl Into<String>,
+        target_drawer: impl Into<String>,
+        inverse_tracking: bool,
+    ) -> Self {
+        Self::schema_rule(
+            drawer_name,
+            "add",
+            "relationship",
+            field_name,
+            serde_json::json!({
+                "type": "M:1",
+                "target_drawer": target_drawer.into(),
+                "inverse_tracking": inverse_tracking
+            }),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 # Wardrobe C ABI
 
-The MIT-licensed `bindings/c` crate exposes the `wardrobe-c` native library at version `0.26.723` for C and C-compatible consumers.
+The MIT-licensed `bindings/c` crate exposes the `wardrobe-c` native library at version `0.26.724` for C and C-compatible consumers.
 
 Exported functions currently include:
 

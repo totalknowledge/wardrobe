@@ -36,6 +36,13 @@ pub(crate) const DEFAULT_POSTGRES_USER_ENV: &str = "WARDROBE_BENCH_POSTGRES_USER
 pub(crate) const DEFAULT_POSTGRES_PASSWORD_ENV: &str = "WARDROBE_BENCH_POSTGRES_PASSWORD";
 pub(crate) const DEFAULT_POSTGRES_CREDENTIALS_FILE: &str =
     "target/wardrobe-benchmark/postgres-credentials.env";
+pub(crate) const DEFAULT_SURREAL_URI: &str = "http://127.0.0.1:8000";
+pub(crate) const DEFAULT_SURREAL_NS: &str = "wardrobe_benchmark";
+pub(crate) const DEFAULT_SURREAL_DB: &str = "wardrobe_benchmark";
+pub(crate) const DEFAULT_SURREAL_USER_ENV: &str = "WARDROBE_BENCH_SURREAL_USER";
+pub(crate) const DEFAULT_SURREAL_PASSWORD_ENV: &str = "WARDROBE_BENCH_SURREAL_PASSWORD";
+pub(crate) const DEFAULT_SURREAL_CREDENTIALS_FILE: &str =
+    "target/wardrobe-benchmark/surrealdb-credentials.env";
 pub(crate) const DEFAULT_WARDROBE_GROUP_COMMIT_WINDOW_MS: u64 = 5;
 pub(crate) const DEFAULT_WARDROBE_GROUP_COMMIT_MAX_BATCH: usize = 128;
 
@@ -75,6 +82,11 @@ pub struct BenchmarkConfig {
     pub postgres_database: String,
     pub postgres_user: Option<String>,
     pub postgres_password_env: Option<String>,
+    pub surreal_uri: String,
+    pub surreal_ns: String,
+    pub surreal_db: String,
+    pub surreal_user: Option<String>,
+    pub surreal_password_env: Option<String>,
 }
 
 impl Default for BenchmarkConfig {
@@ -108,6 +120,11 @@ impl Default for BenchmarkConfig {
             postgres_database: "wardrobe_benchmark".to_string(),
             postgres_user: None,
             postgres_password_env: Some(DEFAULT_POSTGRES_PASSWORD_ENV.to_string()),
+            surreal_uri: DEFAULT_SURREAL_URI.to_string(),
+            surreal_ns: DEFAULT_SURREAL_NS.to_string(),
+            surreal_db: DEFAULT_SURREAL_DB.to_string(),
+            surreal_user: None,
+            surreal_password_env: Some(DEFAULT_SURREAL_PASSWORD_ENV.to_string()),
         }
     }
 }
@@ -246,6 +263,14 @@ impl BenchmarkConfig {
                     config.postgres_password_env = Some(required_value(&mut args, &arg)?)
                 }
                 "--postgres-no-password" => config.postgres_password_env = None,
+                "--surreal-uri" => config.surreal_uri = required_value(&mut args, &arg)?,
+                "--surreal-ns" => config.surreal_ns = required_value(&mut args, &arg)?,
+                "--surreal-db" => config.surreal_db = required_value(&mut args, &arg)?,
+                "--surreal-user" => config.surreal_user = Some(required_value(&mut args, &arg)?),
+                "--surreal-password-env" => {
+                    config.surreal_password_env = Some(required_value(&mut args, &arg)?)
+                }
+                "--surreal-no-password" => config.surreal_password_env = None,
                 unknown => {
                     return Err(Error::new(
                         ErrorKind::InvalidInput,
@@ -419,7 +444,7 @@ impl LibraryProfile {
 pub fn print_help() {
     println!("wardrobe-benchmark");
     println!(
-        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,postgres,neo4j"
+        "  --targets <csv|all>             Targets: wardrobe-embedded,wardrobe-remote,sqlite,redb,rocksdb,mongodb,mysql,postgres,neo4j,surrealdb"
     );
     println!(
         "  --work-dir <path>               Benchmark run directory root, default {DEFAULT_WORK_DIR}"
@@ -502,10 +527,12 @@ pub(crate) fn parse_targets(raw: &str) -> io::Result<Vec<TargetSpec>> {
             "wardrobe-remote" | "remote" | "wardrobe-tcp" => Ok(TargetSpec::WardrobeRemote),
             "sqlite" => Ok(TargetSpec::Sqlite),
             "redb" => Ok(TargetSpec::Redb),
+            "rocksdb" => Ok(TargetSpec::RocksDb),
             "mongodb" | "mongo" => Ok(TargetSpec::MongoDb),
             "mysql" | "mariadb" => Ok(TargetSpec::MySql),
             "postgres" | "postgresql" => Ok(TargetSpec::Postgres),
             "neo4j" | "neo" => Ok(TargetSpec::Neo4j),
+            "surrealdb" | "surreal" => Ok(TargetSpec::SurrealDb),
             "" => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "--targets contains an empty target name",

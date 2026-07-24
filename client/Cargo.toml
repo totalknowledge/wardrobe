@@ -1,26 +1,23 @@
 [package]
-name = "wardrobe-embedded"
+name = "wardrobe-client"
 version = "0.26.724"
 edition = "2024"
 license = "MIT"
-description = "Standalone embedded flatfile storage engine library for Wardrobe."
-documentation = "https://docs.rs/wardrobe-embedded"
+description = "Pure network client library crate for server-backed Wardrobe connections."
+documentation = "https://docs.rs/wardrobe-client"
 homepage = "https://github.com/totalknowledge/wardrobe"
 repository = "https://github.com/totalknowledge/wardrobe"
 
 [lib]
-name = "wardrobe_core"
+name = "wardrobe_client"
 path = "src/lib.rs"
 
 [dependencies]
-rand = "0.10.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.9.12"
-bson = "2.13.0"
-uuid = { version = "1.0", features = ["v4"] }
-tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-rcgen = { version = "0.14.8", features = ["x509-parser"] }
+toml = "0.8"
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
+rcgen = { version = "0.14.8", features = ["x509-parser"] }
+uuid = { version = "1.0", features = ["v4"] }
 x509-parser = "0.18.1"

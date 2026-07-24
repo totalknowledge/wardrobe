@@ -4,8 +4,8 @@ use crate::config::{
 };
 use crate::report::{BenchmarkReport, PhaseMetrics, TargetReport};
 use crate::targets::{
-    BenchmarkTarget, MongoTarget, MySqlTarget, Neo4jTarget, PostgresTarget, RedbTarget,
-    SqliteTarget, WardrobeTarget,
+    read_default_surreal_credentials, BenchmarkTarget, MongoTarget, MySqlTarget, Neo4jTarget,
+    PostgresTarget, RedbTarget, RocksdbTarget, SqliteTarget, SurrealdbTarget, WardrobeTarget,
 };
 use crate::utils::unix_timestamp_micros;
 use std::fs;
@@ -19,10 +19,12 @@ pub enum TargetSpec {
     WardrobeRemote,
     Sqlite,
     Redb,
+    RocksDb,
     MongoDb,
     MySql,
     Postgres,
     Neo4j,
+    SurrealDb,
 }
 
 impl TargetSpec {
@@ -32,10 +34,12 @@ impl TargetSpec {
             Self::WardrobeRemote,
             Self::Sqlite,
             Self::Redb,
+            Self::RocksDb,
             Self::MongoDb,
             Self::MySql,
             Self::Postgres,
             Self::Neo4j,
+            Self::SurrealDb,
         ]
     }
 
@@ -45,10 +49,12 @@ impl TargetSpec {
             Self::WardrobeRemote => "Wardrobe (Remote TCP Server Mode)",
             Self::Sqlite => "SQLite (Local WAL File Mode)",
             Self::Redb => "redb (Pure Rust Embedded Key-Value Mode)",
+            Self::RocksDb => "RocksDB (Embedded Key-Value Mode)",
             Self::MongoDb => "MongoDB (Document Store Base Comparison)",
             Self::MySql => "MySQL / MariaDB (Relational Pointer Base Comparison)",
             Self::Postgres => "PostgreSQL (Relational Pointer Base Comparison)",
             Self::Neo4j => "Neo4j (Graph Database Base Comparison)",
+            Self::SurrealDb => "SurrealDB (Multi-Model Document Comparison)",
         }
     }
 }
@@ -475,6 +481,15 @@ pub(crate) fn build_target(
             ));
             Ok(Box::new(RedbTarget::new(db_path)?))
         }
+        TargetSpec::RocksDb => {
+            let db_path = run_dir.join("rocksdb").join("library.rocksdb");
+            progress.log(format!(
+                "{}: opening persistent RocksDB directory at {}",
+                spec.label(),
+                db_path.display()
+            ));
+            Ok(Box::new(RocksdbTarget::new(db_path)?))
+        }
         TargetSpec::MongoDb => {
             progress.log(format!(
                 "{}: opening persistent MongoDB client for {} / database {}",
@@ -535,6 +550,32 @@ pub(crate) fn build_target(
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "run".to_string()),
+            )?))
+        }
+        TargetSpec::SurrealDb => {
+            let credentials = read_default_surreal_credentials()?;
+            let user = config
+                .surreal_user
+                .clone()
+                .or(credentials.user);
+            let password = config
+                .surreal_password_env
+                .as_deref()
+                .and_then(|var| std::env::var(var).ok())
+                .or(credentials.password);
+            progress.log(format!(
+                "{}: opening SurrealDB connection for {} / ns {} / db {}",
+                spec.label(),
+                config.surreal_uri,
+                config.surreal_ns,
+                config.surreal_db
+            ));
+            Ok(Box::new(SurrealdbTarget::new(
+                config.surreal_uri.clone(),
+                config.surreal_ns.clone(),
+                config.surreal_db.clone(),
+                user,
+                password,
             )?))
         }
     }

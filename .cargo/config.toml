@@ -1,2 +1,5 @@
 [alias]
 coverage-summary = "llvm-cov --workspace --summary-only"
+
+[env]
+BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/lib/gcc/x86_64-linux-gnu/13/include"

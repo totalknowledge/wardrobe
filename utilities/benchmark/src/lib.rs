@@ -275,7 +275,7 @@ mod tests {
     fn benchmark_config_parses_full_option_matrix() {
         let ParseOutcome::Run(config) = BenchmarkConfig::from_args([
             "--targets".to_string(),
-            "wardrobe-embedded,wardrobe-remote,sqlite,redb,mongodb,mysql,postgres,neo4j".to_string(),
+            "wardrobe-embedded,wardrobe-remote,sqlite,redb,rocksdb,mongodb,mysql,postgres,neo4j,surrealdb".to_string(),
             "--work-dir".to_string(),
             "target/custom-bench".to_string(),
             "--output".to_string(),
@@ -1305,6 +1305,40 @@ VALUES ('book_00000000', 'isbn-0', 'SQLite Join Book', 'entity_00000000', 'entit
                 .storage_diagnostics
                 .iter()
                 .any(|line| line.contains("allocated pages"))
+        );
+
+        let _ = fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn tiny_rocksdb_benchmark_uses_persistent_directory() {
+        let work_dir = env::temp_dir().join(format!(
+            "wardrobe_benchmark_rocksdb_test_{}",
+            unix_timestamp_micros()
+        ));
+        let config = BenchmarkConfig {
+            targets: vec![TargetSpec::RocksDb],
+            profile: tiny_profile(),
+            work_dir: work_dir.clone(),
+            ..BenchmarkConfig::default()
+        };
+
+        let report = run_benchmark(config).expect("tiny rocksdb benchmark should run");
+        let rocksdb_dir = report.run_dir.join("rocksdb").join("library.rocksdb");
+
+        assert_eq!(report.targets.len(), 1);
+        assert_eq!(
+            report.targets[0].name,
+            "RocksDB (Embedded Key-Value Mode)"
+        );
+        assert_eq!(report.targets[0].phases.len(), 8);
+        assert!(rocksdb_dir.is_dir());
+        assert!(report.targets[0].storage_bytes > 0);
+        assert!(
+            report.targets[0]
+                .storage_diagnostics
+                .iter()
+                .any(|line| line.contains("RocksDB stats"))
         );
 
         let _ = fs::remove_dir_all(work_dir);

@@ -132,6 +132,17 @@ impl ReverseRelationshipIndex {
                 continue;
             }
 
+            if let Some(rule) = relationship_constraints.get(field_name) {
+                let inverse_disabled = rule.get("inverse_tracking") == Some(&Value::Bool(false))
+                    || rule.get("inverseTracking") == Some(&Value::Bool(false))
+                    || rule.get("replicated") == Some(&Value::Bool(false))
+                    || rule.get("reverse") == Some(&Value::Bool(false))
+                    || rule.get("hidden") == Some(&Value::Bool(true));
+                if inverse_disabled {
+                    continue;
+                }
+            }
+
             let explicit = relationship_constraints.contains_key(field_name)
                 || delete_rules.contains_key(field_name)
                 || relationship_constraints

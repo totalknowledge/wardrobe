@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 
 const PACKAGE_NAME = '@wardrobe/embedded';
-const PACKAGE_VERSION = '0.26.723';
+const PACKAGE_VERSION = '0.26.724';
 
 function relationshipRequest(drawerName, fieldName, targetDrawer) {
   return {

@@ -1,6 +1,6 @@
 {
   "name": "wardrobe-js-ts-bindings",
-  "version": "0.26.723",
+  "version": "0.26.724",
   "description": "Workspace for the Wardrobe client and embedded JavaScript/TypeScript bindings.",
   "private": true,
   "license": "MIT",

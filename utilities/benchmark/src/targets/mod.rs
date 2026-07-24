@@ -3,7 +3,9 @@ pub(crate) mod mysql;
 pub(crate) mod neo4j;
 pub(crate) mod postgres;
 pub(crate) mod redb;
+pub(crate) mod rocksdb;
 pub(crate) mod sqlite;
+pub(crate) mod surrealdb;
 pub(crate) mod wardrobe_embedded;
 pub(crate) mod wardrobe_remote;
 
@@ -12,13 +14,16 @@ pub(crate) use mysql::MySqlTarget;
 pub(crate) use neo4j::Neo4jTarget;
 pub(crate) use postgres::PostgresTarget;
 pub(crate) use redb::RedbTarget;
+pub(crate) use rocksdb::RocksdbTarget;
 pub(crate) use sqlite::SqliteTarget;
+pub(crate) use surrealdb::SurrealdbTarget;
 pub(crate) use wardrobe_embedded::WardrobeTarget;
 
 use crate::config::{
     DEFAULT_MYSQL_CREDENTIALS_FILE, DEFAULT_MYSQL_PASSWORD_ENV, DEFAULT_MYSQL_USER_ENV,
     DEFAULT_NEO4J_CREDENTIALS_FILE, DEFAULT_NEO4J_PASSWORD_ENV, DEFAULT_NEO4J_USER_ENV,
     DEFAULT_POSTGRES_CREDENTIALS_FILE, DEFAULT_POSTGRES_PASSWORD_ENV, DEFAULT_POSTGRES_USER_ENV,
+    DEFAULT_SURREAL_CREDENTIALS_FILE, DEFAULT_SURREAL_PASSWORD_ENV, DEFAULT_SURREAL_USER_ENV,
     LibraryProfile,
 };
 use crate::engine::{PhaseRecorder, ProgressReporter};
@@ -120,6 +125,14 @@ pub(crate) fn read_default_postgres_credentials() -> io::Result<ServiceCredentia
         DEFAULT_POSTGRES_CREDENTIALS_FILE,
         DEFAULT_POSTGRES_USER_ENV,
         DEFAULT_POSTGRES_PASSWORD_ENV,
+    )
+}
+
+pub(crate) fn read_default_surreal_credentials() -> io::Result<ServiceCredentials> {
+    read_credentials_file(
+        DEFAULT_SURREAL_CREDENTIALS_FILE,
+        DEFAULT_SURREAL_USER_ENV,
+        DEFAULT_SURREAL_PASSWORD_ENV,
     )
 }
 

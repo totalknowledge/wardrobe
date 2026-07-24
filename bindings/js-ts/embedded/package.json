@@ -1,6 +1,6 @@
 {
   "name": "@wardrobe/embedded",
-  "version": "0.26.723",
+  "version": "0.26.724",
   "description": "Native embedded database engine bindings for Wardrobe.",
   "license": "MIT",
   "repository": {

@@ -1,6 +1,6 @@
 # wardrobe-client
 
-MIT-licensed pure Python client bindings for server-backed Wardrobe connections. Current version: `0.26.723`; Python 3.10 or newer is required.
+MIT-licensed pure Python client bindings for server-backed Wardrobe connections. Current version: `0.26.724`; Python 3.10 or newer is required.
 
 This package speaks the Wardrobe protocol directly over TCP or Unix socket connections. It does not load embedded native storage code.
 

@@ -3,6 +3,7 @@ members = [
     "bindings/c",
     "bindings/js-ts",
     "cli",
+    "client",
     "core",
     "utilities/armoire/src-tauri",
     "samples/c-abi",

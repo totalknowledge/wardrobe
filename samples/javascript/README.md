@@ -1,6 +1,6 @@
 # Wardrobe JavaScript Sample
 
-This MIT-licensed version `0.26.723` sample uses `@wardrobe/embedded` to run the publishing-house workflow from
+This MIT-licensed version `0.26.724` sample uses `@wardrobe/embedded` to run the publishing-house workflow from
 the Rust basic-usage sample. It creates publisher, person, and book drawers,
 stores related publishing records, queries authors, verifies relationships, and
 runs a temporary-record cleanup cycle in the `public_js` bay.
