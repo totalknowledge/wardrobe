@@ -2800,6 +2800,88 @@ fn us_149_conditional_relationship_hydration_control() {
 }
 
 #[test]
+fn us_150_field_projections_and_subdocument_selection() {
+    let database = TempDatabase::new("us_150_projections");
+    let database_directory = database.path.to_string_lossy().into_owned();
+    let engine = WardrobeEngine::open(&database_directory).expect("engine should initialize");
+
+    engine
+        .upsert(
+            json!({
+                "_id": "@book:b1",
+                "title": "Rust In Action",
+                "isbn": "978-1617294556",
+                "price": 49.99,
+                "secret_notes": "Internal revision",
+                "author": {
+                    "name": "Tim McNamara",
+                    "email": "tim@example.com"
+                }
+            }),
+            OperationFilter::drawer("book"),
+            None::<OperationOptions>,
+        )
+        .expect("upsert book b1");
+
+    let ReadResult::Record(Some(projected)) = engine
+        .read(
+            OperationFilter::pointer("@book:b1"),
+            OperationOptions::new().projection(["title", "author.name"]),
+        )
+        .unwrap()
+    else {
+        panic!("expected record");
+    };
+    assert_eq!(projected["title"], "Rust In Action");
+    assert_eq!(projected["author"]["name"], "Tim McNamara");
+    assert!(projected.get("isbn").is_none());
+    assert!(projected.get("price").is_none());
+    assert!(projected.get("secret_notes").is_none());
+    assert!(projected["author"].get("email").is_none());
+
+    // Drawer query read retains _id
+    let ReadResult::Records(drawer_records) = engine
+        .read(
+            OperationFilter::drawer("book"),
+            OperationOptions::new().projection(["title", "author.name"]),
+        )
+        .unwrap()
+    else {
+        panic!("expected records");
+    };
+    assert_eq!(drawer_records[0]["_id"], "b1");
+    assert_eq!(drawer_records[0]["title"], "Rust In Action");
+    assert_eq!(drawer_records[0]["author"]["name"], "Tim McNamara");
+
+    let ReadResult::Record(Some(excluded)) = engine
+        .read(
+            OperationFilter::pointer("@book:b1"),
+            OperationOptions::new().projection(["-secret_notes"]),
+        )
+        .unwrap()
+    else {
+        panic!("expected record");
+    };
+    assert_eq!(excluded["title"], "Rust In Action");
+    assert_eq!(excluded["isbn"], "978-1617294556");
+    assert_eq!(excluded["price"], 49.99);
+    assert_eq!(excluded["author"]["email"], "tim@example.com");
+    assert!(excluded.get("secret_notes").is_none());
+
+    let options_json = json!({"select": ["title", "isbn"]});
+    let options = OperationOptions::from_json(options_json).expect("parse options");
+    let ReadResult::Record(Some(selected)) = engine
+        .read(OperationFilter::pointer("@book:b1"), options)
+        .unwrap()
+    else {
+        panic!("expected record");
+    };
+    assert_eq!(selected["title"], "Rust In Action");
+    assert_eq!(selected["isbn"], "978-1617294556");
+    assert!(selected.get("price").is_none());
+}
+
+#[test]
 fn us_034_execute_routes_commands_to_nested_tenant_database_schema_paths() {
     let database = TempDatabase::new("us_034_execute_routes_nested_paths");
     let storage_pool = database.path.to_string_lossy().into_owned();

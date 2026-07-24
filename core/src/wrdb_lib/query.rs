@@ -581,6 +581,83 @@ fn relationship_drawer_name(field_name: &str) -> String {
     field_name.to_string()
 }
 
+pub(crate) fn apply_projection(records: &mut [Value], projection: &[String]) {
+    if projection.is_empty() {
+        return;
+    }
+    for record in records {
+        prune_value_with_projection(record, "", projection);
+    }
+}
+
+fn prune_value_with_projection(value: &mut Value, prefix: &str, projection: &[String]) {
+    match value {
+        Value::Object(map) => {
+            let is_exclusion = projection.iter().any(|p| p.starts_with('-') || p.starts_with('!'));
+
+            if is_exclusion {
+                let excluded_paths: Vec<&str> = projection
+                    .iter()
+                    .filter_map(|p| p.strip_prefix('-').or_else(|| p.strip_prefix('!')))
+                    .map(|p| p.trim())
+                    .collect();
+
+                map.retain(|key, child_value| {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    if excluded_paths.iter().any(|&e| e == path) {
+                        return false;
+                    }
+                    if excluded_paths.iter().any(|&e| e.starts_with(&format!("{path}."))) {
+                        prune_value_with_projection(child_value, &path, projection);
+                    }
+                    true
+                });
+            } else {
+                map.retain(|key, child_value| {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+
+                    if prefix.is_empty() && key == "_id" {
+                        return true;
+                    }
+
+                    if projection.iter().any(|p| p == &path) {
+                        return true;
+                    }
+
+                    let is_parent_of_projection =
+                        projection.iter().any(|p| p.starts_with(&format!("{path}.")));
+                    if is_parent_of_projection {
+                        prune_value_with_projection(child_value, &path, projection);
+                        return true;
+                    }
+
+                    let is_child_of_projection =
+                        projection.iter().any(|p| path.starts_with(&format!("{p}.")));
+                    if is_child_of_projection {
+                        return true;
+                    }
+
+                    false
+                });
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                prune_value_with_projection(item, prefix, projection);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

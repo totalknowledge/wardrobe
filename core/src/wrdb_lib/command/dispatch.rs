@@ -611,6 +611,12 @@ where
         }
     }
 
+    if let Some(ref projection) = options.projection {
+        if !projection.is_empty() {
+            crate::wrdb_lib::query::apply_projection(&mut records, projection);
+        }
+    }
+
     let result = match read_shape {
         ReturnShapeResolution::Record => ReadResult::Record(records.into_iter().next()),
         ReturnShapeResolution::Records => match pagination {

@@ -229,6 +229,7 @@ pub struct OperationOptions {
     pub return_shape: Option<ReturnShape>,
     pub hydrate: Option<bool>,
     pub exclude_hydration: Option<Vec<String>>,
+    pub projection: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub order_by: Option<String>,
@@ -275,6 +276,15 @@ impl OperationOptions {
         S: Into<String>,
     {
         self.exclude_hydration = Some(fields.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn projection<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.projection = Some(fields.into_iter().map(Into::into).collect());
         self
     }
 
@@ -350,6 +360,9 @@ impl OperationOptions {
                 "hydrate" => options.hydrate = Some(expect_bool(&key, &value)?),
                 "exclude_hydration" | "excludeHydration" => {
                     options.exclude_hydration = Some(expect_string_array(&key, &value)?);
+                }
+                "projection" | "select" | "fields" => {
+                    options.projection = Some(expect_string_array(&key, &value)?);
                 }
                 "limit" => options.limit = Some(expect_usize(&key, &value)?),
                 "offset" => options.offset = Some(expect_usize(&key, &value)?),

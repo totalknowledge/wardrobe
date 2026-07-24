@@ -6,6 +6,9 @@ export interface OperationOptions {
   hydrate?: boolean;
   exclude_hydration?: string[];
   excludeHydration?: string[];
+  projection?: string[];
+  select?: string[];
+  fields?: string[];
   limit?: number;
   offset?: number;
   orderBy?: string;

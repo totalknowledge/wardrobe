@@ -619,7 +619,12 @@ impl WardrobeEngine {
     {
         let options = options.into();
         let selection = OperationSelection::from_filter(filter.into())?;
-        let query_records = self.read_selection_records(&selection, &options)?;
+        let mut query_records = self.read_selection_records(&selection, &options)?;
+        if let Some(ref projection) = options.projection {
+            if !projection.is_empty() {
+                crate::wrdb_lib::query::apply_projection(&mut query_records.records, projection);
+            }
+        }
         let read_shape = resolve_read_shape(options.return_shape, &selection);
         if query_records.pagination.is_some()
             && !matches!(&read_shape, ReturnShapeResolution::Records)
