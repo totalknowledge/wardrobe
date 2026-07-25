@@ -199,3 +199,28 @@ impl ClientDriver {
         self.execute_transport(cmd)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_driver_open_embedded_err() {
+        let target = ConnectionTarget::EmbeddedPath(PathBuf::from("/tmp/db"));
+        assert!(ClientDriver::open(&target).is_err());
+    }
+
+    #[test]
+    fn test_driver_open_unix_tls_err() {
+        let target = ConnectionTarget::UnixSocket {
+            path: PathBuf::from("/tmp/sock"),
+        };
+        let dummy_tls = ClientTlsConfig {
+            ca_cert: PathBuf::from("ca.crt"),
+            client_cert: PathBuf::from("client.crt"),
+            client_key: PathBuf::from("client.key"),
+        };
+        assert!(ClientDriver::open_with_tls(&target, Some(&dummy_tls)).is_err());
+    }
+}

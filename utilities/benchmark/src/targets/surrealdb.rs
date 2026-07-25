@@ -1,6 +1,6 @@
-use super::{verify_deleted_count, verify_record_id, verify_record_range, BenchmarkTarget};
+use super::{BenchmarkTarget, verify_deleted_count, verify_record_id, verify_record_range};
 use crate::config::LibraryProfile;
-use crate::engine::{report_record_progress, PhaseRecorder, ProgressReporter};
+use crate::engine::{PhaseRecorder, ProgressReporter, report_record_progress};
 use crate::utils::{chunk_ranges, to_io_error};
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -99,7 +99,10 @@ impl SurrealdbTarget {
         for index in start..end {
             payloads.push(profile.entity_payload(index));
         }
-        let sql = format!("INSERT INTO entity {};", serde_json::to_string(&payloads).map_err(to_io_error)?);
+        let sql = format!(
+            "INSERT INTO entity {};",
+            serde_json::to_string(&payloads).map_err(to_io_error)?
+        );
         self.execute_query(&sql)?;
         Ok(())
     }
@@ -109,7 +112,10 @@ impl SurrealdbTarget {
         for index in start..end {
             payloads.push(profile.book_payload(index));
         }
-        let sql = format!("INSERT INTO book {};", serde_json::to_string(&payloads).map_err(to_io_error)?);
+        let sql = format!(
+            "INSERT INTO book {};",
+            serde_json::to_string(&payloads).map_err(to_io_error)?
+        );
         self.execute_query(&sql)?;
         Ok(())
     }
@@ -282,7 +288,8 @@ impl BenchmarkTarget for SurrealdbTarget {
         let bounds = profile.range_lookup_bounds();
         for (index, (low, high)) in bounds.iter().enumerate() {
             recorder.measure(1, || {
-                let sql = format!("SELECT * FROM book WHERE quantity >= {low} AND quantity <= {high};");
+                let sql =
+                    format!("SELECT * FROM book WHERE quantity >= {low} AND quantity <= {high};");
                 let results = self.execute_query(&sql)?;
                 if let Some(records) = results.first().and_then(Value::as_array) {
                     for record in records {
@@ -384,19 +391,118 @@ impl BenchmarkTarget for SurrealdbTarget {
 
     fn storage_footprint_bytes(&mut self) -> io::Result<u64> {
         let results = self.execute_query("INFO FOR DB;")?;
-        let bytes = serde_json::to_vec(&results).map(|v| v.len() as u64).unwrap_or(0);
+        let bytes = serde_json::to_vec(&results)
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
         Ok(bytes)
     }
 
     fn storage_diagnostics(&mut self) -> io::Result<Vec<String>> {
         let results = self.execute_query("INFO FOR DB;")?;
-        Ok(vec![format!("SurrealDB DB info:\n{}", serde_json::to_string_pretty(&results).unwrap_or_default())])
+        Ok(vec![format!(
+            "SurrealDB DB info:\n{}",
+            serde_json::to_string_pretty(&results).unwrap_or_default()
+        )])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{PhaseName, PhaseRecorder, ProgressReporter};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    fn read_request_body(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .or_else(|| line.strip_prefix("Content-Length:"))
+            })
+            .map(str::trim)
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8(request[header_end..header_end + content_length].to_vec()).unwrap()
+    }
+
+    fn spawn_server<F>(request_count: usize, responder: F) -> (String, JoinHandle<()>)
+    where
+        F: Fn(&str) -> (u16, String) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().unwrap();
+                let body = read_request_body(&mut stream);
+                let (status, response_body) = responder(&body);
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Internal Server Error"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                )
+                .unwrap();
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn successful_response(sql: &str) -> (u16, String) {
+        let result = if let Some(id) = sql
+            .split("WHERE _id = '")
+            .nth(1)
+            .and_then(|value| value.split('\'').next())
+        {
+            serde_json::json!([{"_id": id, "quantity": 1}])
+        } else if sql.starts_with("DELETE FROM book") {
+            serde_json::json!([{"_id": "deleted"}])
+        } else if sql.contains("INFO FOR DB") {
+            serde_json::json!({"tables": 2})
+        } else {
+            serde_json::json!([])
+        };
+        (
+            200,
+            serde_json::json!([{"status": "OK", "result": result}]).to_string(),
+        )
+    }
+
+    fn tiny_profile() -> LibraryProfile {
+        LibraryProfile {
+            entity_records: 3,
+            book_records: 6,
+            chunk_size: 2,
+            traversal_queries: 2,
+            point_lookups: 3,
+            range_lookups: 3,
+            delete_by_id_operations: 2,
+            purge_buckets: 2,
+        }
+    }
 
     #[test]
     fn surrealdb_target_initializes_with_parameters() {
@@ -409,5 +515,129 @@ mod tests {
         )
         .expect("target should initialize");
         assert_eq!(target.name(), "SurrealDB (Multi-Model Document Comparison)");
+    }
+
+    #[test]
+    fn surrealdb_target_runs_every_benchmark_phase_against_http_fake() {
+        let (uri, handle) = spawn_server(24, successful_response);
+        let mut target = SurrealdbTarget::new(
+            uri,
+            "benchmark_ns".to_string(),
+            "benchmark_db".to_string(),
+            Some("root".to_string()),
+            Some("secret".to_string()),
+        )
+        .unwrap();
+        let profile = tiny_profile();
+        let progress = ProgressReporter::new(false);
+
+        target.provision_schema(&profile, &progress).unwrap();
+
+        let mut ingestion = PhaseRecorder::new(PhaseName::MassiveIngestion);
+        assert_eq!(
+            target
+                .massive_ingestion(&profile, &mut ingestion, &progress)
+                .unwrap(),
+            9
+        );
+
+        let mut indexes = PhaseRecorder::new(PhaseName::IndexMutation);
+        assert_eq!(
+            target
+                .index_mutation(&profile, &mut indexes, &progress)
+                .unwrap(),
+            3
+        );
+
+        let mut points = PhaseRecorder::new(PhaseName::PointLookup);
+        assert_eq!(
+            target
+                .point_lookup(&profile, &mut points, &progress)
+                .unwrap(),
+            3
+        );
+
+        let mut ranges = PhaseRecorder::new(PhaseName::RangeLookup);
+        assert_eq!(
+            target
+                .range_lookup(&profile, &mut ranges, &progress)
+                .unwrap(),
+            3
+        );
+
+        let mut traversals = PhaseRecorder::new(PhaseName::ComplexTraversal);
+        assert_eq!(
+            target
+                .complex_traversal(&profile, &mut traversals, &progress)
+                .unwrap(),
+            2
+        );
+
+        let mut deletes = PhaseRecorder::new(PhaseName::DeleteById);
+        assert_eq!(
+            target
+                .delete_by_id(&profile, &mut deletes, &progress)
+                .unwrap(),
+            2
+        );
+
+        let mut purge = PhaseRecorder::new(PhaseName::TargetedPurge);
+        assert_eq!(
+            target
+                .targeted_purge(&profile, &mut purge, &progress)
+                .unwrap(),
+            3
+        );
+
+        let mut compaction = PhaseRecorder::new(PhaseName::Compaction);
+        assert_eq!(
+            target
+                .compaction(&profile, &mut compaction, &progress)
+                .unwrap(),
+            1
+        );
+
+        target.flush().unwrap();
+        assert!(target.storage_footprint_bytes().unwrap() > 0);
+        assert_eq!(target.storage_diagnostics().unwrap().len(), 1);
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn surrealdb_query_response_validation_covers_error_shapes() {
+        let cases = [
+            (
+                500,
+                serde_json::json!({"error": "offline"}).to_string(),
+                ErrorKind::Other,
+            ),
+            (
+                200,
+                serde_json::json!([{"status": "ERR", "detail": "bad query"}]).to_string(),
+                ErrorKind::InvalidData,
+            ),
+            (200, "not-json".to_string(), ErrorKind::Other),
+        ];
+
+        for (status, body, expected_kind) in cases {
+            let (uri, handle) = spawn_server(1, move |_| (status, body.clone()));
+            let target =
+                SurrealdbTarget::new(uri, "ns".to_string(), "db".to_string(), None, None).unwrap();
+            assert_eq!(
+                target.execute_query("RETURN 1").unwrap_err().kind(),
+                expected_kind
+            );
+            handle.join().unwrap();
+        }
+
+        let (uri, handle) = spawn_server(1, |_| (200, serde_json::json!({"value": 1}).to_string()));
+        let target =
+            SurrealdbTarget::new(uri, "ns".to_string(), "db".to_string(), None, None).unwrap();
+        assert_eq!(
+            target.execute_query("RETURN 1").unwrap(),
+            vec![serde_json::json!({"value": 1})]
+        );
+        handle.join().unwrap();
     }
 }

@@ -159,3 +159,98 @@ impl ConnectionTarget {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_driver_kind() {
+        assert!(DriverKind::Embedded.requires_embedded_engine());
+        assert!(!DriverKind::Network.requires_embedded_engine());
+        assert!(!DriverKind::UnixSocket.requires_embedded_engine());
+
+        assert!(!DriverKind::Embedded.uses_socket_transport());
+        assert!(DriverKind::Network.uses_socket_transport());
+        assert!(DriverKind::UnixSocket.uses_socket_transport());
+    }
+
+    #[test]
+    fn test_connection_target_parsing() {
+        assert_eq!(
+            ConnectionTarget::parse("wardrobe://local/tmp/db").unwrap(),
+            ConnectionTarget::EmbeddedPath(PathBuf::from("tmp/db"))
+        );
+        assert_eq!(
+            ConnectionTarget::parse("wardrobe+file:///tmp/db").unwrap(),
+            ConnectionTarget::EmbeddedPath(PathBuf::from("/tmp/db"))
+        );
+        assert_eq!(
+            ConnectionTarget::parse("file:///tmp/db").unwrap(),
+            ConnectionTarget::EmbeddedPath(PathBuf::from("/tmp/db"))
+        );
+        assert_eq!(
+            ConnectionTarget::parse("wardrobe+unix:///tmp/wardrobe.sock").unwrap(),
+            ConnectionTarget::UnixSocket {
+                path: PathBuf::from("/tmp/wardrobe.sock")
+            }
+        );
+        assert_eq!(
+            ConnectionTarget::parse("wardrobe://unix/tmp/wardrobe.sock").unwrap(),
+            ConnectionTarget::UnixSocket {
+                path: PathBuf::from("tmp/wardrobe.sock")
+            }
+        );
+        assert_eq!(
+            ConnectionTarget::parse("wardrobe://localhost:24842").unwrap(),
+            ConnectionTarget::Network {
+                host: "localhost".to_string(),
+                port: 24842
+            }
+        );
+        assert_eq!(
+            ConnectionTarget::parse("wardrobe://127.0.0.1").unwrap(),
+            ConnectionTarget::Network {
+                host: "127.0.0.1".to_string(),
+                port: DEFAULT_NETWORK_PORT
+            }
+        );
+        assert_eq!(
+            ConnectionTarget::parse("/var/lib/wardrobe").unwrap(),
+            ConnectionTarget::EmbeddedPath(PathBuf::from("/var/lib/wardrobe"))
+        );
+
+        assert!(ConnectionTarget::parse("").is_err());
+        assert!(ConnectionTarget::parse("   ").is_err());
+        assert!(ConnectionTarget::parse("wardrobe://local/").is_err());
+        assert!(ConnectionTarget::parse("wardrobe+unix://").is_err());
+        assert!(ConnectionTarget::parse("wardrobe://").is_err());
+        assert!(ConnectionTarget::parse("wardrobe://localhost/path").is_err());
+        assert!(ConnectionTarget::parse("wardrobe://:24842").is_err());
+        assert!(ConnectionTarget::parse("wardrobe://localhost:invalid").is_err());
+        assert!(ConnectionTarget::parse("unknown+scheme://test").is_err());
+    }
+
+    #[test]
+    fn test_target_helper_methods() {
+        let embedded = ConnectionTarget::EmbeddedPath(PathBuf::from("/tmp"));
+        assert_eq!(embedded.driver_kind(), DriverKind::Embedded);
+        assert!(embedded.requires_embedded_engine());
+        assert!(!embedded.uses_socket_transport());
+
+        let net = ConnectionTarget::Network {
+            host: "localhost".to_string(),
+            port: 24842,
+        };
+        assert_eq!(net.driver_kind(), DriverKind::Network);
+        assert!(!net.requires_embedded_engine());
+        assert!(net.uses_socket_transport());
+
+        let unix = ConnectionTarget::UnixSocket {
+            path: PathBuf::from("/tmp/sock"),
+        };
+        assert_eq!(unix.driver_kind(), DriverKind::UnixSocket);
+        assert!(!unix.requires_embedded_engine());
+        assert!(unix.uses_socket_transport());
+    }
+}

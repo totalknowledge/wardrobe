@@ -46,9 +46,9 @@ jobs:
         run: >
           cargo llvm-cov
           --workspace
-          --exclude app
+          --exclude-from-report armoire
           --lcov
           --output-path coverage.lcov
-          --fail-under-lines 80
-          --fail-under-functions 80
-          --fail-under-regions 80
+          --fail-under-lines 83
+          --fail-under-functions 83
+          --fail-under-regions 83

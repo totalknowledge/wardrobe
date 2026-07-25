@@ -122,3 +122,39 @@ pub(crate) fn database_path_from_name(
 fn is_reserved_or_empty_segment(segment: &str) -> bool {
     segment.is_empty() || segment == "." || segment == ".." || segment == ".catalog"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_name_validations() {
+        assert!(validate_database_name("mydb").is_ok());
+        assert!(validate_database_name("").is_err());
+        assert!(validate_database_name("/mydb").is_err());
+        assert!(validate_database_name("my\\db").is_err());
+        assert!(validate_database_name("my/./db").is_err());
+        assert!(validate_database_name("my/.catalog/db").is_err());
+
+        assert!(validate_schema_name("public").is_ok());
+        assert!(validate_schema_name("my_index").is_err());
+        assert!(validate_schema_name("my_meta").is_err());
+        assert!(validate_schema_name("foo/bar").is_err());
+
+        assert!(validate_drawer_name("users").is_ok());
+        assert!(validate_tenant_identifier("tenant1").is_ok());
+
+        assert!(validate_catalog_location("loc1/loc2").is_ok());
+        assert!(validate_catalog_location("").is_err());
+        assert!(validate_catalog_location("/loc").is_err());
+
+        assert!(validate_storage_coordinate_component("drawer", "valid").is_ok());
+        assert!(validate_storage_coordinate_component("drawer", "").is_err());
+        assert!(validate_storage_coordinate_component("drawer", "a/b").is_err());
+
+        assert_eq!(catalog_location_path(Path::new("/root"), "loc"), PathBuf::from("/root/loc"));
+        assert_eq!(database_path_from_name(Path::new("/root"), "db1").unwrap(), PathBuf::from("/root/db1"));
+        assert!(database_path_from_name(Path::new("/root"), "").is_err());
+        assert!(database_path_from_name(Path::new("/root"), "..").is_err());
+    }
+}

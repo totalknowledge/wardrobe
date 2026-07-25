@@ -92,3 +92,32 @@ impl UnixSocketTransport {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_unix_socket_transport() {
+        use std::os::unix::net::UnixListener;
+        let temp_dir = std::env::temp_dir();
+        let sock_path = temp_dir.join(format!("test_sock_{}.sock", uuid::Uuid::new_v4()));
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let frame = ProtocolFrame::read_from_stream(&mut stream).unwrap();
+            assert_eq!(frame.opcode, ProtocolOpcode::Command);
+            let resp_frame = ProtocolFrame::new(ProtocolOpcode::Result, b"{\"status\":\"ok\"}".to_vec());
+            resp_frame.write_to_stream(&mut stream).unwrap();
+        });
+
+        let transport = UnixSocketTransport::connect(sock_path.clone()).unwrap();
+        let res = transport.execute(&serde_json::json!({"op": "ping"})).unwrap();
+        assert_eq!(res["status"], "ok");
+
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(sock_path);
+    }
+}

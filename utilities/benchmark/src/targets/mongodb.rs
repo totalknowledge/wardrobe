@@ -462,3 +462,195 @@ pub(crate) fn mongo_documents(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{PhaseName, PhaseRecorder, ProgressReporter};
+
+    #[test]
+    fn mongodb_target_covers_empty_work_and_unavailable_server_paths() {
+        assert!(MongoTarget::new("not-a-mongodb-uri".to_string(), "bench".to_string()).is_err());
+
+        let client = MongoClient::with_uri_str(
+            "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1&connectTimeoutMS=1",
+        )
+        .expect("local unavailable-server URI should parse");
+        let mut target = MongoTarget {
+            client,
+            database: "benchmark_test".to_string(),
+        };
+        let profile = LibraryProfile {
+            entity_records: 0,
+            book_records: 0,
+            chunk_size: 1,
+            traversal_queries: 0,
+            point_lookups: 0,
+            range_lookups: 0,
+            delete_by_id_operations: 0,
+            purge_buckets: 1,
+        };
+        let progress = ProgressReporter::new(false);
+
+        assert_eq!(target.name(), "MongoDB (Document Store Base Comparison)");
+        assert_eq!(target.entities().name(), "entities");
+        assert_eq!(target.books().name(), "books");
+        assert!(target.insert_documents(ENTITY_DRAWER, Vec::new()).is_ok());
+        assert!(target.insert_documents(BOOK_DRAWER, Vec::new()).is_ok());
+        assert_eq!(
+            target
+                .massive_ingestion(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::MassiveIngestion),
+                    &progress,
+                )
+                .expect("empty ingestion should not contact MongoDB"),
+            0
+        );
+        assert_eq!(
+            target
+                .point_lookup(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::PointLookup),
+                    &progress,
+                )
+                .expect("empty point lookup should not contact MongoDB"),
+            0
+        );
+        assert_eq!(
+            target
+                .range_lookup(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::RangeLookup),
+                    &progress,
+                )
+                .expect("empty range lookup should not contact MongoDB"),
+            0
+        );
+        assert_eq!(
+            target
+                .complex_traversal(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::ComplexTraversal),
+                    &progress,
+                )
+                .expect("empty traversal should not contact MongoDB"),
+            0
+        );
+        assert_eq!(
+            target
+                .delete_by_id(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::DeleteById),
+                    &progress,
+                )
+                .expect("empty deletion should not contact MongoDB"),
+            0
+        );
+
+        assert!(target.provision_schema(&profile, &progress).is_err());
+        assert!(
+            target
+                .index_mutation(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::IndexMutation),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(
+            target
+                .targeted_purge(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::TargetedPurge),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(
+            target
+                .compaction(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::Compaction),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(target.flush().is_err());
+        assert!(target.storage_footprint_bytes().is_err());
+
+        assert!(
+            MongoTarget::new(
+                "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1&connectTimeoutMS=1".to_string(),
+                "benchmark_test".to_string(),
+            )
+            .is_err()
+        );
+        assert!(
+            target
+                .insert_documents(ENTITY_DRAWER, vec![doc! { "_id": "entity" }])
+                .is_err()
+        );
+        assert!(
+            target
+                .insert_documents(BOOK_DRAWER, vec![doc! { "_id": "book" }])
+                .is_err()
+        );
+
+        let work_profile = LibraryProfile {
+            entity_records: 1,
+            book_records: 2,
+            chunk_size: 1,
+            traversal_queries: 1,
+            point_lookups: 1,
+            range_lookups: 1,
+            delete_by_id_operations: 1,
+            purge_buckets: 2,
+        };
+        assert!(
+            target
+                .massive_ingestion(
+                    &work_profile,
+                    &mut PhaseRecorder::new(PhaseName::MassiveIngestion),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(
+            target
+                .point_lookup(
+                    &work_profile,
+                    &mut PhaseRecorder::new(PhaseName::PointLookup),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(
+            target
+                .range_lookup(
+                    &work_profile,
+                    &mut PhaseRecorder::new(PhaseName::RangeLookup),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(
+            target
+                .complex_traversal(
+                    &work_profile,
+                    &mut PhaseRecorder::new(PhaseName::ComplexTraversal),
+                    &progress,
+                )
+                .is_err()
+        );
+        assert!(
+            target
+                .delete_by_id(
+                    &work_profile,
+                    &mut PhaseRecorder::new(PhaseName::DeleteById),
+                    &progress,
+                )
+                .is_err()
+        );
+    }
+}

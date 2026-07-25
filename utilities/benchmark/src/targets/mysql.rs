@@ -9,7 +9,7 @@ use crate::config::{
 use crate::engine::{PhaseRecorder, ProgressReporter, report_record_progress};
 use crate::utils::{chunk_ranges, to_io_error};
 use mysql::prelude::Queryable;
-use mysql::{OptsBuilder, Pool, PooledConn, Row};
+use mysql::{OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, Row};
 use serde_json::Value;
 use std::env;
 use std::io::{self, Error, ErrorKind};
@@ -60,7 +60,11 @@ impl MySqlTarget {
             },
             None => None,
         };
-        let mut builder = OptsBuilder::new().ip_or_hostname(Some(host)).tcp_port(port);
+        let mut builder = OptsBuilder::new()
+            .ip_or_hostname(Some(host))
+            .tcp_port(port)
+            .prefer_socket(false)
+            .pool_opts(PoolOpts::new().with_constraints(PoolConstraints::new_const::<1, 1>()));
         builder = builder.user(Some(resolved_user));
         if let Some(password) = password {
             builder = builder.pass(Some(password));
@@ -521,4 +525,423 @@ pub(crate) fn mysql_book_insert(profile: &LibraryProfile, start: usize, end: usi
 
 pub(crate) fn mysql_identifier(value: &str) -> String {
     value.replace('`', "``")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{PhaseName, PhaseRecorder, ProgressReporter};
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    fn write_packet(stream: &mut TcpStream, sequence: u8, payload: &[u8]) {
+        let length = payload.len();
+        stream
+            .write_all(&[
+                length as u8,
+                (length >> 8) as u8,
+                (length >> 16) as u8,
+                sequence,
+            ])
+            .expect("write MySQL packet header");
+        stream.write_all(payload).expect("write MySQL packet");
+    }
+
+    fn read_packet(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+        let mut header = [0_u8; 4];
+        stream.read_exact(&mut header)?;
+        let length =
+            header[0] as usize | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
+        let mut payload = vec![0_u8; length];
+        stream.read_exact(&mut payload)?;
+        Ok(payload)
+    }
+
+    fn ok_packet(stream: &mut TcpStream, sequence: u8) {
+        write_packet(stream, sequence, &[0, 0, 0, 2, 0, 0, 0]);
+    }
+
+    fn affected_ok_packet(stream: &mut TcpStream, sequence: u8) {
+        write_packet(stream, sequence, &[0, 1, 0, 2, 0, 0, 0]);
+    }
+
+    fn eof_packet(stream: &mut TcpStream, sequence: u8) {
+        write_packet(stream, sequence, &[0xfe, 0, 0, 2, 0]);
+    }
+
+    fn lenenc(payload: &mut Vec<u8>, value: &[u8]) {
+        assert!(value.len() < 251);
+        payload.push(value.len() as u8);
+        payload.extend_from_slice(value);
+    }
+
+    fn scalar_result(stream: &mut TcpStream, name: &str, value: &str) {
+        write_packet(stream, 1, &[1]);
+        write_packet(stream, 2, &column_definition(name, 8));
+        eof_packet(stream, 3);
+        let mut row = Vec::new();
+        lenenc(&mut row, value.as_bytes());
+        write_packet(stream, 4, &row);
+        eof_packet(stream, 5);
+    }
+
+    fn column_definition(name: &str, column_type: u8) -> Vec<u8> {
+        let mut column = Vec::new();
+        for part in [b"def".as_slice(), b"", b"", b"", name.as_bytes(), b""] {
+            lenenc(&mut column, part);
+        }
+        column.push(0x0c);
+        column.extend_from_slice(&0x21_u16.to_le_bytes());
+        column.extend_from_slice(&20_u32.to_le_bytes());
+        column.push(column_type);
+        column.extend_from_slice(&(if column_type == 8 { 0x20_u16 } else { 0_u16 }).to_le_bytes());
+        column.push(0);
+        column.extend_from_slice(&[0, 0]);
+        column
+    }
+
+    fn prepared_columns(query: &str) -> Vec<(&'static str, u8)> {
+        if query.contains("SELECT id, isbn, title") {
+            vec![
+                ("id", 253),
+                ("isbn", 253),
+                ("title", 253),
+                ("author_id", 253),
+                ("editor_id", 253),
+                ("branch", 253),
+                ("quantity", 8),
+                ("purge_bucket", 8),
+            ]
+        } else if query.contains("SELECT COUNT(*)") {
+            vec![("COUNT(*)", 8)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn prepare_response(stream: &mut TcpStream, statement_id: u32, query: &str) {
+        let columns = prepared_columns(query);
+        let parameters = query.matches('?').count();
+        let mut response = vec![0];
+        response.extend_from_slice(&statement_id.to_le_bytes());
+        response.extend_from_slice(&(columns.len() as u16).to_le_bytes());
+        response.extend_from_slice(&(parameters as u16).to_le_bytes());
+        response.push(0);
+        response.extend_from_slice(&0_u16.to_le_bytes());
+        write_packet(stream, 1, &response);
+        let mut sequence = 2_u8;
+        for index in 0..parameters {
+            write_packet(
+                stream,
+                sequence,
+                &column_definition(&format!("parameter_{index}"), 253),
+            );
+            sequence = sequence.saturating_add(1);
+        }
+        if parameters > 0 {
+            eof_packet(stream, sequence);
+            sequence = sequence.saturating_add(1);
+        }
+        for (name, column_type) in columns {
+            write_packet(stream, sequence, &column_definition(name, column_type));
+            sequence = sequence.saturating_add(1);
+        }
+        if !prepared_columns(query).is_empty() {
+            eof_packet(stream, sequence);
+        }
+    }
+
+    fn binary_result(stream: &mut TcpStream, columns: &[(&str, u8)], values: &[Vec<u8>]) {
+        write_packet(stream, 1, &[columns.len() as u8]);
+        let mut sequence = 2_u8;
+        for (name, column_type) in columns {
+            write_packet(stream, sequence, &column_definition(name, *column_type));
+            sequence = sequence.saturating_add(1);
+        }
+        eof_packet(stream, sequence);
+        sequence = sequence.saturating_add(1);
+        let mut row = vec![0; 1 + (columns.len() + 9) / 8];
+        for ((_, column_type), value) in columns.iter().zip(values) {
+            if *column_type == 8 {
+                row.extend_from_slice(value);
+            } else {
+                lenenc(&mut row, value);
+            }
+        }
+        write_packet(stream, sequence, &row);
+        eof_packet(stream, sequence.saturating_add(1));
+    }
+
+    fn prepared_execute(stream: &mut TcpStream, query: &str, point_book: &Value) {
+        let columns = prepared_columns(query);
+        if query.contains("SELECT id, isbn, title") {
+            let mut values = ["_id", "isbn", "title", "author_id", "editor_id", "branch"]
+                .into_iter()
+                .map(|field| {
+                    point_book[field]
+                        .as_str()
+                        .expect("MySQL point string")
+                        .as_bytes()
+                        .to_vec()
+                })
+                .collect::<Vec<_>>();
+            values.push(
+                point_book["quantity"]
+                    .as_u64()
+                    .expect("MySQL point quantity")
+                    .to_le_bytes()
+                    .to_vec(),
+            );
+            values.push(
+                point_book["purge_bucket"]
+                    .as_u64()
+                    .expect("MySQL point purge bucket")
+                    .to_le_bytes()
+                    .to_vec(),
+            );
+            binary_result(stream, &columns, &values);
+        } else if query.contains("SELECT COUNT(*)") {
+            binary_result(stream, &columns, &[0_u64.to_le_bytes().to_vec()]);
+        } else if query.starts_with("DELETE") {
+            affected_ok_packet(stream, 1);
+        } else {
+            ok_packet(stream, 1);
+        }
+    }
+
+    fn serve_mysql(mut stream: TcpStream, point_book: Value) {
+        let capabilities = 0x0008_A205_u32;
+        let mut greeting = vec![10];
+        greeting.extend_from_slice(b"8.0.36\0");
+        greeting.extend_from_slice(&1_u32.to_le_bytes());
+        greeting.extend_from_slice(b"12345678");
+        greeting.push(0);
+        greeting.extend_from_slice(&(capabilities as u16).to_le_bytes());
+        greeting.push(0x21);
+        greeting.extend_from_slice(&2_u16.to_le_bytes());
+        greeting.extend_from_slice(&((capabilities >> 16) as u16).to_le_bytes());
+        greeting.push(21);
+        greeting.extend_from_slice(&[0; 10]);
+        greeting.extend_from_slice(b"abcdefghijkl\0");
+        greeting.extend_from_slice(b"mysql_native_password\0");
+        write_packet(&mut stream, 0, &greeting);
+
+        read_packet(&mut stream).expect("read MySQL handshake response");
+        ok_packet(&mut stream, 2);
+
+        let mut statements = HashMap::<u32, String>::new();
+        let mut next_statement_id = 1_u32;
+        while let Ok(payload) = read_packet(&mut stream) {
+            if payload.is_empty() {
+                continue;
+            }
+            match payload[0] {
+                0x01 => break,
+                0x03 => {
+                    let query =
+                        String::from_utf8(payload[1..].to_vec()).expect("MySQL query UTF-8");
+                    if query.contains("@@max_allowed_packet") {
+                        scalar_result(&mut stream, "@@max_allowed_packet", "67108864");
+                    } else if query.contains("@@socket") {
+                        scalar_result(
+                            &mut stream,
+                            "@@socket",
+                            "/tmp/wardrobe-benchmark-missing-mysql.sock",
+                        );
+                    } else if query.contains("@@wait_timeout") {
+                        scalar_result(&mut stream, "@@wait_timeout", "28800");
+                    } else if query.contains("COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH)") {
+                        scalar_result(&mut stream, "storage_bytes", "4096");
+                    } else {
+                        ok_packet(&mut stream, 1);
+                    }
+                }
+                0x16 => {
+                    let query = String::from_utf8(payload[1..].to_vec())
+                        .expect("MySQL prepared query UTF-8");
+                    let statement_id = next_statement_id;
+                    next_statement_id = next_statement_id.saturating_add(1);
+                    prepare_response(&mut stream, statement_id, &query);
+                    statements.insert(statement_id, query);
+                }
+                0x17 => {
+                    let statement_id =
+                        u32::from_le_bytes(payload[1..5].try_into().expect("statement ID"));
+                    prepared_execute(
+                        &mut stream,
+                        statements.get(&statement_id).expect("prepared statement"),
+                        &point_book,
+                    );
+                }
+                0x19 => {
+                    let statement_id =
+                        u32::from_le_bytes(payload[1..5].try_into().expect("closed statement ID"));
+                    statements.remove(&statement_id);
+                }
+                0x0e | 0x1f => ok_packet(&mut stream, 1),
+                command => panic!("unexpected MySQL command {command:#x}"),
+            }
+        }
+    }
+
+    fn spawn_mysql(point_book: Value) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind MySQL fake");
+        let port = listener.local_addr().expect("MySQL fake address").port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept MySQL client");
+            serve_mysql(stream, point_book);
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn mysql_target_runs_benchmark_phases_against_wire_fake() {
+        let profile = LibraryProfile {
+            entity_records: 2,
+            book_records: 3,
+            chunk_size: 2,
+            traversal_queries: 1,
+            point_lookups: 1,
+            range_lookups: 1,
+            delete_by_id_operations: 1,
+            purge_buckets: 2,
+        };
+        let point_id = profile
+            .point_lookup_book_ids()
+            .into_iter()
+            .next()
+            .expect("MySQL point lookup ID");
+        let point_index = point_id
+            .strip_prefix("book_")
+            .expect("MySQL book ID prefix")
+            .parse::<usize>()
+            .expect("MySQL book ID number");
+        let (port, server) = spawn_mysql(profile.book_payload(point_index));
+        let mut target = MySqlTarget::new(
+            "127.0.0.1".to_string(),
+            port,
+            "benchmark".to_string(),
+            Some("benchmark".to_string()),
+            Some(DEFAULT_MYSQL_PASSWORD_ENV.to_string()),
+        )
+        .expect("connect to MySQL wire fake");
+        let progress = ProgressReporter::new(false);
+
+        assert_eq!(
+            target.name(),
+            "MySQL / MariaDB (Relational Pointer Base Comparison)"
+        );
+        target
+            .provision_schema(&profile, &progress)
+            .expect("provision MySQL schema");
+        assert_eq!(
+            target
+                .massive_ingestion(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::MassiveIngestion),
+                    &progress,
+                )
+                .expect("run MySQL ingestion"),
+            5
+        );
+        assert_eq!(
+            target
+                .index_mutation(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::IndexMutation),
+                    &progress,
+                )
+                .expect("run MySQL index mutation"),
+            3
+        );
+        assert_eq!(
+            target
+                .point_lookup(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::PointLookup),
+                    &progress,
+                )
+                .expect("run MySQL point lookup"),
+            1
+        );
+        assert_eq!(
+            target
+                .range_lookup(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::RangeLookup),
+                    &progress,
+                )
+                .expect("run MySQL range lookup"),
+            1
+        );
+        assert_eq!(
+            target
+                .complex_traversal(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::ComplexTraversal),
+                    &progress,
+                )
+                .expect("run MySQL traversal"),
+            1
+        );
+        assert_eq!(
+            target
+                .delete_by_id(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::DeleteById),
+                    &progress,
+                )
+                .expect("run MySQL deletion"),
+            1
+        );
+        assert_eq!(
+            target
+                .targeted_purge(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::TargetedPurge),
+                    &progress,
+                )
+                .expect("run MySQL purge"),
+            2
+        );
+        assert_eq!(
+            target
+                .compaction(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::Compaction),
+                    &progress,
+                )
+                .expect("run MySQL compaction"),
+            1
+        );
+        target.flush().expect("flush MySQL");
+        assert_eq!(
+            target
+                .storage_footprint_bytes()
+                .expect("read MySQL storage"),
+            4096
+        );
+
+        drop(target);
+        server.join().expect("join MySQL wire fake");
+    }
+
+    #[test]
+    fn mysql_target_rejects_missing_custom_password_variable() {
+        let variable = format!("WARDROBE_BENCH_MYSQL_MISSING_{}", std::process::id());
+        let error = MySqlTarget::new(
+            "127.0.0.1".to_string(),
+            1,
+            "benchmark".to_string(),
+            Some("benchmark".to_string()),
+            Some(variable.clone()),
+        )
+        .err()
+        .expect("custom missing password variable should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains(&variable));
+    }
 }

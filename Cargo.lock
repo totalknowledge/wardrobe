@@ -104,7 +104,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -450,7 +450,7 @@ name = "basic-usage"
 version = "0.26.725"
 dependencies = [
  "serde_json",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6576,7 +6576,7 @@ dependencies = [
  "rustls-pemfile 2.2.0",
  "serde_json",
  "tokio",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
  "wardrobe-server",
 ]
 
@@ -6585,7 +6585,7 @@ name = "wardrobe-c"
 version = "0.26.725"
 dependencies = [
  "serde_json",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6595,12 +6595,28 @@ dependencies = [
  "atty",
  "serde",
  "serde_json",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "wardrobe-client"
 version = "0.26.725"
+dependencies = [
+ "rcgen",
+ "rustls 0.23.41",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "toml 0.8.2",
+ "uuid",
+ "x509-parser",
+]
+
+[[package]]
+name = "wardrobe-client"
+version = "0.26.725"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "553d7a92fbb9020d14d113e3dc11412baec5bdee4e276765608d7c7646e0d275"
 dependencies = [
  "rcgen",
  "rustls 0.23.41",
@@ -6626,7 +6642,27 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "uuid",
- "wardrobe-client",
+ "wardrobe-client 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
+ "x509-parser",
+]
+
+[[package]]
+name = "wardrobe-embedded"
+version = "0.26.725"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fd402cb99cbe58fd96b0c94cabbf65072147f57189b207e1732d2ae560983e8"
+dependencies = [
+ "bson",
+ "rand 0.10.1",
+ "rcgen",
+ "rustls 0.23.41",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "uuid",
+ "wardrobe-client 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
  "x509-parser",
 ]
 
@@ -6637,7 +6673,7 @@ dependencies = [
  "napi",
  "napi-derive",
  "serde_json",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6647,7 +6683,7 @@ dependencies = [
  "rustls 0.23.41",
  "rustls-pemfile 2.2.0",
  "serde_json",
- "wardrobe-embedded",
+ "wardrobe-embedded 0.26.725 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

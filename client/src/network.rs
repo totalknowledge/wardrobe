@@ -169,3 +169,116 @@ fn tls_connection_error(error: rustls::Error) -> Error {
         format!("Failed to configure TLS connection: {error}"),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+
+    fn spawn_response(
+        opcode: ProtocolOpcode,
+        payload: Vec<u8>,
+    ) -> (u16, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let frame = ProtocolFrame::read_from_stream(&mut stream).unwrap();
+            assert_eq!(frame.opcode, ProtocolOpcode::Command);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&frame.payload).unwrap(),
+                serde_json::json!({"op": "ping"})
+            );
+            ProtocolFrame::new(opcode, payload)
+                .write_to_stream(&mut stream)
+                .unwrap();
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn plain_transport_handles_result_and_protocol_errors() {
+        let cases = [
+            (
+                ProtocolOpcode::Result,
+                br#"{"status":"ok"}"#.to_vec(),
+                None,
+            ),
+            (
+                ProtocolOpcode::Error,
+                b"server rejected command".to_vec(),
+                Some(ErrorKind::Other),
+            ),
+            (
+                ProtocolOpcode::Command,
+                br#"{"unexpected":true}"#.to_vec(),
+                Some(ErrorKind::InvalidData),
+            ),
+            (
+                ProtocolOpcode::Result,
+                b"invalid-json".to_vec(),
+                Some(ErrorKind::InvalidData),
+            ),
+        ];
+
+        for (opcode, payload, expected_error) in cases {
+            let (port, handle) = spawn_response(opcode, payload);
+            let transport =
+                NetworkTransport::connect("127.0.0.1".to_string(), port, None).unwrap();
+            let result = transport.execute(&serde_json::json!({"op": "ping"}));
+            match expected_error {
+                Some(kind) => assert_eq!(result.unwrap_err().kind(), kind),
+                None => assert_eq!(result.unwrap()["status"], "ok"),
+            }
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn transport_and_tls_helpers_report_connection_and_file_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(NetworkTransport::connect("127.0.0.1".to_string(), port, None).is_err());
+
+        let temp_dir = std::env::temp_dir();
+        let suffix = uuid::Uuid::new_v4();
+        let certificate_path = temp_dir.join(format!("wardrobe_empty_certificate_{suffix}.pem"));
+        let key_path = temp_dir.join(format!("wardrobe_empty_key_{suffix}.pem"));
+        fs::write(&certificate_path, []).unwrap();
+        fs::write(&key_path, []).unwrap();
+
+        assert_eq!(
+            load_certificates(&certificate_path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            load_private_key(&key_path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert!(load_certificates(&temp_dir.join(format!("missing_{suffix}.pem"))).is_err());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let _ = listener.accept().unwrap();
+        });
+        let tls = ClientTlsConfig::new(&certificate_path, &certificate_path, &key_path);
+        assert_eq!(
+            NetworkTransport::connect("127.0.0.1".to_string(), port, Some(&tls))
+                .err()
+                .map(|error| error.kind()),
+            Some(ErrorKind::InvalidData)
+        );
+        handle.join().unwrap();
+
+        assert_eq!(
+            tls_connection_error(rustls::Error::General("test".to_string())).kind(),
+            ErrorKind::ConnectionRefused
+        );
+
+        let _ = fs::remove_file(certificate_path);
+        let _ = fs::remove_file(key_path);
+    }
+}

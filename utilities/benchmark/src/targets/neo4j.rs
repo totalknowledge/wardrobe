@@ -607,3 +607,105 @@ pub(crate) fn neo4j_string_field(payload: &Value, field: &str) -> BoltType {
 pub(crate) fn neo4j_i64_field(payload: &Value, field: &str) -> BoltType {
     BoltType::from(payload[field].as_u64().unwrap_or_default() as i64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{PhaseName, PhaseRecorder, ProgressReporter};
+
+    #[test]
+    fn neo4j_target_covers_credentials_and_empty_work_paths() {
+        let missing_password = format!("WARDROBE_BENCH_NEO4J_MISSING_{}", std::process::id());
+        let error = Neo4jTarget::new(
+            "127.0.0.1:1".to_string(),
+            "neo4j".to_string(),
+            "neo4j".to_string(),
+            missing_password.clone(),
+            "test".to_string(),
+        )
+        .err()
+        .expect("custom missing password variable should fail");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains(&missing_password));
+
+        let mut target = Neo4jTarget::new(
+            "127.0.0.1:1".to_string(),
+            "neo4j".to_string(),
+            DEFAULT_NEO4J_USER.to_string(),
+            DEFAULT_NEO4J_PASSWORD_ENV.to_string(),
+            "benchmark-test".to_string(),
+        )
+        .expect("Neo4j connection pool creation should be lazy");
+        let profile = LibraryProfile {
+            entity_records: 0,
+            book_records: 0,
+            chunk_size: 1,
+            traversal_queries: 0,
+            point_lookups: 0,
+            range_lookups: 0,
+            delete_by_id_operations: 0,
+            purge_buckets: 1,
+        };
+        let progress = ProgressReporter::new(false);
+
+        assert_eq!(target.name(), "Neo4j (Graph Database Base Comparison)");
+        assert_eq!(
+            target.entity_rows(&profile, 0, 0),
+            BoltType::List(BoltList::new())
+        );
+        assert_eq!(
+            target.book_rows(&profile, 0, 0),
+            BoltType::List(BoltList::new())
+        );
+        assert_eq!(
+            target
+                .massive_ingestion(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::MassiveIngestion),
+                    &progress,
+                )
+                .expect("empty ingestion should not contact Neo4j"),
+            0
+        );
+        assert_eq!(
+            target
+                .point_lookup(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::PointLookup),
+                    &progress,
+                )
+                .expect("empty point lookup should not contact Neo4j"),
+            0
+        );
+        assert_eq!(
+            target
+                .range_lookup(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::RangeLookup),
+                    &progress,
+                )
+                .expect("empty range lookup should not contact Neo4j"),
+            0
+        );
+        assert_eq!(
+            target
+                .complex_traversal(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::ComplexTraversal),
+                    &progress,
+                )
+                .expect("empty traversal should not contact Neo4j"),
+            0
+        );
+        assert_eq!(
+            target
+                .delete_by_id(
+                    &profile,
+                    &mut PhaseRecorder::new(PhaseName::DeleteById),
+                    &progress,
+                )
+                .expect("empty deletion should not contact Neo4j"),
+            0
+        );
+    }
+}
