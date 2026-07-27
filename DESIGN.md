@@ -16,7 +16,7 @@ The architectural goal is still simple:
 
 > One data model. One command model. One client surface.
 
-`WardrobeEngine` owns local behavior. `WardrobeClient` selects the transport and exposes the same operational surface across embedded and remote execution.
+`WardrobeEngine` owns local embedded behavior. `WardrobeClient` owns TCP and Unix-socket server connections.
 
 ---
 
@@ -26,7 +26,8 @@ The current workspace is organized around the following deliverables and support
 
 | Project | Purpose |
 |---|---|
-| `wardrobe-core` | Storage engine, command model, protocol types, and client facade |
+| `wardrobe-embedded` | Embedded storage engine and command model |
+| `wardrobe-client` | TCP and Unix-socket client and protocol framing |
 | `wardrobe-server` | Standalone daemon that executes the shared command surface remotely |
 | `wardrobe-cli` crate / `wardrobe` binary | Administrative and operational command-line tooling |
 | `@wardrobe/client` / `@wardrobe/embedded` | JavaScript and TypeScript server and embedded packages |
@@ -251,7 +252,7 @@ where `rights` is a non-empty combination of:
 - `d` delete
 - `i` inspect
 
-`WardrobeClient` intentionally refuses `manage_user` calls for embedded targets even though `WardrobeEngine` can execute them locally. That keeps application-facing behavior aligned with the intended deployment boundary while still letting the server use the engine primitive internally.
+`WardrobeClient` accepts only TCP and Unix-socket server targets. `WardrobeEngine` can execute access-control operations directly for local administration and server integration.
 
 Transport authentication and hardening can be layered on top of this, but the current implementation's concrete built-in surface is the authorization registry and its command handlers.
 
@@ -327,7 +328,7 @@ Armoire is a utility rather than a sample. It lives under `utilities/armoire`, u
 
 The workspace does not use one repository-wide license:
 
-- `wardrobe-core`, `wardrobe-cli`, language bindings, and samples use MIT.
+- `wardrobe-embedded`, `wardrobe-client`, `wardrobe-cli`, language bindings, and samples use MIT.
 - `wardrobe-server` uses Business Source License 1.1 with a July 22, 2030 change date to GPL version 2 or later.
 - Armoire uses the Armoire Source-Available Evaluation License and requires a paid commercial license for production or non-evaluation commercial use.
 

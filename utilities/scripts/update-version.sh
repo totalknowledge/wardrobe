@@ -51,14 +51,25 @@ release_year="${year:2:2}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/../.." && pwd -P)"
-core_manifest="$repo_root/core/Cargo.toml"
+embedded_manifest="$repo_root/embedded/Cargo.toml"
+client_manifest="$repo_root/client/Cargo.toml"
 
-current_version="$(
-    sed -n 's/^version = "\([^"]*\)"$/\1/p' "$core_manifest" | head -n 1
+embedded_version="$(
+    sed -n 's/^version = "\([^"]*\)"$/\1/p' "$embedded_manifest" | head -n 1
+)"
+client_version="$(
+    sed -n 's/^version = "\([^"]*\)"$/\1/p' "$client_manifest" | head -n 1
 )"
 
+if [[ "$embedded_version" != "$client_version" ]]; then
+    echo "update-version: embedded and client versions differ" >&2
+    exit 1
+fi
+
+current_version="$embedded_version"
+
 if [[ ! "$current_version" =~ ^([0-9]+)\.[0-9]{2}\.[0-9]{3,4}$ ]]; then
-    echo "update-version: unsupported current version '$current_version' in core/Cargo.toml" >&2
+    echo "update-version: unsupported current version '$current_version' in embedded/Cargo.toml" >&2
     exit 1
 fi
 

@@ -1,6 +1,6 @@
-use crate::connection::{ConnectionTarget, DriverKind};
-use crate::driver::ClientDriver;
-use crate::model::*;
+use crate::wrdb_lib::command::*;
+use crate::wrdb_lib::connection::{ConnectionTarget, DriverKind};
+use crate::wrdb_lib::driver::ClientDriver;
 use serde_json::Value;
 use std::io::Result;
 use std::path::Path;
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_wardrobe_client_unix() {
-        use crate::protocol::{ProtocolFrame, ProtocolOpcode};
+        use crate::wrdb_lib::protocol::{ProtocolFrame, ProtocolOpcode};
         use std::os::unix::net::UnixListener;
 
         let temp_dir = std::env::temp_dir();
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_wardrobe_client_canonical_command_surface() {
-        use crate::protocol::{ProtocolFrame, ProtocolOpcode};
+        use crate::wrdb_lib::protocol::{ProtocolFrame, ProtocolOpcode};
         use std::os::unix::net::UnixListener;
 
         let temp_dir = std::env::temp_dir();

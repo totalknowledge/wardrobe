@@ -21,7 +21,7 @@ The server owns:
 - multi-tenant scoped execution
 - protocol frame handling for request and response messages
 
-The server does not duplicate storage logic. All record handling still lives in `wardrobe-core`.
+The server does not duplicate storage logic. All record handling lives in `wardrobe-embedded`.
 
 ## Build And Run
 
@@ -108,10 +108,13 @@ The simplest client entry point is `WardrobeClient`.
 
 ```rust
 use serde_json::json;
-use wardrobe_embedded::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
+use wardrobe_client::{OperationFilter, OperationOptions, WardrobeClient};
 
 fn main() -> std::io::Result<()> {
-    let client = WardrobeClient::open("wardrobe://127.0.0.1:24842")?;
+    let client = WardrobeClient::open_with_profile(
+        "wardrobe://127.0.0.1:24842",
+        "./profiles/adminuser/profile.toml",
+    )?;
 
     let pointers = client.upsert(
         json!({
@@ -122,16 +125,13 @@ fn main() -> std::io::Result<()> {
         OperationOptions::default(),
     )?;
 
-    let records = match client.read(
+    let records = client.read(
         OperationFilter::drawer("gem"),
         OperationOptions::default(),
-    )? {
-        ReadResult::Records(records) => records,
-        _ => Vec::new(),
-    };
+    )?;
 
-    println!("stored: {pointers:?}");
-    println!("records: {}", records.len());
+    println!("stored: {:?}", pointers.into_pointers());
+    println!("records: {}", records.records.len());
     Ok(())
 }
 ```
@@ -174,7 +174,7 @@ The CLI and the server share the same canonical command vocabulary.
 - `wardrobe-server` hosts the shared daemon
 - `wardrobe` can target embedded paths or remote `wardrobe://` connections
 
-For application code, the primary path is `WardrobeClient` in `wardrobe-core` or the server-only language package for the target ecosystem.
+For Rust application code, use `WardrobeClient` from `wardrobe-client`. Other ecosystems use their server-only client package.
 
 ## Typical Workflow
 
@@ -185,7 +185,8 @@ For application code, the primary path is `WardrobeClient` in `wardrobe-core` or
 
 ## Related Crates
 
-- `wardrobe-core`: embedded engine, client API, command types, protocol types
+- `wardrobe-embedded`: embedded engine and command model
+- `wardrobe-client`: Rust TCP and Unix-socket client and protocol framing
 - `wardrobe-server`: standalone daemon
 - `wardrobe-cli`: package crate that installs the `wardrobe` operational CLI
 - `@wardrobe/client`: pure JavaScript/TypeScript TCP and Unix socket client

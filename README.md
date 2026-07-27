@@ -4,15 +4,20 @@
 
 Current workspace release: `0.26.725`.
 
-Wardrobe is a hierarchical document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally-automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
+Linux AMD64 downloads:
 
-It combines the flexibility of JSON documents with built-in referential integrity, relationship traversal, automatic hydration, cascading operations, and schema validation without requiring separate graph storage or complex object-relational mapping.
+- Wardrobe CLI: [.deb](https://github.com/totalknowledge/wardrobe/releases/download/v0.26.725/wardrobe-cli_0.26.725_amd64.deb) | [.tar.gz](https://github.com/totalknowledge/wardrobe/releases/download/v0.26.725/wardrobe-cli_0.26.725_amd64.tar.gz)
+- Wardrobe Server: [.deb](https://github.com/totalknowledge/wardrobe/releases/download/v0.26.725/wardrobe-server_0.26.725_amd64.deb) | [.tar.gz](https://github.com/totalknowledge/wardrobe/releases/download/v0.26.725/wardrobe-server_0.26.725_amd64.tar.gz)
 
-Written in Rust, Wardrobe can run directly inside your application as an embedded database or as a standalone server while exposing the same API in both deployment models. Applications can move from embedded development to client/server deployment without rewriting their data access layer.
+Wardrobe is a BSON document database with native relationship support, designed to bridge the gap between traditional document stores, relational databases, and graph databases. Complex object graphs are stored naturally, automatically separating embedded documents from related entities while preserving relationships, referential integrity, and intuitive traversal.
+
+It combines the flexibility of BSON documents with built-in referential integrity, relationship traversal, automatic hydration, cascading operations, and document validation without requiring separate graph storage or complex object-relational mapping.
+
+Written in Rust, Wardrobe can run directly inside your application as an embedded database or as a standalone server. The separate embedded and client crates expose the same canonical operation vocabulary without duplicating the storage engine.
 
 Unlike many document databases that treat references as ordinary strings, Wardrobe understands relationships between documents. References can participate in integrity validation, automatic object hydration, virtual relationships, cascading updates and deletes, and efficient traversal while remaining simple fields inside your documents.
 
-Documents are organized hierarchically into Wardrobes, Bays, Drawers, and Documents, providing an intuitive logical structure that maps directly onto the on-disk storage layout. This transparent organization makes applications easier to understand, navigate, back up, and administer than systems built around opaque storage engines.
+Wardrobes, bays, and drawers are separate storage scopes, not a document hierarchy. A wardrobe is analogous to the database scope used by other systems; a bay is a namespace-like scope; and a drawer is the document container, comparable to a MongoDB collection or relational table. Documents live in drawers and can remain embedded or participate in relationships.
 
 Under the hood, Wardrobe stores documents in versioned binary record files backed by native indexes, write-ahead logging, crash recovery, archive-based backup and restore, online compaction, and bounded in-memory caching. The result is a lightweight storage engine that requires no external services while providing capabilities typically associated with much larger database systems.
 
@@ -22,7 +27,8 @@ Whether you're building desktop software, embedded systems, developer tools, gam
 
 ```text
 wardrobe/
-  core/                  Embedded engine, client facade, command model, and protocol
+  client/                TCP and Unix-socket client, connection model, and protocol framing
+  embedded/              Embedded engine, storage, and command model
   cli/                   Command-line administration and operations
   server/                Standalone TCP and Unix-socket daemon
   bindings/              C, JavaScript/TypeScript, and Python bindings
@@ -34,47 +40,42 @@ wardrobe/
 
 ## Terminology
 
-The CLI and end-user examples use user-facing structural names:
+Wardrobe uses one structural vocabulary across the Rust API, CLI, protocol, bindings, and end-user documentation:
 
 - `wardrobe`
 - `bay`
 - `drawer`
 
-The Rust API keeps the older engine-oriented names:
+These describe the roles familiar from other database systems:
 
-- `database`
-- `schema`
-- `drawer`
+- a wardrobe is a database-like storage scope
+- a bay is a namespace-like storage scope
+- a drawer is a collection- or table-like document container
 
-They map directly:
-
-- CLI `wardrobe` = API `database`
-- CLI `bay` = API `schema`
-- CLI `drawer` = API `drawer`
-
-`tenant` remains a separate routing dimension in both surfaces.
+`tenant` remains a separate routing dimension across all surfaces.
 
 ## Current Public API
 
-`wardrobe-core` currently re-exports these public items:
+`wardrobe-embedded` exports the embedded engine, shared command model, configuration, catalog, and WAL types:
 
-- Core entry points: `WardrobeEngine`, `WardrobeClient`
+- Embedded entry point: `WardrobeEngine`
 - Routing types: `StorageCoordinate`, `StorageScope`, `StorageLocator`, `StorageInventory`
 - Query and result types: `OperationFilter`, `OperationOptions`, `ReturnShape`, `ReadResult`, `UpsertResult`, `DeleteResult`, `InspectResult`, `QueryModifiers`, `OrderDirection`
 - Lifecycle request types: `CreateRequest`, `CreateResult`, `AlterRequest`, `DropRequest`, `CompactRequest`, `CompactMode`, `StatusRequest`, `TypedStatusRequest`, `StatusRequestOutput`, `PermissionRequest`
-- Connection and protocol types: `ConnectionTarget`, `DriverKind`, `DEFAULT_NETWORK_PORT`, `ProtocolFrame`, `ProtocolOpcode`, `PROTOCOL_MAGIC`
 - Inspection, verification, and recovery types: `DrawerInspectionMetrics`, `CheckReport`, `CheckEntry`, `StorageDiagnosis`, `VacuumReport`, `WalVerification`, `BackupArchive`, `BackupArchiveFile`, `RestoreReport`
 - Configuration types: `WardrobeConfig`, `WardrobeEngineBuilder`, `DataConfig`, `NetworkConfig`, `CacheConfig`, `WalConfig`, `TransactionConfig`, `SecurityConfig`
-- Lower-level storage types: `Database`, `Drawer`, `DatabaseReader`, `DatabaseWriter`, `Recycler`, `StorageFormat`, `BsonBinaryFormat`, `NativeBinaryIndexFormat`
+- Low-level storage implementation types are not part of the stable application API.
 - Catalog and WAL types: `CATALOG_FILE_NAME`, `CatalogEntry`, `CatalogRegistry`, `CatalogTenantRoute`, `WAL_FILE_NAME`, `WalEntry`, `WalJournal`, `WalOperation`
 - Application logging types: `ApplicationLoggingConfig`, `ApplicationLogLevel`, `ApplicationLogFormat`, `ApplicationLogDestination`, `ApplicationLogEvent`
+
+`wardrobe-client` exports `WardrobeClient`, `ConnectionTarget`, `DriverKind`, `DEFAULT_NETWORK_PORT`, `ProtocolFrame`, `ProtocolOpcode`, `PROTOCOL_MAGIC`, and the same public command and result model.
 
 The two main application entry points are:
 
 - `WardrobeEngine` for direct embedded access
-- `WardrobeClient` for path, TCP, and Unix socket targets with the same command surface
+- `WardrobeClient` for TCP and Unix socket server connections
 
-`WardrobeClient` and `WardrobeEngine` expose the canonical Wardrobe verbs:
+`WardrobeClient` and `WardrobeEngine` expose the same Rust API, including method signatures, request and result types, and the canonical Wardrobe verbs:
 
 - Record operations: `upsert`, `read`, `count`, `delete`
 - Maintenance and inspection: `compact`, `inspect`, `status`
@@ -90,12 +91,12 @@ The two main application entry points are:
 ```rust
 use serde_json::json;
 use std::io::{Error, ErrorKind};
-use wardrobe_embedded::{OperationFilter, OperationOptions, ReadResult, WardrobeClient};
+use wardrobe_embedded::{OperationFilter, OperationOptions, ReadResult, WardrobeEngine};
 
 fn main() -> std::io::Result<()> {
-    let client = WardrobeClient::open("./wardrobe")?;
+    let engine = WardrobeEngine::open("./wardrobe")?;
 
-    let pointer = client
+    let pointer = engine
         .upsert(
             json!({
                 "_id": "field-service-kit",
@@ -111,7 +112,7 @@ fn main() -> std::io::Result<()> {
         .next()
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, "upsert returned no pointer"))?;
 
-    let record = match client.read(
+    let record = match engine.read(
         OperationFilter::pointer(pointer),
         OperationOptions::default(),
     )? {
@@ -124,15 +125,16 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-### Driver-Selecting Client
+### Server Client
 
 ```rust
-use wardrobe_embedded::WardrobeClient;
+use wardrobe_client::WardrobeClient;
 
 fn connect() -> std::io::Result<()> {
-    let embedded = WardrobeClient::open("./data")?;
-    let embedded_uri = WardrobeClient::open("wardrobe://local/./data")?;
-    let network = WardrobeClient::open("wardrobe://localhost:24842")?;
+    let network = WardrobeClient::open_with_profile(
+        "wardrobe://localhost:24842",
+        "./profiles/adminuser/profile.toml",
+    )?;
 
     #[cfg(unix)]
     let socket = WardrobeClient::open("wardrobe+unix:///tmp/wardrobe.sock")?;
@@ -143,26 +145,23 @@ fn connect() -> std::io::Result<()> {
 
 Supported connection shapes:
 
-- Direct path: `./data`
-- Embedded URI: `wardrobe://local/path/to/data`
-- File URI: `wardrobe+file://path/to/data`
 - TCP URI: `wardrobe://localhost:24842`
 - TCP default port: `wardrobe://localhost` uses `24842`
 - Unix socket URI: `wardrobe+unix:///tmp/wardrobe.sock`
 
-Use `ConnectionTarget::requires_embedded_engine()` or `WardrobeClient::requires_embedded_engine()` when a binding or host application needs to know whether embedded native storage is required.
+Direct filesystem access belongs to `WardrobeEngine` from `wardrobe-embedded`; `wardrobe-client` does not include or duplicate the embedded engine.
 
 ### Filtering, Counting, and Pagination
 
 ```rust
 use serde_json::json;
 use wardrobe_embedded::{
-    OperationFilter, OperationOptions, OrderDirection, ReadResult, WardrobeClient,
+    OperationFilter, OperationOptions, OrderDirection, ReadResult, WardrobeEngine,
 };
 
-fn query(client: &WardrobeClient) -> std::io::Result<()> {
+fn query(engine: &WardrobeEngine) -> std::io::Result<()> {
     let filter = OperationFilter::query_in("device", json!({ "name": "sensor%" }));
-    let records = match client.read(
+    let records = match engine.read(
         filter.clone(),
         OperationOptions::new()
             .order_by("name")
@@ -174,7 +173,7 @@ fn query(client: &WardrobeClient) -> std::io::Result<()> {
         _ => Vec::new(),
     };
 
-    let total = client.count(filter, OperationOptions::default())?;
+    let total = engine.count(filter, OperationOptions::default())?;
 
     println!("matched {} records, returned {}", total, records.len());
     Ok(())
@@ -186,14 +185,14 @@ fn query(client: &WardrobeClient) -> std::io::Result<()> {
 Rust status constructors encode their output type, so inventory calls return direct values without a result enum or variant wrapper:
 
 ```rust
-use wardrobe_embedded::{StatusRequest, WardrobeClient};
+use wardrobe_embedded::{StatusRequest, WardrobeEngine};
 
-fn inventory(client: &WardrobeClient) -> std::io::Result<()> {
-    let databases = client.status(StatusRequest::databases())?;
-    let schemas = client.status(StatusRequest::schemas("publishing-house"))?;
-    let drawers = client.status(StatusRequest::drawers("publishing-house", "public"))?;
+fn inventory(engine: &WardrobeEngine) -> std::io::Result<()> {
+    let wardrobes = engine.status(StatusRequest::wardrobes())?;
+    let bays = engine.status(StatusRequest::bays("publishing-house"))?;
+    let drawers = engine.status(StatusRequest::drawers("publishing-house", "public"))?;
 
-    println!("{} databases, {} schemas, {} drawers", databases.len(), schemas.len(), drawers.len());
+    println!("{} wardrobes, {} bays, {} drawers", wardrobes.len(), bays.len(), drawers.len());
     Ok(())
 }
 ```
@@ -208,7 +207,7 @@ Nested JSON objects and array elements without `_id` remain embedded in their pa
 
 | Ecosystem | Server-backed | Embedded |
 |---|---|---|
-| Rust | `WardrobeClient` with a Wardrobe URI | `WardrobeClient` with a path, or `WardrobeEngine` |
+| Rust | `WardrobeClient` from `wardrobe-client` | `WardrobeEngine` from `wardrobe-embedded` |
 | JavaScript/TypeScript | `@wardrobe/client` | `@wardrobe/embedded` |
 | Python | `wardrobe-client` | `wardrobe-embedded` |
 | C ABI | `wardrobe-c` | `wardrobe-c` |
@@ -219,7 +218,7 @@ The npm packages require Node.js 24 or newer. The Python packages require Python
 
 Licensing is component-specific:
 
-- Core/client engine, CLI, language bindings, and samples: MIT
+- Embedded engine, client, CLI, language bindings, and samples: MIT
 - Wardrobe server: Business Source License 1.1, changing to GPL version 2 or later on July 22, 2030
 - Armoire: Armoire Source-Available Evaluation License (ASEL); production or non-evaluation commercial use requires a paid commercial license
 
@@ -284,22 +283,36 @@ TCP deployments support three security modes:
 
 Embedded use does not open a network listener and therefore does not perform TLS authentication. Filesystem access remains the local authority boundary.
 
-### Managed Security Mode
+### Step-by-Step Managed Connection Setup with Locally Generated Certificates
 
-Initialize managed PKI once, before starting the server:
+This setup uses Wardrobe's managed PKI. `wardrobe-server` creates a private CA and signs the server and client certificates locally; it does not request or depend on a hosted certificate. The commands in this walkthrough use the installed `wardrobe-server` and `wardrobe` binaries from the release packages.
+
+#### 1. Create an instance directory
 
 ```text
-cargo run -p wardrobe-server -- init \
+mkdir wardrobe-instance
+cd wardrobe-instance
+```
+
+The remaining commands use `./data` for Wardrobe data, `./security` for the CA and server keys, and `./profiles` for client credentials. Keep all of these paths persistent.
+
+#### 2. Generate the local CA and server certificate
+
+Choose the DNS name or IP address that clients will use before running this command. This local-only example uses `localhost`:
+
+```text
+wardrobe-server init \
   --data-dir ./data \
   --security-dir ./security \
   --server-name localhost \
-  --server-name wardrobe \
-  --server-name wardrobe.test \
-  --server-ip 127.0.0.1 \
-  --server-ip ::1
+  --server-ip 127.0.0.1
 ```
 
-Initialization fails if a CA or server identity already exists. Normal server startup only loads those files and never regenerates them.
+This creates the private CA under `./security/ca` and a CA-signed server certificate under `./security/server`. Initialization fails rather than replacing an existing CA or server identity. Never copy `ca.key` to a client.
+
+For a LAN connection, replace `localhost` and `127.0.0.1` with the exact DNS name and IP address clients will use. Add every required name or address with another `--server-name` or `--server-ip`.
+
+#### 3. Configure the TCP listener
 
 Create `wardrobe.toml`:
 
@@ -315,14 +328,18 @@ unix_socket_enabled = false
 [security]
 mode = "managed"
 security_dir = "./security"
-server_names = ["localhost", "wardrobe", "wardrobe.test"]
-server_ips = ["127.0.0.1", "::1"]
+server_names = ["localhost"]
+server_ips = ["127.0.0.1"]
 ```
 
-Bootstrap the first administrator through local filesystem access:
+The names and addresses in this file must match the values used to generate the server certificate. For a LAN server, also change `tcp_bind` to the listening interface, such as `192.168.1.20:24842`.
+
+#### 4. Generate and register the first administrator certificate
+
+Run the local bootstrap command before starting the server:
 
 ```text
-cargo run -p wardrobe-server -- bootstrap-admin \
+wardrobe-server bootstrap-admin \
   --data-dir ./data \
   --security-dir ./security \
   --username adminuser \
@@ -330,38 +347,65 @@ cargo run -p wardrobe-server -- bootstrap-admin \
   --output ./security/bootstrap/adminuser
 ```
 
-This creates the `adminuser` Wardrobe user with administrator authority and writes `client.crt`, `client.key`, `ca.crt`, and `profile.toml`. The bootstrap operation is a local server executable command; it is not an unauthenticated network endpoint.
+This single command performs both required operations:
 
-Start the server and connect with the profile:
+1. It generates a client certificate whose URI identity is `wardrobe:user:adminuser`.
+2. It registers that identity in the server's access-control data as the `adminuser` administrator.
+
+It writes `client.crt`, `client.key`, `ca.crt`, and `profile.toml` to `./security/bootstrap/adminuser`. Bootstrap is a local filesystem operation, not an unauthenticated network endpoint.
+
+#### 5. Start the server
+
+Leave this command running:
 
 ```text
-cargo run -p wardrobe-server -- ./wardrobe.toml
-cargo run -p wardrobe-cli -- wardrobe://localhost:24842 \
+wardrobe-server ./wardrobe.toml
+```
+
+Normal startup only loads the certificate files created above. It never silently generates or replaces them.
+
+#### 6. Connect with the administrator certificate
+
+From another terminal in `wardrobe-instance`:
+
+```text
+wardrobe wardrobe://localhost:24842 \
   --profile ./security/bootstrap/adminuser/profile.toml \
   status wardrobes
 ```
 
-Create distinct certificates for each workstation, device, or service. The first CLI argument is the local security directory for identity and certificate administration:
+The profile supplies the client certificate and key, the CA used to verify the server, and the TLS server name. Copy the entire profile directory through an approved secret-transfer channel when connecting from another machine; do not copy the managed CA private key.
+
+#### 7. Generate and register another client certificate
+
+On the host that holds `./security`, issue a separate certificate for the user and device:
 
 ```text
-cargo run -p wardrobe-cli -- ./security identity create adminuser \
-  --device desktop \
-  --server-name localhost \
-  --output ./profiles/adminuser-desktop
-
-cargo run -p wardrobe-cli -- ./security identity enroll adminuser \
+wardrobe ./security identity create alice \
   --device laptop \
   --server-name localhost \
-  --output ./profiles/adminuser-laptop
-
-cargo run -p wardrobe-cli -- ./security identity create nispuk \
-  --service \
-  --device backend \
-  --server-name wardrobe \
-  --output ./profiles/nispuk-backend
+  --output ./profiles/alice-laptop
 ```
 
-Do not share client private keys or profiles. Each person/device or service/device pair should have its own certificate serial.
+The first argument is the local managed security directory; this command does not contact the server. It creates a certificate containing the stable URI identity `wardrobe:user:alice`.
+
+Next, use the administrator connection to register that certificate identity with the server:
+
+```text
+wardrobe wardrobe://localhost:24842 \
+  --profile ./security/bootstrap/adminuser/profile.toml \
+  create user '{"username":"alice","role":"operator","certificate_identities":["wardrobe:user:alice"]}'
+```
+
+Wardrobe registers the certificate's URI identity, not the certificate file or private key. The private key stays with the client. Move the complete `./profiles/alice-laptop` directory to Alice's machine and verify the connection:
+
+```text
+wardrobe wardrobe://localhost:24842 \
+  --profile ./profiles/alice-laptop/profile.toml \
+  status wardrobes
+```
+
+Repeat step 7 for each user/device or service/device pair so every client has its own certificate serial. Use `--service` when issuing a service identity such as `wardrobe:service:nispuk`. Do not share client private keys or profiles.
 
 ### Managed Certificate Lifecycle
 
@@ -637,9 +681,9 @@ Canonical command families:
 
 Behavior notes:
 
-- `status wardrobes` and `create wardrobe` map to the Rust `database` lifecycle APIs
-- `status bays` and `create bay` map to the Rust `schema` lifecycle APIs
-- `create user`, `grant permission`, and `revoke permission` require a remote server-backed target; `WardrobeClient` rejects them for embedded connections
+- `status wardrobes` and `create wardrobe` use the Rust wardrobe lifecycle APIs
+- `status bays` and `create bay` use the Rust bay lifecycle APIs
+- `create user`, `grant permission`, and `revoke permission` require a remote server-backed target; direct embedded administration uses `WardrobeEngine`
 - `compact` can target a wardrobe, a bay, or a single drawer and fans out to the relevant compaction calls
 - `backup` and `restore` operate at wardrobe, bay, or drawer scope
 
@@ -665,8 +709,8 @@ Logs include structured fields such as operation, command, drawer, duration, and
 - Record CRUD, JSON filtering, pointer lookup, and count operations
 - Primary-key indexing plus ordered B+ tree-style secondary indexes for equality and numeric/string range queries
 - Nested document graph hydration and relationship-aware record storage
-- Relationship constraints, delete rules, cascade-delete rules, and drawer schema metadata
-- Scoped routing across tenant, database, schema, and drawer boundaries
+- Relationship constraints, delete rules, cascade-delete rules, and drawer validation metadata
+- Scoped routing across tenant, wardrobe, bay, and drawer boundaries
 - Write-ahead log verification and recovery for incomplete operations
 - Compact maintenance workflows for drawer storage reclamation and migration
 - Structural inspection and sanity checking through `inspect` and `status` surfaces
@@ -679,8 +723,8 @@ Logs include structured fields such as operation, command, drawer, duration, and
 Run the basic Rust sample crate to execute an end-to-end publishing-house flow that:
 
 - Opens a local embedded engine against `./wardrobe`
-- Creates the `publishing-house/public` hierarchy and its publisher, person, and book drawers
-- Uses direct typed database, schema, and drawer status arrays
+- Creates the `publishing-house/public` wardrobe and bay scopes with publisher, person, and book drawers
+- Uses direct typed wardrobe, bay, and drawer status arrays
 - Stores related publisher, author, editor, and book records
 - Exercises filtered reads, pointer reads, counts, temporary record cleanup, and final integrity checks
 

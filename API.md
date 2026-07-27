@@ -1,6 +1,6 @@
 # Wardrobe API
 
-This document describes the canonical public Rust API exposed by `wardrobe-core` in workspace release `0.26.725`.
+This document describes the canonical public Rust API exposed by `wardrobe-embedded` and `wardrobe-client` in workspace release `0.26.725`.
 
 The current operation vocabulary is:
 
@@ -27,7 +27,7 @@ The command protocol is still pre-stable. Serialized `Command` and `CommandResul
 
 WardrobeEngine executes directly against an embedded storage root.
 
-WardrobeClient selects embedded, TCP, or Unix socket transport from a connection string while preserving the same high-level operation model.
+WardrobeClient connects to a Wardrobe server over TCP or a Unix socket. It does not include the embedded storage engine.
 
 ```rust
 impl WardrobeEngine {
@@ -781,7 +781,7 @@ Each value is returned as a Python list directly. The tagged objects above selec
 
 ## Storage Format Compatibility
 
-`wardrobe-core` publicly exports `StorageFormat`, `BsonBinaryFormat`, and `NativeBinaryIndexFormat` for lower-level integrations and tests.
+`wardrobe-embedded` publicly exports `StorageFormat`, `BsonBinaryFormat`, and `NativeBinaryIndexFormat` for lower-level integrations and tests.
 
 - Current record writes use version-2 WRDB frames with a field-count header, presence bitmap, and typed positional values resolved through the drawer field-name map.
 - Version-1 BSON-backed WRDB records remain readable.

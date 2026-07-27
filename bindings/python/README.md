@@ -9,7 +9,7 @@ These packages are binding scaffolds only. Do not publish them until a release s
 ## Packages
 
 - `wardrobe-client`: pure Python TCP and Unix socket client for server-backed Wardrobe connections.
-- `wardrobe-embedded`: native Python extension for embedded local Wardrobe storage using `wardrobe-core` directly.
+- `wardrobe-embedded`: native Python extension for embedded local Wardrobe storage using `wardrobe-embedded` directly.
 
 The package split is intentional for Python:
 

@@ -1,6 +1,5 @@
 use crate::wrdb_lib::application_logging::ApplicationLoggingConfig;
 use crate::wrdb_lib::database::Database;
-use crate::wrdb_lib::transport::connection::DEFAULT_NETWORK_PORT;
 use crate::wrdb_lib::wal::DurabilityPolicy;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -13,6 +12,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+use wardrobe_client::DEFAULT_NETWORK_PORT;
 use x509_parser::extensions::GeneralName;
 use x509_parser::parse_x509_certificate;
 

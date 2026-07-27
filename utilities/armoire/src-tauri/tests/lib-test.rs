@@ -5,3 +5,8 @@ fn library_exports_command_and_service_modules_for_tests() {
     let _create_command = armoire_lib::commands::wardrobe::wardrobe_create_source_location;
     let _test_command = armoire_lib::commands::wardrobe::wardrobe_test_database_access;
 }
+
+#[test]
+fn library_builds_the_configured_tauri_application() {
+    let _app = armoire_lib::build_app();
+}

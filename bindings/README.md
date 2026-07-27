@@ -10,7 +10,7 @@ Wardrobe provides separate network and embedded packages where the host ecosyste
 | Python | `wardrobe-client` | `wardrobe-embedded` |
 | C ABI | `wardrobe-c` | `wardrobe-c` |
 
-Rust applications use `WardrobeClient` from `wardrobe-core`; the connection target selects embedded, TCP, or Unix socket execution.
+Rust applications use `WardrobeClient` from `wardrobe-client` for TCP or Unix-socket connections and `WardrobeEngine` from `wardrobe-embedded` for direct filesystem access.
 
 ## Network Driver Mode
 
@@ -29,7 +29,7 @@ Network packages:
 - Expose the canonical command surface.
 - Serialize requests through Wardrobe `ProtocolFrame` envelopes carrying `Command` and `CommandResult` payloads.
 
-The Rust `ConnectionTarget` and `WardrobeClient` APIs expose `requires_embedded_engine()` and `uses_socket_transport()` so bindings can decide whether a native embedded artifact is needed before loading it.
+The Rust `ConnectionTarget` API classifies filesystem, TCP, and Unix-socket targets. `wardrobe-client` rejects filesystem targets instead of loading or duplicating the native embedded engine.
 
 ## Embedded Driver Mode
 
@@ -44,7 +44,7 @@ file://path/to/data
 
 Embedded mode loads the native storage engine artifact and executes directly in the caller's process.
 
-Embedded packages carry platform-specific native artifacts built from `wardrobe-core`, such as Node-API libraries and Python extensions. They execute commands in the caller's process and do not start or connect to a local Wardrobe server.
+Embedded packages carry platform-specific native artifacts built from `wardrobe-embedded`, such as Node-API libraries and Python extensions. They execute commands in the caller's process and do not start or connect to a local Wardrobe server.
 
 Embedded mode is a good fit for:
 

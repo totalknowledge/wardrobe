@@ -2,7 +2,7 @@
 
 MIT-licensed native Python bindings for embedded Wardrobe storage. Current version: `0.26.725`; Python 3.10 or newer is required.
 
-This package builds a Python extension with PyO3 and calls `wardrobe-core` directly. It does not use the C ABI.
+This package builds a Python extension with PyO3 and calls `wardrobe-embedded` directly. It does not use the C ABI.
 
 ## Usage
 

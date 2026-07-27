@@ -743,6 +743,24 @@ mod tests {
         assert_eq!(drawer_list.len(), 1);
         assert_eq!(drawer_list[0].name, "drawer1");
 
+        assert!(
+            WardrobeDatabaseService::read_records("db1", "bay1", "drawer1")
+                .unwrap()
+                .is_empty()
+        );
+        WardrobeDatabaseService::create_record(
+            "db1",
+            "bay1",
+            "drawer1",
+            serde_json::json!({"_id": "record1", "color": "blue"}),
+        )
+        .unwrap();
+        let records = WardrobeDatabaseService::read_records("db1", "bay1", "drawer1").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["color"], "blue");
+
+        WardrobeDatabaseService::test_connection(&root.to_string_lossy()).unwrap();
+
         let mut lock = ACTIVE_CONNECTION.lock().unwrap();
         *lock = None;
         let _ = fs::remove_dir_all(root);

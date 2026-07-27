@@ -1,15 +1,13 @@
 //! Thin network transport library crate for connecting to Wardrobe database servers.
 
-pub mod connection;
-pub mod driver;
-pub mod model;
-pub mod network;
-pub mod protocol;
-pub mod unix;
 pub mod client;
+pub mod wrdb_lib;
 
-pub use connection::{ConnectionTarget, DriverKind, DEFAULT_NETWORK_PORT};
+pub use client::WardrobeClient;
+pub use wrdb_lib::command::model;
+pub use wrdb_lib::{connection, driver, network, protocol, unix};
+
+pub use connection::{ConnectionTarget, DEFAULT_NETWORK_PORT, DriverKind};
 pub use driver::ClientDriver;
 pub use model::*;
-pub use protocol::{ProtocolFrame, ProtocolOpcode, PROTOCOL_MAGIC};
-pub use client::WardrobeClient;
+pub use protocol::{PROTOCOL_MAGIC, ProtocolFrame, ProtocolOpcode};

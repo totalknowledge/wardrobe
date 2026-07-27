@@ -1,13 +1,13 @@
 # Armoire
 
-Armoire is the Wardrobe database administration desktop utility. It lives under `utilities/armoire`, not `samples`, and its Angular frontend communicates with `wardrobe-core` through a Tauri Rust backend.
+Armoire is the Wardrobe database administration desktop utility. It lives under `utilities/armoire`, not `samples`, and its Angular frontend communicates with `wardrobe-embedded` and `wardrobe-client` through a Tauri Rust backend.
 
 Current version: `0.26.725`.
 
 ## Capabilities
 
 - Create, test, connect to, remember, rename, and remove Wardrobe source locations
-- Connect to embedded paths or Wardrobe server URIs through `WardrobeClient`
+- Connect to embedded paths through `WardrobeEngine` and Wardrobe server URIs through `WardrobeClient`
 - Discover wardrobes/databases, bays/schemas, and drawers using direct status arrays
 - Create wardrobes, bays, and drawers
 - Read drawer records and create records
