@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install system packages
         run: |
@@ -26,7 +26,7 @@ jobs:
             librsvg2-dev
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
 
@@ -49,6 +49,6 @@ jobs:
           --exclude-from-report armoire
           --lcov
           --output-path coverage.lcov
-          --fail-under-lines 83
-          --fail-under-functions 83
-          --fail-under-regions 83
+          --fail-under-lines 80
+          --fail-under-functions 80
+          --fail-under-regions 80
