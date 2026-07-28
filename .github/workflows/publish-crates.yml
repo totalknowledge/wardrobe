@@ -9,6 +9,7 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    environment: crates-environment
     
     steps:
       - name: Checkout repository
