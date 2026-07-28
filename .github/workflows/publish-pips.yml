@@ -1,0 +1,46 @@
+name: Publish Pips
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pips-environment
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build maturin
+
+      - name: Build wardrobe-client
+        working-directory: bindings/python/wardrobe-client
+        run: python -m build
+
+      - name: Build wardrobe-embedded
+        working-directory: bindings/python/wardrobe-embedded
+        run: maturin build --release
+
+      - name: Gather distributions
+        run: |
+          mkdir -p dist
+          cp bindings/python/wardrobe-client/dist/* dist/
+          cp bindings/python/wardrobe-embedded/target/wheels/* dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
